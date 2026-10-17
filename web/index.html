@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sidetone</title>
-<meta name="description" content="SIP call analyzer: ladder diagrams, RTP quality, diagnostics and AI interpretation.">
+<meta name="description" content="SIP softphone and call analyzer for troubleshooting: test calls, ladder diagrams, RTP quality, diagnostics and AI interpretation.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
@@ -17,14 +17,16 @@
     <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true"><rect width="32" height="32" rx="7" class="brand-bg"/><path d="M9 7v18M23 7v18M9 12h14M23 19H9" class="brand-ink" stroke-width="2.4" fill="none" stroke-linecap="round"/></svg>
     <span>Sidetone</span>
   </div>
+  <nav class="views" aria-label="Views">
+    <button type="button" class="view-btn" data-view="phone" aria-current="true">Phone</button>
+    <button type="button" class="view-btn" data-view="analysis" disabled>Analysis</button>
+  </nav>
   <div class="actions">
-    <label class="btn primary" for="file">Open capture<input id="file" type="file" accept=".pcap,.pcapng,.cap" hidden></label>
+    <label class="btn" for="file">Open capture<input id="file" type="file" accept=".pcap,.pcapng,.cap" hidden></label>
     <div class="menu" data-menu="samples">
       <button class="btn" type="button" aria-haspopup="true">Samples</button>
       <div class="menu-list" id="samples-list" role="menu"></div>
     </div>
-    <button class="btn" type="button" id="btn-call" hidden>Test call</button>
-    <button class="btn" type="button" id="btn-phone">Web phone</button>
     <div class="menu" data-menu="export">
       <button class="btn" type="button" aria-haspopup="true" id="btn-export" disabled>Export</button>
       <div class="menu-list" role="menu">
@@ -40,12 +42,84 @@
   <button class="btn ghost" type="button" id="theme" title="Switch light/dark">Theme</button>
 </header>
 
-<main id="app" class="empty">
-  <section class="welcome" id="welcome">
-    <h1>Drop a SIP capture here</h1>
-    <p>pcap or pcapng, from Wireshark, tcpdump, sngrep or an SBC. Analysis runs <span id="where">in this browser</span>; nothing is uploaded.</p>
-    <p class="hint">Or open one of the built-in examples, each with a known problem:</p>
-    <div class="sample-grid" id="sample-grid"></div>
+<main id="app" class="view-phone">
+  <section class="home" aria-label="Phone">
+    <div class="home-grid">
+      <section class="phone-card" aria-label="Phone">
+        <div class="phone-screen">
+          <span class="phone-state" id="p-state">Set up a SIP server to start</span>
+          <input id="p-target" class="phone-number" placeholder="Number or user@host" spellcheck="false" autocomplete="off" aria-label="Number to call">
+          <span class="phone-stats" id="p-stats"></span>
+          <span class="phone-result" id="p-result" hidden></span>
+        </div>
+        <div class="keypad" id="p-keypad" aria-label="Keypad">
+          <button type="button" data-key="1">1<small>&nbsp;</small></button>
+          <button type="button" data-key="2">2<small>ABC</small></button>
+          <button type="button" data-key="3">3<small>DEF</small></button>
+          <button type="button" data-key="4">4<small>GHI</small></button>
+          <button type="button" data-key="5">5<small>JKL</small></button>
+          <button type="button" data-key="6">6<small>MNO</small></button>
+          <button type="button" data-key="7">7<small>PQRS</small></button>
+          <button type="button" data-key="8">8<small>TUV</small></button>
+          <button type="button" data-key="9">9<small>WXYZ</small></button>
+          <button type="button" data-key="*">&lowast;<small>&nbsp;</small></button>
+          <button type="button" data-key="0">0<small>+</small></button>
+          <button type="button" data-key="#">#<small>&nbsp;</small></button>
+        </div>
+        <div class="phone-actions">
+          <button class="pbtn call" type="button" id="p-dial" disabled>Call</button>
+          <button class="pbtn answer" type="button" id="p-answer" hidden>Answer</button>
+          <button class="pbtn hangup" type="button" id="p-hangup" disabled>Hang up</button>
+        </div>
+        <button class="linklike" type="button" id="p-backspace" aria-label="Delete last digit">Delete last digit</button>
+      </section>
+
+      <section class="server-card" aria-label="SIP server">
+        <h2>SIP server</h2>
+        <div class="seg" role="radiogroup" aria-label="How to connect">
+          <button type="button" role="radio" data-mode="ws" aria-checked="true">WebSocket from this browser</button>
+          <button type="button" role="radio" data-mode="udp" aria-checked="false" id="mode-udp" hidden>UDP from this computer</button>
+        </div>
+        <p class="muted mode-note" data-for="ws">SIP over WebSocket (RFC 7118) with WebRTC audio. Pages served over https need a <code>wss://</code> server with a valid certificate.</p>
+        <p class="muted mode-note" data-for="udp" hidden>Classic SIP over UDP with G.711, sent by Sidetone on this machine. Every packet is recorded for analysis.</p>
+        <label data-for="ws">WebSocket URL <input id="p-ws" placeholder="wss://pbx.example.com:8089/ws" spellcheck="false"></label>
+        <div class="row">
+          <label class="grow">Server or domain <input id="p-domain" placeholder="pbx.example.com or 10.0.0.5:5060" spellcheck="false"></label>
+        </div>
+        <div class="row">
+          <label class="grow">User <input id="p-user" spellcheck="false"></label>
+          <label class="grow">Auth user <input id="p-auth" placeholder="same as user" spellcheck="false"></label>
+        </div>
+        <label>Password <input id="p-pass" type="password" autocomplete="off"></label>
+        <label data-for="ws">STUN server <input id="p-stun" placeholder="optional, e.g. stun:stun.l.google.com:19302" spellcheck="false"></label>
+        <div class="row" data-for="udp" hidden>
+          <label>Call length (s) <input id="p-dur" type="number" min="1" max="600" value="20"></label>
+          <label>Audio
+            <select id="p-audio-src"><option value="tone">Tone 440 Hz</option><option value="echo">Echo back</option><option value="silence">Silence</option></select>
+          </label>
+          <label class="check"><input type="checkbox" id="p-register" checked> Register before calling</label>
+        </div>
+        <details data-for="udp" hidden>
+          <summary>Behavior profile (JSON)</summary>
+          <textarea id="p-profile" rows="7" spellcheck="false" placeholder='{"behavior": {"codecs": ["PCMA"], "dtmf_mode": "info", "user_phone": true}}'></textarea>
+        </details>
+        <div class="row">
+          <button class="btn primary" type="button" id="p-connect">Connect and register</button>
+          <button class="btn" type="button" id="p-options" data-for="udp" hidden>Send OPTIONS</button>
+        </div>
+      </section>
+    </div>
+
+    <section class="analyze-strip" aria-label="Analyze a capture">
+      <div>
+        <h2>Analyze a capture</h2>
+        <p class="muted">Drop a pcap or pcapng anywhere on this page, or open one from Wireshark, tcpdump, sngrep or an SBC. Analysis runs <span id="where">in this browser</span>; nothing is uploaded. Or try an example with a known problem:</p>
+      </div>
+      <div class="sample-grid" id="sample-grid"></div>
+    </section>
+
+    <details class="phone-log"><summary>SIP log of this session</summary><pre class="call-status" id="p-log"></pre></details>
+    <audio id="p-audio" autoplay></audio>
   </section>
 
   <aside class="calls" aria-label="Calls">
@@ -106,76 +180,9 @@
   </section>
 </main>
 
-<dialog id="call-dialog">
-  <form method="dialog" id="call-form" class="call-form">
-    <h2>Place a test call</h2>
-    <p class="muted">Calls go out from the machine running Sidetone. The capture of the call opens here when it ends.</p>
-    <div class="row">
-      <label class="grow">Server or domain <input id="c-domain" placeholder="pbx.example.com or 10.0.0.5:5060" required spellcheck="false"></label>
-    </div>
-    <div class="row">
-      <label>User <input id="c-user" spellcheck="false"></label>
-      <label>Password <input id="c-pass" type="password" autocomplete="off"></label>
-      <label class="check"><input type="checkbox" id="c-register"> Register first</label>
-    </div>
-    <div class="row">
-      <label class="grow">Call to <input id="c-target" placeholder="600, +5511999990000 or user@host" required spellcheck="false"></label>
-      <label>Seconds <input id="c-dur" type="number" min="1" max="600" value="10"></label>
-    </div>
-    <div class="row">
-      <label>Audio
-        <select id="c-audio"><option value="tone">Tone 440 Hz</option><option value="echo">Echo back</option><option value="silence">Silence</option></select>
-      </label>
-      <label>DTMF after answer <input id="c-dtmf" placeholder="123#" spellcheck="false"></label>
-    </div>
-    <details>
-      <summary>Behavior profile (JSON)</summary>
-      <textarea id="c-profile" rows="8" spellcheck="false" placeholder='{"behavior": {"codecs": ["PCMA"], "dtmf_mode": "info", "user_phone": true}}'></textarea>
-    </details>
-    <div class="row end">
-      <button class="btn" value="cancel" formnovalidate>Close</button>
-      <button class="btn" type="button" id="c-options">Send OPTIONS</button>
-      <button class="btn primary" type="submit" id="c-go">Place call</button>
-    </div>
-    <pre class="call-status" id="call-status"></pre>
-  </form>
-</dialog>
 
- <dialog id="phone-dialog">
-  <div class="call-form">
-    <h2>Web phone</h2>
-    <p class="muted">SIP over WebSocket with WebRTC audio, straight from this browser. The server must offer a WebSocket SIP transport (wss:// on public pages). When a call ends, its signaling opens here for analysis.</p>
-    <div class="row">
-      <label class="grow">WebSocket URL <input id="p-ws" placeholder="wss://pbx.example.com:8089/ws" spellcheck="false"></label>
-      <label>SIP domain <input id="p-domain" placeholder="pbx.example.com" spellcheck="false"></label>
-    </div>
-    <div class="row">
-      <label>User <input id="p-user" spellcheck="false"></label>
-      <label>Auth user <input id="p-auth" placeholder="same as user" spellcheck="false"></label>
-      <label>Password <input id="p-pass" type="password" autocomplete="off"></label>
-      <label class="grow">STUN server <input id="p-stun" placeholder="stun:stun.l.google.com:19302 (optional)" spellcheck="false"></label>
-    </div>
-    <div class="row">
-      <button class="btn" type="button" id="p-connect">Connect and register</button>
-      <span class="muted" id="p-state">not connected</span>
-    </div>
-    <div class="row">
-      <label class="grow">Call to <input id="p-target" placeholder="600 or user@host" spellcheck="false"></label>
-      <button class="btn primary" type="button" id="p-dial" disabled>Call</button>
-      <button class="btn" type="button" id="p-answer" hidden>Answer</button>
-      <button class="btn" type="button" id="p-hangup" disabled>Hang up</button>
-    </div>
-    <div class="keypad" id="p-keypad" aria-label="DTMF keypad">
-      <button type="button">1</button><button type="button">2</button><button type="button">3</button><button type="button">4</button>
-      <button type="button">5</button><button type="button">6</button><button type="button">7</button><button type="button">8</button>
-      <button type="button">9</button><button type="button">*</button><button type="button">0</button><button type="button">#</button>
-    </div>
-    <p class="muted" id="p-stats"></p>
-    <pre class="call-status" id="p-log"></pre>
-    <div class="row end"><button class="btn" type="button" id="p-close">Close</button></div>
-    <audio id="p-audio" autoplay></audio>
-  </div>
-</dialog>
+
+ 
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script type="module" src="app.js"></script>

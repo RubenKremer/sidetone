@@ -80,6 +80,7 @@ async function httpBackend() {
     captureFromLog: async (log) => new Uint8Array(await (await post("api/sip-log-capture", JSON.stringify(log), "application/json")).arrayBuffer()),
     sipCall: async (params) => (await post("api/call", JSON.stringify(params), "application/json")).json(),
     sipOptions: async (params) => (await post("api/options", JSON.stringify(params), "application/json")).json(),
+    sipRegister: async (params) => (await post("api/register", JSON.stringify(params), "application/json")).json(),
     save: (info.features || []).includes("native-save") ? async (data, name) => (await post(`api/save?${q({ name })}`, data)).json() : null,
   };
 }
@@ -128,7 +129,13 @@ async function download(data, name, type) {
 
 // ---------- loading ----------
 
-async function load(bytes, name, webrtc = null) {
+function setView(v) {
+  $("#app").classList.toggle("view-phone", v === "phone");
+  $("#app").classList.toggle("view-analysis", v === "analysis");
+  $$(".view-btn").forEach((b) => b.setAttribute("aria-current", String(b.dataset.view === v)));
+}
+
+async function load(bytes, name, webrtc = null, show = true) {
   try {
     const report = await S.be.analyze(bytes);
     Object.assign(S, { bytes, name, report, call: null, msg: null, stream: null, webrtc });
@@ -137,7 +144,8 @@ async function load(bytes, name, webrtc = null) {
     return;
   }
   const r = S.report;
-  $("#app").classList.remove("empty");
+  $('.view-btn[data-view="analysis"]').disabled = false;
+  if (show) setView("analysis");
   $("#btn-export").disabled = false;
   const s = r.summary;
   $("#capinfo").textContent = `${name}: ${s.calls} calls, ${s.sip_messages} SIP messages, ${s.rtp_streams} RTP streams, ${s.duration_s.toFixed(1)} s`;
@@ -396,61 +404,6 @@ async function askAI(preview) {
   }
 }
 
-// ---------- test calls ----------
-
-function callParams() {
-  let profile = null;
-  const raw = $("#c-profile").value.trim();
-  if (raw) {
-    profile = JSON.parse(raw);
-  }
-  const p = {
-    domain: $("#c-domain").value.trim(),
-    user: $("#c-user").value.trim(),
-    password: $("#c-pass").value,
-    target: $("#c-target").value.trim(),
-    duration: +$("#c-dur").value || 10,
-    audio: $("#c-audio").value,
-    dtmf: $("#c-dtmf").value.trim() || null,
-    register: $("#c-register").checked,
-    profile,
-  };
-  store.set("sidetone.call", { ...p, password: undefined });
-  return p;
-}
-
-async function runCall(kind) {
-  const status = $("#call-status");
-  let p;
-  try {
-    p = callParams();
-  } catch (e) {
-    status.textContent = `Profile is not valid JSON: ${e.message}`;
-    return;
-  }
-  if (!p.domain || (kind === "call" && !p.target)) {
-    status.textContent = "Fill in the server and who to call.";
-    return;
-  }
-  if (kind === "options" && !p.target) p.target = p.domain;
-  status.textContent = kind === "call" ? `Calling ${p.target} for up to ${p.duration} s…` : `Sending OPTIONS to ${p.target}…`;
-  $$("#call-form button").forEach((b) => (b.disabled = true));
-  try {
-    const res = kind === "call" ? await S.be.sipCall(p) : await S.be.sipOptions(p);
-    const ev = (res.events || []).map((e) => `${String(e.t_ms).padStart(6)} ms  ${e.text}`).join("\n");
-    const head = kind === "call"
-      ? `Result: ${res.outcome.final_status ?? "no answer"} ${res.outcome.final_reason ?? ""}${res.outcome.answered ? `, ${res.outcome.codec}, RTP sent ${res.outcome.rtp_sent} / received ${res.outcome.rtp_received}` : ""}`
-      : `OPTIONS: ${res.status ?? "no response"}${res.rtt_ms != null ? ` in ${res.rtt_ms} ms` : ""}`;
-    status.textContent = `${head}\nFrom ${res.local}\n\n${ev}`;
-    if (res.wav_b64) S.lastWav = b64ToBytes(res.wav_b64);
-    await load(b64ToBytes(res.pcap_b64), `${kind}-${p.target}.pcapng`);
-  } catch (e) {
-    status.textContent = `Failed: ${e.message || e}`;
-  } finally {
-    $$("#call-form button").forEach((b) => (b.disabled = false));
-  }
-}
-
 // ---------- wiring ----------
 
 function bind() {
@@ -554,91 +507,164 @@ function bind() {
     applyTheme(mode);
   });
 
-  if (S.be.features.includes("ua")) {
-    $("#btn-call").hidden = false;
-    const saved = store.get("sidetone.call", {});
-    for (const [id, k] of [["c-domain", "domain"], ["c-user", "user"], ["c-target", "target"], ["c-dtmf", "dtmf"]]) if (saved[k]) $("#" + id).value = saved[k];
-    if (saved.profile) $("#c-profile").value = JSON.stringify(saved.profile, null, 2);
-    $("#btn-call").addEventListener("click", () => $("#call-dialog").showModal());
-    $("#call-form").addEventListener("submit", (e) => {
-      if (e.submitter && e.submitter.value === "cancel") return;
-      e.preventDefault();
-      runCall("call");
-    });
-    $("#c-options").addEventListener("click", () => runCall("options"));
-  }
+  $$(".view-btn").forEach((b) => b.addEventListener("click", () => !b.disabled && setView(b.dataset.view)));
 }
 
 // ---------- web phone ----------
 
 async function setupPhone() {
   const { WebPhone } = await import("./webphone.js");
-  const dlg = $("#phone-dialog");
+  const native = S.be.features.includes("ua");
   const saved = store.get("sidetone.phone", {});
-  for (const [id, k] of [["p-ws", "ws"], ["p-domain", "domain"], ["p-user", "user"], ["p-auth", "authUser"], ["p-stun", "stun"], ["p-target", "target"]]) if (saved[k]) $("#" + id).value = saved[k];
-  let phone = null;
+  const fields = [["p-ws", "ws"], ["p-domain", "domain"], ["p-user", "user"], ["p-auth", "authUser"], ["p-stun", "stun"], ["p-target", "target"], ["p-dur", "dur"]];
+  for (const [id, k] of fields) if (saved[k] != null && saved[k] !== "") $("#" + id).value = saved[k];
+  if (saved.profile) $("#p-profile").value = saved.profile;
+  let mode = native && saved.mode === "udp" ? "udp" : "ws";
+  let phone = null; // WebPhone in ws mode
+  let udpReady = false;
   const logEl = $("#p-log");
+  const busy = { on: false };
+
   const ui = {
     log: (t) => {
       logEl.textContent += `${new Date().toISOString().slice(11, 23)}  ${t}\n`;
       logEl.scrollTop = logEl.scrollHeight;
     },
-    state: (t) => ($("#p-state").textContent = t),
-    stats: (s) => ($("#p-stats").textContent = `${s.codec || ""}  received ${s.recv ?? 0}, lost ${s.lost ?? 0}, jitter ${(s.jitter_ms ?? 0).toFixed(1)} ms, RTT ${(s.rtt_ms ?? 0).toFixed(0)} ms${s.path ? `, ${s.path}` : ""}`),
+    state: (t) => ($("#p-state").textContent = t ? t[0].toUpperCase() + t.slice(1) : ""),
+    stats: (s) => ($("#p-stats").textContent = `${s.codec || ""}  rx ${s.recv ?? 0}  lost ${s.lost ?? 0}  jitter ${(s.jitter_ms ?? 0).toFixed(1)} ms  RTT ${(s.rtt_ms ?? 0).toFixed(0)} ms`),
     onIncoming: (from) => {
-      ui.state(`incoming call from ${from}`);
+      ui.state(`incoming call from ${from.replace(/^.*<sip:([^>;]+).*$/, "$1")}`);
       $("#p-answer").hidden = false;
       $("#p-hangup").disabled = false;
-      if (!dlg.open) dlg.showModal();
+      setView("phone");
     },
-    onCallEnded: async (p) => {
+    onCallEnded: async (p, why) => {
       $("#p-answer").hidden = true;
       $("#p-hangup").disabled = true;
       $("#p-dial").disabled = false;
-      const summary = p.summary();
-      try {
-        const bytes = await S.be.captureFromLog(p.captureLog());
-        await load(bytes, "web-phone-call.pcapng", summary);
-        toast("Call signaling loaded for analysis");
-      } catch (e) {
-        ui.log(`could not build the capture: ${e.message || e}`);
-      }
+      $("#p-stats").textContent = "";
+      await showResult(await S.be.captureFromLog(p.captureLog()), "web-phone-call.pcapng", p.summary());
     },
   };
-  $("#btn-phone").addEventListener("click", () => dlg.showModal());
-  $("#p-close").addEventListener("click", () => dlg.close());
+
+  // After a call: analyze in the background and offer the result from the phone screen.
+  async function showResult(bytes, name, webrtc) {
+    try {
+      await load(bytes, name, webrtc, false);
+      const s = S.report.summary;
+      const el = $("#p-result");
+      el.hidden = false;
+      el.innerHTML = `Call analyzed: ${s.errors} error${s.errors === 1 ? "" : "s"}, ${s.warnings} warning${s.warnings === 1 ? "" : "s"}. <a id="p-open">View analysis</a>`;
+      $("#p-open").addEventListener("click", () => setView("analysis"));
+    } catch (e) {
+      ui.log(`could not analyze the call: ${e.message || e}`);
+    }
+  }
+
+  const setMode = (m) => {
+    mode = m;
+    $$(".seg [data-mode]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.mode === m)));
+    $$(".server-card [data-for]").forEach((el) => (el.hidden = el.dataset.for !== m));
+    $("#p-connect").textContent = m === "ws" ? "Connect and register" : "Register";
+    $("#p-dial").disabled = m === "ws" ? !phone : false;
+    if (m === "udp") ui.state(udpReady ? "ready" : "ready to call over UDP");
+    else ui.state(phone ? "connected" : "set up a SIP server to start");
+  };
+  if (native) $("#mode-udp").hidden = false;
+  $$(".seg [data-mode]").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
+
+  const cfg = () => ({
+    ws: $("#p-ws").value.trim(),
+    domain: $("#p-domain").value.trim(),
+    user: $("#p-user").value.trim(),
+    authUser: $("#p-auth").value.trim() || null,
+    password: $("#p-pass").value,
+    stun: $("#p-stun").value.trim(),
+  });
+  const remember = () =>
+    store.set("sidetone.phone", { ...cfg(), password: undefined, target: $("#p-target").value.trim(), dur: $("#p-dur").value, profile: $("#p-profile").value, mode });
+
+  function udpParams(target) {
+    const c = cfg();
+    let profile = null;
+    const raw = $("#p-profile").value.trim();
+    if (raw) profile = JSON.parse(raw);
+    if (c.authUser) profile = { ...(profile || {}), account: { ...((profile && profile.account) || {}), auth_user: c.authUser } };
+    return { domain: c.domain, user: c.user, password: c.password, target, duration: +$("#p-dur").value || 20, audio: $("#p-audio-src").value, register: $("#p-register").checked, profile };
+  }
+
   $("#p-connect").addEventListener("click", async () => {
-    const cfg = {
-      ws: $("#p-ws").value.trim(),
-      domain: $("#p-domain").value.trim(),
-      user: $("#p-user").value.trim(),
-      authUser: $("#p-auth").value.trim() || null,
-      password: $("#p-pass").value,
-      stun: $("#p-stun").value.trim(),
-    };
-    if (!cfg.ws || !cfg.domain || !cfg.user) {
-      ui.state("fill in WebSocket URL, domain and user");
+    const c = cfg();
+    remember();
+    if (mode === "udp") {
+      if (!c.domain) return ui.state("enter the server");
+      ui.state("registering…");
+      try {
+        const res = await S.be.sipRegister(udpParams(""));
+        (res.events || []).forEach((e) => ui.log(e.text));
+        udpReady = res.status === 200;
+        ui.state(res.status === 200 ? `registered as ${c.user} (from ${res.local})` : `register answered ${res.status ?? "nothing"}`);
+        await showResult(b64ToBytes(res.pcap_b64), "register.pcapng", null);
+      } catch (e) {
+        ui.state(`register failed: ${e.message || e}`);
+      }
       return;
     }
-    store.set("sidetone.phone", { ...cfg, password: undefined, target: $("#p-target").value.trim() });
-    cfg.iceServers = cfg.stun ? [{ urls: cfg.stun }] : [];
+    if (!c.ws || !c.domain || !c.user) return ui.state("fill in WebSocket URL, domain and user");
+    c.iceServers = c.stun ? [{ urls: c.stun }] : [];
     if (phone) phone.close();
-    phone = new WebPhone(cfg, ui);
+    phone = new WebPhone(c, ui);
     window.__phone = phone;
     try {
+      ui.state("connecting…");
       await phone.connect();
       const st = await phone.register();
-      ui.state(st === 200 ? `registered as ${cfg.user}` : `register answered ${st ?? "nothing"}`);
+      ui.state(st === 200 ? `registered as ${c.user}` : `register answered ${st ?? "nothing"}`);
       $("#p-dial").disabled = false;
     } catch (e) {
       ui.state(e.message);
     }
   });
+
+  $("#p-options").addEventListener("click", async () => {
+    remember();
+    const p = udpParams($("#p-target").value.trim() || cfg().domain);
+    ui.state(`OPTIONS to ${p.target}…`);
+    try {
+      const res = await S.be.sipOptions(p);
+      ui.state(`OPTIONS: ${res.status ?? "no response"}${res.rtt_ms != null ? ` in ${res.rtt_ms} ms` : ""}`);
+      (res.events || []).forEach((e) => ui.log(e.text));
+      await showResult(b64ToBytes(res.pcap_b64), "options.pcapng", null);
+    } catch (e) {
+      ui.state(`OPTIONS failed: ${e.message || e}`);
+    }
+  });
+
   $("#p-dial").addEventListener("click", async () => {
     const t = $("#p-target").value.trim();
-    if (!t || !phone) return;
-    store.set("sidetone.phone", { ...store.get("sidetone.phone", {}), target: t });
+    if (!t || busy.on) return;
+    remember();
+    $("#p-result").hidden = true;
     $("#p-dial").disabled = true;
+    if (mode === "udp") {
+      const p = udpParams(t);
+      busy.on = true;
+      ui.state(`calling ${t}, ends after ${p.duration} s`);
+      try {
+        const res = await S.be.sipCall(p);
+        const o = res.outcome;
+        (res.events || []).forEach((e) => ui.log(e.text));
+        ui.state(o.answered ? `call ended: ${o.final_status} ${o.final_reason || ""}, ${o.codec}, rx ${o.rtp_received} pkts` : `call failed: ${o.final_status ?? "no answer"} ${o.final_reason || ""}`);
+        await showResult(b64ToBytes(res.pcap_b64), `call-${t}.pcapng`, null);
+      } catch (e) {
+        ui.state(`call failed: ${e.message || e}`);
+      } finally {
+        busy.on = false;
+        $("#p-dial").disabled = false;
+      }
+      return;
+    }
+    if (!phone) return;
     $("#p-hangup").disabled = false;
     try {
       await phone.dial(t, $("#p-audio"));
@@ -652,7 +678,29 @@ async function setupPhone() {
     await phone.answer($("#p-audio"));
   });
   $("#p-hangup").addEventListener("click", () => phone && phone.hangup());
-  $$("#p-keypad button").forEach((b) => b.addEventListener("click", () => phone && phone.dtmf(b.textContent)));
+  $("#p-backspace").addEventListener("click", () => ($("#p-target").value = $("#p-target").value.slice(0, -1)));
+
+  // Keys dial the number when idle and send DTMF during a call; the keyboard works too.
+  const press = (k) => {
+    const b = $(`#p-keypad [data-key="${CSS.escape(k)}"]`);
+    if (b) {
+      b.classList.add("hit");
+      setTimeout(() => b.classList.remove("hit"), 140);
+    }
+    if (phone && phone.call && phone.call.answered) phone.dtmf(k);
+    else $("#p-target").value += k;
+  };
+  $$("#p-keypad button").forEach((b) => b.addEventListener("click", () => press(b.dataset.key)));
+  $(".phone-card").addEventListener("keydown", (e) => {
+    if (phone && phone.call && phone.call.answered && /^[0-9*#]$/.test(e.key)) {
+      e.preventDefault();
+      press(e.key);
+    } else if (e.key === "Enter" && e.target.id === "p-target" && !$("#p-dial").disabled) {
+      e.preventDefault();
+      $("#p-dial").click();
+    }
+  });
+  setMode(mode);
 }
 
 async function main() {
@@ -667,7 +715,7 @@ async function main() {
   $("#sample-grid").innerHTML = samples.map((s) => `<button type="button" data-sample="${esc(s.name)}"><b>${esc(s.name)}</b><span>${esc(s.description)}</span></button>`).join("");
   $$("[data-sample]").forEach((b) => b.addEventListener("click", () => open(b.dataset.sample)));
   const want = new URLSearchParams(location.search).get("sample");
-  if (want) open(want);
+  if (want) await open(want);
 }
 
 main().catch((e) => {

@@ -283,7 +283,9 @@ fn handle(
                 Err(e) => err(502, e),
             }
         }
-        (Method::Post, "/api/options") | (Method::Post, "/api/call") => {
+        (Method::Post, "/api/options")
+        | (Method::Post, "/api/call")
+        | (Method::Post, "/api/register") => {
             let v: Value = match serde_json::from_slice(&body) {
                 Ok(v) => v,
                 Err(e) => return err(400, e),
@@ -297,10 +299,16 @@ fn handle(
                 .and_then(|t| t.as_str())
                 .unwrap_or("")
                 .to_string();
-            if v.get("register").and_then(|x| x.as_bool()).unwrap_or(false) {
+            if path != "/api/register"
+                && v.get("register").and_then(|x| x.as_bool()).unwrap_or(false)
+            {
                 let _ = ua.register(None);
             }
-            let result: Result<Value> = if path == "/api/options" {
+            let result: Result<Value> = if path == "/api/register" {
+                ua.register(None)
+                    .map(|st| json!({"status": st}))
+                    .map_err(|e| anyhow!("{e}"))
+            } else if path == "/api/options" {
                 ua.options(&target)
                     .map(|r| json!({"status": r.map(|x| x.0), "rtt_ms": r.map(|x| x.1)}))
                     .map_err(|e| anyhow!("{e}"))
