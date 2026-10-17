@@ -1117,45 +1117,70 @@ function showTab(name) {
 // ---------- AI ----------
 
 const AI_DEFAULT_MODEL = { anthropic: "claude-sonnet-5-5", openai: "", ollama: "" };
+// OpenAI-compatible services: [label, base URL, example model]
+const AI_PRESETS = [
+  ["OpenAI", "https://api.openai.com", "gpt-4o-mini"],
+  ["OpenRouter", "https://openrouter.ai/api", "anthropic/claude-sonnet-5-5"],
+  ["Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash"],
+  ["Groq", "https://api.groq.com/openai", "llama-3.3-70b-versatile"],
+  ["Mistral", "https://api.mistral.ai", "mistral-large-latest"],
+  ["DeepSeek", "https://api.deepseek.com", "deepseek-chat"],
+  ["LM Studio (local)", "http://localhost:1234", "local-model"],
+  ["vLLM (local)", "http://localhost:8000", ""],
+];
+let aiSessionKey = null; // key typed but not remembered: lives until the page closes
 
-function aiSettingsLoad() {
+function aiSettings() {
   const s = store.get("sidetone.ai", {});
-  $("#ai-provider").value = s.provider || "anthropic";
-  $("#ai-model").value = s.model ?? AI_DEFAULT_MODEL[$("#ai-provider").value];
-  $("#ai-base").value = s.base_url || "";
-  $("#ai-lang").value = s.language || "English";
-  $("#ai-redact").checked = s.redact !== false;
-  $("#ai-remember").checked = !!s.key;
-  $("#ai-key").value = s.key || "";
-  aiPlaceholders();
+  return {
+    provider: s.provider || "anthropic",
+    model: s.model || AI_DEFAULT_MODEL[s.provider || "anthropic"],
+    base_url: s.base_url || null,
+    language: s.language || { pt: "Portuguese (Brazil)", es: "Spanish", de: "German" }[currentLang()] || "English",
+    redact: s.redact !== false,
+    key: s.key || aiSessionKey || null,
+    remember: !!s.key,
+  };
 }
 
-function aiPlaceholders() {
-  const p = $("#ai-provider").value;
-  $("#ai-model").placeholder = p === "ollama" ? "e.g. llama3.1" : p === "openai" ? "model name" : "claude-sonnet-5-5";
-  $("#ai-base").placeholder = p === "ollama" ? "http://localhost:11434" : p === "openai" ? "https://api.openai.com" : "https://api.anthropic.com";
-  $("#ai-key").disabled = p === "ollama";
+function saveAiSettings(v) {
+  aiSessionKey = v.key || null;
+  store.set("sidetone.ai", {
+    provider: v.provider,
+    model: v.model,
+    base_url: v.base_url || null,
+    language: v.language,
+    redact: v.redact,
+    key: v.remember && v.key ? v.key : undefined,
+  });
+  renderAiUsing();
 }
 
 function aiConfig() {
-  const provider = $("#ai-provider").value;
-  const cfg = {
-    provider,
-    model: $("#ai-model").value.trim() || AI_DEFAULT_MODEL[provider],
-    base_url: $("#ai-base").value.trim() || null,
-    api_key: $("#ai-key").value.trim() || null,
-    language: $("#ai-lang").value,
-    max_tokens: 2000,
-  };
-  store.set("sidetone.ai", {
-    provider,
-    model: $("#ai-model").value.trim(),
-    base_url: cfg.base_url,
-    language: cfg.language,
-    redact: $("#ai-redact").checked,
-    key: $("#ai-remember").checked ? cfg.api_key : undefined,
-  });
-  return cfg;
+  const s = aiSettings();
+  return { provider: s.provider, model: s.model || AI_DEFAULT_MODEL[s.provider], base_url: s.base_url, api_key: s.key, language: s.language, max_tokens: 2000 };
+}
+
+const PROVIDER_NAME = { anthropic: "Anthropic", openai: "OpenAI-compatible", ollama: "Ollama" };
+
+/// Problem with the AI settings, or null when ready.
+function aiNotReady() {
+  const c = aiConfig();
+  if (!c.model) return t("Choose a model in Settings, AI.");
+  if (c.provider !== "ollama" && !c.api_key && S.be.kind === "wasm") return t("Enter an API key in Settings, AI. It stays on this device and goes only to the provider.");
+  return null;
+}
+
+function renderAiUsing() {
+  const c = aiConfig();
+  const host = c.base_url ? ` · ${c.base_url.replace(/^https?:\/\//, "").split("/")[0]}` : "";
+  const txt = `${PROVIDER_NAME[c.provider]} · ${c.model || "?"}${host}`;
+  const u = $("#ai-using");
+  if (u) u.textContent = txt;
+  const d = $("#dock-using");
+  if (d) d.textContent = txt;
+  const r = $("#ai-redact");
+  if (r) r.checked = aiSettings().redact;
 }
 
 function renderAnswer(text) {
@@ -1178,17 +1203,14 @@ async function askAI(preview) {
     out.innerHTML = `<p class="muted">${$("#ai-redact").checked ? "Masked" : "Unmasked"} prompt, ${prompt.length.toLocaleString()} characters:</p><pre>${esc(system)}\n\n${esc(prompt)}</pre>`;
     return;
   }
-  if (!cfg.model) {
-    out.innerHTML = `<p class="err">Enter a model name for this provider.</p>`;
-    return;
-  }
-  if (cfg.provider !== "ollama" && !cfg.api_key && S.be.kind === "wasm") {
-    out.innerHTML = `<p class="err">Enter an API key. It stays in this browser and goes only to the provider.</p>`;
+  const bad = aiNotReady();
+  if (bad) {
+    out.innerHTML = `<p class="err">${esc(bad)} <button type="button" class="linklike" data-goto-ai>${esc(t("Open Settings, AI"))}</button></p>`;
     return;
   }
   const btn = $("#ai-go");
   btn.disabled = true;
-  out.innerHTML = `<p class="muted">Asking ${esc(cfg.provider)} (${esc(cfg.model)})…</p>`;
+  out.innerHTML = `<p class="muted">Asking ${esc(PROVIDER_NAME[cfg.provider])} (${esc(cfg.model)})…</p>`;
   try {
     out.innerHTML = renderAnswer(await S.be.ai(cfg, system, prompt));
   } catch (e) {
@@ -1196,6 +1218,168 @@ async function askAI(preview) {
   } finally {
     btn.disabled = false;
   }
+}
+
+// ---------- AI panel (conversation) ----------
+
+const DOCK = { turns: [], busy: false, ctx: null };
+
+/// What the AI can look at right now: [id, label, call-id or null].
+function dockContexts() {
+  const out = [];
+  if (S.report) {
+    const c = S.call != null ? S.report.calls[S.call] : null;
+    out.push(["an", c ? `${t("Analysis")}: ${c.kind} ${c.from} → ${c.to}` : `${t("Analysis")}: ${S.name}`, null]);
+  }
+  const l = selLine() || lines()[lines().length - 1];
+  if (l && l.call_id) out.push(["line", `${t("Phone")}: ${l.remote}`, l.call_id]);
+  const tr = S.trace.find((x) => x.seq === S.trSel);
+  if (tr && tr.call_id && (!l || tr.call_id !== l.call_id)) out.push(["trace", `${t("SIP trace")}: ${tr.first_line.slice(0, 40)}`, tr.call_id]);
+  out.push(["live", t("Everything the phone captured"), null]);
+  return out;
+}
+
+function renderDockContexts() {
+  const ctxs = dockContexts();
+  const sel = $("#dock-ctx");
+  const want = DOCK.ctx && ctxs.some(([id]) => id === DOCK.ctx) ? DOCK.ctx : S.page === "analysis" && S.report ? "an" : ctxs[0][0];
+  sel.innerHTML = ctxs.map(([id, label]) => `<option value="${id}">${esc(label)}</option>`).join("");
+  sel.value = want;
+  DOCK.ctx = want;
+}
+
+function openDock(open = true) {
+  $("#ai-dock").hidden = !open;
+  document.body.classList.toggle("dock-open", open);
+  $("#ai-toggle").setAttribute("aria-expanded", String(open));
+  if (open) {
+    renderDockContexts();
+    renderAiUsing();
+    renderDockChat();
+    $("#dock-q").focus();
+  }
+}
+
+function renderDockChat() {
+  const el = $("#dock-chat");
+  if (!DOCK.turns.length) {
+    el.innerHTML = `<div class="ai-empty"><p>${esc(t("Ask anything about the selected call or the capture. The AI gets the findings, the ladder, RTP statistics and the relevant SIP messages, masked by default."))}</p>
+      <div class="ai-suggest">${[
+        "Why did this call fail?",
+        "Is there a NAT problem here?",
+        "Why is there one-way audio?",
+        "What should I change on the SBC or PBX?",
+      ].map((q) => `<button type="button" class="chip" data-q="${esc(t(q))}">${esc(t(q))}</button>`).join("")}</div></div>`;
+    return;
+  }
+  el.innerHTML = DOCK.turns
+    .map((x) => (x.role === "user" ? `<div class="msg-u">${esc(x.text)}</div>` : x.role === "error" ? `<div class="msg-e">${esc(x.text)}</div>` : x.role === "pre" ? `<pre class="msg-p">${esc(x.text)}</pre>` : `<div class="msg-a">${renderAnswer(x.text)}</div>`))
+    .join("") + (DOCK.busy ? `<div class="msg-a muted">${esc(t("Thinking…"))}</div>` : "");
+  el.scrollTop = el.scrollHeight;
+}
+
+/// Capture bytes and dialog index for the chosen context.
+async function dockSource() {
+  const ctx = dockContexts().find(([id]) => id === DOCK.ctx) || ["live", "", null];
+  if (ctx[0] === "an") return { bytes: S.bytes, call: S.call, webrtc: S.webrtc };
+  const bytes = await S.ctl.capture(S.be);
+  let call = null;
+  if (ctx[2]) {
+    const rep = await S.be.analyze(bytes);
+    const i = rep.calls.findIndex((c) => c.call_id === ctx[2]);
+    call = i >= 0 ? i : null;
+  }
+  return { bytes, call, webrtc: S.ctl.kind === "web" ? S.ctl.lastSummary : null };
+}
+
+async function dockAsk(question, preview = false) {
+  question = question.trim();
+  if (!question && !preview) return;
+  const cfg = aiConfig();
+  const redact = aiSettings().redact;
+  // Earlier turns ride along so follow-up questions make sense.
+  const history = DOCK.turns
+    .filter((x) => x.role === "user" || x.role === "ai")
+    .slice(-8)
+    .map((x) => `${x.role === "user" ? "Question" : "Your answer"}: ${x.text.slice(0, 3000)}`)
+    .join("\n\n");
+  let q = history ? `Earlier in this conversation:\n\n${history}\n\nNew question: ${question}` : question;
+  try {
+    const src = await dockSource();
+    if (src.webrtc) q += `\n\nBrowser WebRTC getStats() summary for this call (media is not in the capture): ${JSON.stringify(src.webrtc)}`;
+    const { system, prompt } = await S.be.prompt(src.bytes, src.call, redact, cfg.language, q);
+    if (preview) {
+      DOCK.turns.push({ role: "pre", text: `${system}\n\n${prompt}` });
+      renderDockChat();
+      return;
+    }
+    const bad = aiNotReady();
+    if (bad) {
+      DOCK.turns.push({ role: "error", text: bad });
+      renderDockChat();
+      return;
+    }
+    DOCK.turns.push({ role: "user", text: question });
+    DOCK.busy = true;
+    renderDockChat();
+    const answer = await S.be.ai(cfg, system, prompt);
+    DOCK.turns.push({ role: "ai", text: answer });
+  } catch (e) {
+    DOCK.turns.push({ role: "error", text: e.message || String(e) });
+  } finally {
+    DOCK.busy = false;
+    renderDockChat();
+  }
+}
+
+function bindDock() {
+  $("#ai-toggle").addEventListener("click", () => openDock($("#ai-dock").hidden));
+  $("#dock-close").addEventListener("click", () => openDock(false));
+  $("#dock-new").addEventListener("click", () => {
+    DOCK.turns = [];
+    renderDockChat();
+  });
+  $("#dock-ctx").addEventListener("change", (e) => {
+    DOCK.ctx = e.target.value;
+  });
+  $("#dock-ctx").addEventListener("focus", () => {
+    const keep = DOCK.ctx;
+    renderDockContexts();
+    if (keep) $("#dock-ctx").value = keep;
+  });
+  $("#dock-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const q = $("#dock-q").value;
+    $("#dock-q").value = "";
+    dockAsk(q);
+  });
+  $("#dock-q").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      $("#dock-form").requestSubmit();
+    }
+  });
+  $("#dock-preview").addEventListener("click", () => dockAsk($("#dock-q").value || "(no question yet)", true));
+  $("#dock-chat").addEventListener("click", (e) => {
+    const c = e.target.closest("[data-q]");
+    if (c) dockAsk(c.dataset.q);
+  });
+  $("#ai-to-dock").addEventListener("click", () => {
+    DOCK.ctx = "an";
+    openDock(true);
+    const q = $("#ai-question").value.trim();
+    if (q) {
+      $("#ai-question").value = "";
+      dockAsk(q);
+    }
+  });
+  document.addEventListener("click", (e) => {
+    if (e.target.closest("[data-goto-ai]")) {
+      SET.section = "ai";
+      showWs("settings");
+    }
+  });
+  $("#ai-redact").addEventListener("change", (e) => saveAiSettings({ ...aiSettings(), redact: e.target.checked, key: aiSettings().key, remember: aiSettings().remember }));
 }
 
 function bindAnalysis() {
@@ -1269,10 +1453,6 @@ function bindAnalysis() {
       }
     })
   );
-  $("#ai-provider").addEventListener("change", () => {
-    $("#ai-model").value = AI_DEFAULT_MODEL[$("#ai-provider").value];
-    aiPlaceholders();
-  });
   $("#ai-form").addEventListener("submit", (e) => {
     e.preventDefault();
     askAI(false);
@@ -1845,6 +2025,79 @@ async function renderGlobal(section) {
       S.trace = [];
       toast("Capture cleared");
     });
+  } else if (section === "ai") {
+    const a = aiSettings();
+    const presetOpts = [`<option value="">${esc(t("Choose a service…"))}</option>`, ...AI_PRESETS.map(([n], i) => `<option value="${i}">${esc(n)}</option>`)].join("");
+    body.innerHTML = `<div class="set-head"><h1>AI</h1></div>
+      <form class="set-form" id="ai-set">
+        <p class="muted">${esc(t("Sidetone has no AI of its own. Use the provider you prefer: your key goes only to that provider, and nothing is sent until you ask."))}</p>
+        <div class="fields">
+          <label class="fld">${esc(t("Provider"))}<select id="as-provider">
+            <option value="anthropic">Anthropic (Claude)</option>
+            <option value="openai">${esc(t("OpenAI-compatible (OpenAI, Gemini, OpenRouter, Groq, Mistral, LM Studio...)"))}</option>
+            <option value="ollama">${esc(t("Ollama (local, nothing leaves this machine)"))}</option>
+          </select></label>
+          <label class="fld" id="as-preset-wrap">${esc(t("Service"))}<select id="as-preset">${presetOpts}</select></label>
+          <label class="fld">${esc(t("Model"))}<input id="as-model" value="${esc(a.model || "")}" spellcheck="false"></label>
+          <label class="fld">${esc(t("Base URL"))} <span class="hint">${esc(t("empty = the provider's default; a full .../chat/completions URL also works"))}</span><input id="as-base" value="${esc(a.base_url || "")}" spellcheck="false"></label>
+          <label class="fld" id="as-key-wrap">${esc(t("API key"))}<input id="as-key" type="password" value="${esc(a.key || "")}" autocomplete="off"></label>
+          <label class="check fld"><input type="checkbox" id="as-remember" ${a.remember ? "checked" : ""}> ${esc(t("Remember the key on this device"))}</label>
+          <label class="fld">${esc(t("Answer in"))}<select id="as-lang">${["English", "Portuguese (Brazil)", "Spanish", "German"].map((l) => `<option value="${l}" ${l === a.language ? "selected" : ""}>${esc(t(l))}</option>`).join("")}</select></label>
+          <label class="check fld"><input type="checkbox" id="as-redact" ${a.redact ? "checked" : ""}> ${esc(t("Mask numbers, names, credentials and public IPs before sending"))}</label>
+        </div>
+        <p class="hint">${esc(S.be.kind === "wasm" ? t("In the browser the request goes straight from this page to the provider; some providers block that (CORS). Anthropic, OpenRouter and a local Ollama with OLLAMA_ORIGINS work.") : t("Requests go from this computer to the provider."))}</p>
+        <div class="set-actions"><span class="hint" id="as-status"></span><button type="button" class="btn" id="as-test">${esc(t("Test connection"))}</button><button type="submit" class="btn primary">${esc(t("Save"))}</button></div>
+      </form>`;
+    const prov = $("#as-provider");
+    prov.value = a.provider;
+    const sync = () => {
+      const p = prov.value;
+      $("#as-preset-wrap").hidden = p !== "openai";
+      $("#as-key-wrap").hidden = p === "ollama";
+      $("#as-model").placeholder = p === "ollama" ? "llama3.1" : p === "openai" ? "gpt-4o-mini" : "claude-sonnet-5-5";
+      $("#as-base").placeholder = p === "ollama" ? "http://localhost:11434" : p === "openai" ? "https://api.openai.com" : "https://api.anthropic.com";
+    };
+    sync();
+    prov.addEventListener("change", () => {
+      $("#as-model").value = AI_DEFAULT_MODEL[prov.value] || "";
+      $("#as-base").value = "";
+      sync();
+    });
+    $("#as-preset").addEventListener("change", (e) => {
+      const p = AI_PRESETS[+e.target.value];
+      if (!p) return;
+      $("#as-base").value = p[1];
+      if (p[2]) $("#as-model").value = p[2];
+    });
+    const read = () => ({
+      provider: prov.value,
+      model: $("#as-model").value.trim(),
+      base_url: $("#as-base").value.trim() || null,
+      key: $("#as-key").value.trim() || null,
+      remember: $("#as-remember").checked,
+      language: $("#as-lang").value,
+      redact: $("#as-redact").checked,
+    });
+    $("#ai-set").addEventListener("submit", (e) => {
+      e.preventDefault();
+      saveAiSettings(read());
+      toast(t("Saved"));
+    });
+    $("#as-test").addEventListener("click", async () => {
+      saveAiSettings(read());
+      const st = $("#as-status");
+      const bad = aiNotReady();
+      if (bad) return (st.textContent = bad);
+      st.textContent = t("Testing…");
+      try {
+        const r = await S.be.ai(aiConfig(), "You are a connectivity check.", "Reply with the single word OK.");
+        st.textContent = `${t("Works")}: ${String(r).trim().slice(0, 60)}`;
+        st.className = "hint ok";
+      } catch (err) {
+        st.textContent = err.message || String(err);
+        st.className = "hint bad";
+      }
+    });
   } else if (section === "lang") {
     body.innerHTML = `<div class="set-head"><h1>Language</h1></div>
       <div class="set-form"><div class="fields">
@@ -1937,7 +2190,8 @@ async function main() {
   bindAnalysis();
   bindDiag();
   bindSettings();
-  aiSettingsLoad();
+  bindDock();
+  renderAiUsing();
 
   S.ctl.on((u) => {
     if (u.error) toast(u.error, 6000);
