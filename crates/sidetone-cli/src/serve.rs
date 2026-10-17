@@ -2,6 +2,7 @@
 //! AI requests and test calls run natively on this machine.
 
 use crate::aihttp;
+use crate::phone;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use sidetone_core::ai::AiConfig;
@@ -19,6 +20,7 @@ const INDEX: &str = include_str!("../../../web/index.html");
 const APP_JS: &str = include_str!("../../../web/app.js");
 const STYLE: &str = include_str!("../../../web/style.css");
 const WEBPHONE_JS: &str = include_str!("../../../web/webphone.js");
+const CONTROLLERS_JS: &str = include_str!("../../../web/controllers.js");
 
 fn header(k: &str, v: &str) -> Header {
     Header::from_bytes(k.as_bytes(), v.as_bytes()).expect("valid header")
@@ -166,7 +168,7 @@ fn handle(
     let analyze = |b: &[u8]| analyze_bytes(b).map_err(|e| e.to_string());
     match (method, path.as_str()) {
         (Method::Get, "/api/info") => {
-            let mut features = vec!["analyze", "export", "ai-proxy", "ua"];
+            let mut features = vec!["analyze", "export", "ai-proxy", "ua", "phone"];
             if save.is_some() {
                 features.push("native-save");
             }
@@ -349,6 +351,13 @@ fn handle(
                 Err(e) => err(500, e),
             }
         }
+        (m, p)
+            if p.starts_with("/api/phone/")
+                || p.starts_with("/api/audio/")
+                || p.starts_with("/api/diag/") =>
+        {
+            phone_api(&m, p, &q, &body)
+        }
         (Method::Get, p) => {
             let file = if p == "/" {
                 "index.html"
@@ -368,10 +377,152 @@ fn handle(
                 "app.js" => ok_bytes(APP_JS.as_bytes().to_vec(), "text/javascript"),
                 "style.css" => ok_bytes(STYLE.as_bytes().to_vec(), "text/css"),
                 "webphone.js" => ok_bytes(WEBPHONE_JS.as_bytes().to_vec(), "text/javascript"),
+                "controllers.js" => ok_bytes(CONTROLLERS_JS.as_bytes().to_vec(), "text/javascript"),
                 _ => err(404, "not found"),
             }
         }
         _ => err(405, "method not allowed"),
+    }
+}
+
+fn json_resp(v: Value) -> Resp {
+    ok_bytes(v.to_string().into_bytes(), "application/json")
+}
+
+fn body_json(body: &[u8]) -> std::result::Result<Value, Resp> {
+    if body.is_empty() {
+        return Ok(json!({}));
+    }
+    serde_json::from_slice(body).map_err(|e| err(400, format!("bad JSON: {e}")))
+}
+
+/// Softphone, sound card and diagnostics endpoints.
+fn phone_api(m: &Method, path: &str, q: &HashMap<String, String>, body: &[u8]) -> Resp {
+    use sidetone_ua::{audio, dns, stun};
+    let num = |k: &str| q.get(k).and_then(|v| v.parse::<u64>().ok());
+    match (m, path) {
+        (Method::Get, "/api/phone/state") => {
+            let p = phone::get();
+            let since = num("since").unwrap_or(0);
+            let tsince = num("trace_since");
+            let mut v = json!({
+                "state": p.engine.state(),
+                "events": p.engine.events_since(since),
+            });
+            if let Some(t) = tsince {
+                v["trace"] = json!(p.engine.trace_since(t, 500));
+            }
+            json_resp(v)
+        }
+        (Method::Get, "/api/phone/trace") => {
+            let p = phone::get();
+            let since = num("since").unwrap_or(0);
+            let limit = num("limit").unwrap_or(2000) as usize;
+            json_resp(json!(p.engine.trace_since(since, limit)))
+        }
+        (Method::Post, "/api/phone/cmd") => {
+            let v = match body_json(body) {
+                Ok(v) => v,
+                Err(r) => return r,
+            };
+            match phone::get().command(&v) {
+                Ok(r) => json_resp(r),
+                Err(e) => err(400, e),
+            }
+        }
+        (Method::Get, "/api/phone/config") => json_resp(json!(phone::get().config())),
+        (Method::Post, "/api/phone/config") => {
+            let v = match body_json(body) {
+                Ok(v) => v,
+                Err(r) => return r,
+            };
+            match phone::get().set_config(&v) {
+                Ok(()) => json_resp(json!({"ok": true, "config": phone::get().config()})),
+                Err(e) => err(400, e),
+            }
+        }
+        (Method::Get, "/api/phone/history") => json_resp(json!(phone::get().engine.history())),
+        (Method::Post, "/api/phone/history/clear") => {
+            phone::get().clear_history();
+            json_resp(json!({"ok": true}))
+        }
+        (Method::Get, "/api/phone/capture") => {
+            let b = phone::get().engine.capture();
+            ok_bytes(b, "application/octet-stream")
+        }
+        (Method::Get, "/api/phone/recording") => {
+            match num("line").and_then(|l| phone::get().engine.recording(l as u32)) {
+                Some(w) => ok_bytes(w, "audio/wav"),
+                None => err(
+                    404,
+                    "no recording for this line (turn Record on during the call)",
+                ),
+            }
+        }
+        (Method::Get, "/api/audio/devices") => {
+            let d = audio::list();
+            let st = phone::get().audio_status();
+            json_resp(json!({"devices": d, "audio": st}))
+        }
+        (Method::Get, "/api/audio/status") => json_resp(phone::get().audio_status()),
+        (Method::Post, "/api/audio/loopback") => {
+            let v = match body_json(body) {
+                Ok(v) => v,
+                Err(r) => return r,
+            };
+            let on = v.get("on").and_then(|x| x.as_bool()).unwrap_or(false);
+            match phone::get().audio_loopback(on) {
+                Ok(()) => json_resp(json!({"ok": true})),
+                Err(e) => err(409, e),
+            }
+        }
+        (Method::Get, "/api/diag/dns") => {
+            let host = q.get("host").cloned().unwrap_or_default();
+            if host.trim().is_empty() {
+                return err(400, "missing host");
+            }
+            json_resp(json!(dns::report(&host)))
+        }
+        (Method::Post, "/api/diag/stun") => {
+            let v = match body_json(body) {
+                Ok(v) => v,
+                Err(r) => return r,
+            };
+            let servers: Vec<String> = v
+                .get("servers")
+                .and_then(|s| serde_json::from_value(s.clone()).ok())
+                .unwrap_or_else(|| {
+                    vec![
+                        "stun.l.google.com:19302".into(),
+                        "stun.cloudflare.com:3478".into(),
+                    ]
+                });
+            json_resp(json!(stun::test(&servers, None)))
+        }
+        (Method::Post, "/api/diag/options") => {
+            let v = match body_json(body) {
+                Ok(v) => v,
+                Err(r) => return r,
+            };
+            let acc = v
+                .get("account")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            let target = v
+                .get("target")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            match phone::get().engine.options(acc, target) {
+                Some((code, rtt, summary)) => {
+                    json_resp(json!({"code": code, "rtt_ms": rtt, "summary": summary}))
+                }
+                None => json_resp(
+                    json!({"code": null, "summary": "no response (check the account is ready, the server address and the firewall)"}),
+                ),
+            }
+        }
+        _ => err(404, "unknown phone endpoint"),
     }
 }
 
@@ -422,9 +573,14 @@ pub fn spawn(
         None => format!("http://{addr}/"),
     };
     let h = std::thread::spawn(move || {
+        // One thread per request: diagnostics can take seconds while the UI keeps polling.
+        let ctx = std::sync::Arc::new((web, token, save));
         for mut req in server.incoming_requests() {
-            let resp = handle(&mut req, &web, &token, &save);
-            let _ = req.respond(resp);
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let resp = handle(&mut req, &ctx.0, &ctx.1, &ctx.2);
+                let _ = req.respond(resp);
+            });
         }
     });
     Ok((url, h))
@@ -432,6 +588,11 @@ pub fn spawn(
 
 pub fn run(listen: &str, web: Option<PathBuf>, use_token: bool) -> Result<()> {
     let (url, h) = spawn(listen, web, use_token, None)?;
+    // Ctrl+C or SIGTERM: hang up and unregister before leaving.
+    let _ = ctrlc::set_handler(|| {
+        phone::shutdown();
+        std::process::exit(0);
+    });
     eprintln!(
         "Sidetone UI: {url}\n(the token protects the API from other local pages; Ctrl+C to stop)"
     );

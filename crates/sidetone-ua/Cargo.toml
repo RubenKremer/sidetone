@@ -13,3 +13,9 @@ serde.workspace = true
 serde_json.workspace = true
 md-5 = "0.10"
 socket2 = "0.5"
+hickory-resolver = "0.24"
+cpal = { version = "0.15", optional = true }
+
+[features]
+default = ["audio"]
+audio = ["dep:cpal"]

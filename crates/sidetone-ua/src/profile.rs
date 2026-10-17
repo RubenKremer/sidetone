@@ -172,9 +172,6 @@ impl Profile {
                     .into(),
             );
         }
-        if self.behavior.dtmf_mode == DtmfMode::Inband {
-            v.push("dtmf_mode inband: not implemented yet; digits are not sent".into());
-        }
         v
     }
 }

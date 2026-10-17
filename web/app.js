@@ -1,6 +1,9 @@
-// Sidetone web UI. One frontend, three backends:
-//  - wasm: analysis in the browser (GitHub Pages build, ./pkg present)
-//  - http: `sidetone serve` or the desktop app (native analysis, AI proxy, test calls)
+// Sidetone UI: softphone panel + workspace (calls, SIP trace, analysis,
+// diagnostics, settings). One frontend for three hosts:
+//  - desktop app / `sidetone serve`: native engine over the local HTTP API
+//  - GitHub Pages: WASM analysis and a WebRTC phone (SIP over WebSocket)
+
+import { NativeController, WebController, webAccountDefaults } from "./controllers.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -17,7 +20,7 @@ const store = {
 
 const token = new URLSearchParams(location.search).get("token");
 
-// ---------- backends ----------
+// ---------- analysis backends ----------
 
 async function wasmBackend() {
   const w = await import("./pkg/sidetone_wasm.js");
@@ -34,11 +37,10 @@ async function wasmBackend() {
       let res;
       try {
         res = await fetch(req.url, { method: "POST", headers: Object.fromEntries(req.headers), body: req.body });
-      } catch (e) {
+      } catch {
         throw new Error(`Could not reach ${req.url}. ${cfg.provider === "ollama" ? "Start Ollama with OLLAMA_ORIGINS set to this page's origin." : "The provider may block browser requests (CORS); use the desktop app or `sidetone serve`."}`);
       }
-      const text = await res.text();
-      return w.ai_parse(cfg.provider, text);
+      return w.ai_parse(cfg.provider, await res.text());
     },
     samples: async () => JSON.parse(w.samples()),
     sample: async (n) => w.sample(n),
@@ -49,8 +51,7 @@ async function wasmBackend() {
 async function httpBackend() {
   const headers = token ? { "x-sidetone-token": token } : {};
   const info = await (await fetch("api/info", { headers })).json();
-  const post = async (path, body, type = "application/octet-stream") => {
-    const r = await fetch(path, { method: "POST", headers: { ...headers, "content-type": type }, body });
+  const check = async (r) => {
     if (!r.ok) {
       let msg = `${r.status}`;
       try { msg = (await r.json()).error || msg; } catch { /* not JSON */ }
@@ -58,10 +59,14 @@ async function httpBackend() {
     }
     return r;
   };
+  const post = async (path, body, type = "application/octet-stream") => check(await fetch(path, { method: "POST", headers: { ...headers, "content-type": type }, body }));
+  const get = async (path) => check(await fetch(path, { headers }));
   const q = (o) => new URLSearchParams(Object.entries(o).filter(([, v]) => v !== null && v !== undefined && v !== false).map(([k, v]) => [k, v === true ? "1" : String(v)])).toString();
   return {
     kind: "http",
     features: info.features || [],
+    get,
+    post,
     analyze: async (b) => (await post("api/analyze", b)).json(),
     ladder: async (b, call) => (await post(`api/ladder?${q({ call })}`, b)).text(),
     exportPcap: async (b, o) => new Uint8Array(await (await post(`api/export?${q({ call: o.call, redact: o.redact, sip_only: o.sip_only, no_annotate: o.annotate === false })}`, b)).arrayBuffer()),
@@ -76,41 +81,46 @@ async function httpBackend() {
       ["srtp-mismatch", "SRTP offered, plain RTP answered"],
       ["demo", "All scenarios in one capture"],
     ].map(([name, description]) => ({ name, description })),
-    sample: async (n) => new Uint8Array(await (await fetch(`api/sample?${q({ name: n })}`, { headers })).arrayBuffer()),
+    sample: async (n) => new Uint8Array(await (await get(`api/sample?${q({ name: n })}`)).arrayBuffer()),
     captureFromLog: async (log) => new Uint8Array(await (await post("api/sip-log-capture", JSON.stringify(log), "application/json")).arrayBuffer()),
-    sipCall: async (params) => (await post("api/call", JSON.stringify(params), "application/json")).json(),
-    sipOptions: async (params) => (await post("api/options", JSON.stringify(params), "application/json")).json(),
-    sipRegister: async (params) => (await post("api/register", JSON.stringify(params), "application/json")).json(),
     save: (info.features || []).includes("native-save") ? async (data, name) => (await post(`api/save?${q({ name })}`, data)).json() : null,
   };
 }
 
 async function pickBackend() {
   try {
-    return await wasmBackend();
-  } catch {
     return await httpBackend();
+  } catch {
+    return await wasmBackend();
   }
 }
 
 // ---------- state ----------
 
-const S = { be: null, bytes: null, name: "", report: null, call: null, msg: null, stream: null };
-window.__sidetone = S; // handy for debugging from the console
+const S = {
+  be: null,
+  ctl: null,
+  st: null, // latest PhoneState
+  sel: null, // selected line
+  events: [],
+  trace: [],
+  trSel: null,
+  trPaused: false,
+  history: [],
+  recordings: [],
+  xfer: null, // { from, consult }
+  errors: 0,
+  // analysis
+  bytes: null, name: "", report: null, call: null, msg: null, webrtc: null,
+};
+window.__sidetone = S;
 
-function toast(text, ms = 2600) {
+function toast(text, ms = 2800) {
   const t = $("#toast");
   t.textContent = text;
   t.classList.add("show");
   clearTimeout(toast.h);
   toast.h = setTimeout(() => t.classList.remove("show"), ms);
-}
-
-function b64ToBytes(b64) {
-  const s = atob(b64);
-  const u = new Uint8Array(s.length);
-  for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i);
-  return u;
 }
 
 async function download(data, name, type) {
@@ -127,42 +137,816 @@ async function download(data, name, type) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
-// ---------- loading ----------
+const pad = (n, w = 2) => String(n).padStart(w, "0");
+function dur(ms) {
+  if (ms == null || ms < 0) return "";
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600);
+  return h ? `${h}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}` : `${Math.floor(s / 60)}:${pad(s % 60)}`;
+}
+function clock(ms, withMs = false) {
+  const d = new Date(ms);
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}${withMs ? "." + pad(d.getMilliseconds(), 3) : ""}`;
+}
+function when(ms) {
+  const d = new Date(ms);
+  const today = new Date();
+  const same = d.toDateString() === today.toDateString();
+  return same ? clock(ms) : `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+const setMeter = (el, pct) => {
+  if (el) el.style.width = `${100 - pct}%`;
+};
+const levelPct = (v) => {
+  if (!v) return 0;
+  const db = 20 * Math.log10(v / 32767);
+  return Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
+};
 
-function setView(v) {
-  $("#app").classList.toggle("view-phone", v === "phone");
-  $("#app").classList.toggle("view-analysis", v === "analysis");
-  $$(".view-btn").forEach((b) => b.setAttribute("aria-current", String(b.dataset.view === v)));
+// ---------- workspace ----------
+
+function showWs(name) {
+  $$(".ws-tabs [data-ws]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.ws === name)));
+  $$(".ws-page").forEach((p) => (p.hidden = p.dataset.page !== name));
+  S.page = name;
+  store.set("sidetone.page", name);
+  if (name === "trace") renderTrace(true);
+  if (name === "diag") diagOpen();
+  if (name === "settings") settingsOpen();
+  if (name === "calls") renderHistory();
 }
 
-async function load(bytes, name, webrtc = null, show = true) {
+// ============================================================================
+// Phone panel
+
+const STATE_TEXT = { calling: "Calling", ringing: "Ringing", early: "Early media", incoming: "Incoming", connected: "Connected", ending: "Ending", ended: "Ended" };
+
+function lines() {
+  return S.st ? S.st.calls : [];
+}
+function line(id) {
+  return lines().find((l) => l.line === id) || null;
+}
+function selLine() {
+  return line(S.sel);
+}
+function liveLines() {
+  return lines().filter((l) => l.state !== "ended");
+}
+
+function pickSelection() {
+  const cur = selLine();
+  const live = liveLines();
+  if (cur && cur.state !== "ended") return;
+  const incoming = live.find((l) => l.state === "incoming");
+  const talking = live.find((l) => l.state === "connected" && !l.held);
+  const next = incoming || talking || live[live.length - 1] || (cur ? cur : null);
+  S.sel = next ? next.line : null;
+}
+
+function accLabel(a) {
+  return a.label || `${a.user}@${a.domain}`;
+}
+
+function currentAccount() {
+  const st = S.st;
+  if (!st || !st.accounts.length) return null;
+  const id = $("#acct").value;
+  return st.accounts.find((a) => a.id === id) || st.accounts[0];
+}
+
+const REG_TEXT = {
+  registered: "Registered",
+  registering: "Registering",
+  unregistering: "Unregistering",
+  failed: "Registration failed",
+  unreachable: "Server not answering",
+  error: "Not ready",
+  off: "Not registered",
+};
+
+function regClass(a) {
+  if (!a || !a.enabled) return "off";
+  return { registered: "ok", registering: "busy", unregistering: "busy", failed: "bad", unreachable: "bad", error: "bad" }[a.state] || (a.register ? "off" : "idle");
+}
+
+function accountStateText(a) {
+  if (!a) return S.ctl && S.ctl.kind === "web" ? "Add a WebSocket SIP account in Settings to start." : "No account yet. Add one in Settings.";
+  if (!a.enabled) return "Account disabled";
+  if (a.state === "registered") return `Registered as ${a.user} at ${a.server || a.domain}${a.expires_in != null ? `, renews in ${a.expires_in > 90 ? Math.round(a.expires_in / 60) + " min" : a.expires_in + " s"}` : ""}`;
+  if (a.state === "failed") return `Registration failed: ${a.code ?? ""} ${a.reason ?? ""}`.trim();
+  if (a.state === "unreachable") return `${a.server || a.domain} is not answering. Check address, port and firewall.`;
+  if (a.state === "error") return a.error || "Not ready";
+  if (a.state === "off" && !a.register) return `Ready to call from ${a.local || "here"} (registration off)`;
+  return REG_TEXT[a.state] || a.state;
+}
+
+function renderAccounts() {
+  const st = S.st;
+  const sel = $("#acct");
+  const want = sel.value || store.get("sidetone.acct", "");
+  const opts = st.accounts.map((a) => `<option value="${esc(a.id)}">${esc(accLabel(a))}</option>`).join("");
+  if (sel.dataset.sig !== opts) {
+    sel.innerHTML = opts || `<option value="">No account</option>`;
+    sel.dataset.sig = opts;
+    if (st.accounts.some((a) => a.id === want)) sel.value = want;
+  }
+  const a = currentAccount();
+  $("#acct-dot").className = `dot ${regClass(a)}`;
+  $("#acct-state").textContent = accountStateText(a);
+  $("#acct-state").classList.toggle("bad", regClass(a) === "bad");
+}
+
+function renderLines() {
+  const ls = lines();
+  $("#lines-empty").hidden = ls.length > 0;
+  const live = liveLines().length;
+  const max = S.st ? S.st.settings.max_lines : 1;
+  $("#lines-count").textContent = ls.length ? `${live} of ${S.ctl.features.multiLine ? max : 1}` : "";
+  const now = Date.now();
+  $("#lines").innerHTML = ls
+    .map((l) => {
+      const t = l.state === "connected" && l.answered_ms ? dur(now - l.answered_ms) : l.state === "ended" ? (l.answered_ms ? dur((l.ended_ms || now) - l.answered_ms) : "") : dur(now - l.started_ms);
+      const stTxt = l.state === "connected" && l.held ? "On hold" : l.state === "connected" && l.remote_held ? "Held by remote" : STATE_TEXT[l.state] || l.state;
+      const multi = S.st && S.st.accounts.length > 1;
+      const meta = [
+        multi ? accName(l.account) : "",
+        l.codec,
+        l.state !== "incoming" && (l.rtp_sent || l.rtp_received) ? `↑${l.rtp_sent} ↓${l.rtp_received}` : "",
+        l.muted ? "muted" : "",
+        l.recording ? "recording" : "",
+        l.state === "ended" ? resultText(l.final_code, l.reason) : "",
+        l.transfer || "",
+      ].filter(Boolean).map(esc).join(" · ");
+      const actions =
+        l.state === "incoming"
+          ? `<div class="ln-act"><button type="button" class="btn small ok" data-act="answer">Answer</button><button type="button" class="btn small" data-act="reject">Reject</button></div>`
+          : l.state === "connected" && l.held
+          ? `<div class="ln-act"><button type="button" class="btn small" data-act="resume">Resume</button><button type="button" class="btn small" data-act="hangup">Hang up</button></div>`
+          : "";
+      const cls = `line st-${l.state}${l.held ? " held" : ""}${l.line === S.sel ? " sel" : ""}`;
+      return `<li class="${cls}" data-line="${l.line}" tabindex="0">
+        <div class="ln-top"><span class="ln-dir"><svg><use href="#i-${l.direction === "in" ? "in" : "out"}"/></svg></span><span class="ln-state">${esc(stTxt)}</span><span class="ln-dur">${t}</span></div>
+        <div class="ln-remote">${l.remote_name ? `<b>${esc(l.remote_name)}</b> ` : ""}<span>${esc(l.remote)}</span></div>
+        ${meta ? `<div class="ln-meta">${meta}</div>` : ""}${actions}
+      </li>`;
+    })
+    .join("");
+}
+
+function renderControls() {
+  const l = selLine();
+  const live = l && l.state !== "ended";
+  const connected = l && l.state === "connected";
+  const incoming = l && l.state === "incoming";
+  const callBtn = $("#btn-call");
+  callBtn.querySelector("span").textContent = incoming ? "Answer" : "Call";
+  callBtn.classList.toggle("pulse", !!incoming);
+  $("#btn-hangup").disabled = !live;
+  $("#btn-hangup").querySelector("span").textContent = incoming ? "Reject" : l && ["calling", "ringing", "early"].includes(l.state) ? "Cancel" : "Hang up";
+  const tool = (n) => $(`.tool[data-tool="${n}"]`);
+  tool("hold").disabled = !connected;
+  tool("hold").setAttribute("aria-pressed", String(!!(connected && l.held)));
+  tool("hold").querySelector("span").textContent = connected && l.held ? "Resume" : "Hold";
+  tool("mute").disabled = !(connected || (l && l.state === "early"));
+  tool("mute").setAttribute("aria-pressed", String(!!(l && l.muted)));
+  tool("transfer").disabled = !connected;
+  tool("record").disabled = !(connected && S.ctl.features.record);
+  tool("record").setAttribute("aria-pressed", String(!!(l && l.recording)));
+  const st = S.st ? S.st.settings : {};
+  tool("dnd").setAttribute("aria-pressed", String(!!st.dnd));
+  tool("aa").setAttribute("aria-pressed", String(!!st.auto_answer));
+  // Complete-transfer button appears once the consult call is up.
+  if (S.xfer && S.xfer.consult) {
+    const c = line(S.xfer.consult);
+    const f = line(S.xfer.from);
+    const ready = c && c.state === "connected" && f && f.state === "connected";
+    $("#xfer-complete").hidden = !ready;
+    $("#xfer-note").textContent = ready ? "Talk to the new party, then complete the transfer." : c && c.state !== "ended" ? `Consult call: ${STATE_TEXT[c.state] || c.state}` : "Consult call ended.";
+  }
+}
+
+function renderMeters() {
+  let l = selLine() || liveLines().find((x) => x.state === "connected");
+  if (l && l.state === "ended") l = null;
+  setMeter($("#m-tx"), l ? levelPct(l.tx_level) : 0);
+  setMeter($("#m-rx"), l ? levelPct(l.rx_level) : 0);
+  const st = S.st;
+  let src = "";
+  if (S.ctl.kind === "web") src = "Browser microphone and speaker";
+  else if (st) {
+    const s = st.settings.audio_source;
+    src = s === "device" ? (st.audio_device ? "Sound card" : "No sound card: sending a test tone") : s === "tone" ? `Test tone ${st.settings.tone_hz} Hz` : s === "echo" ? "Echoing received audio" : "Sending silence";
+  }
+  $("#audio-src").textContent = src;
+}
+
+function renderStatus() {
+  const st = S.st;
+  const a = currentAccount();
+  $("#st-acct").innerHTML = `<span class="dot ${regClass(a)}"></span><span>${a ? `${esc(accLabel(a))}: ${esc(REG_TEXT[a.state] || a.state)}` : "No account"}</span>`;
+  $("#st-net").textContent = a && a.local ? (S.ctl.kind === "web" ? `WSS ${a.server || ""}` : `UDP ${a.local} → ${a.server || "?"}`) : "";
+  $("#st-nat").textContent = !a || !a.public ? "" : S.ctl.kind === "web" ? `Server sees ${a.public}` : a.public !== a.local ? `Seen as ${a.public} (NAT)` : "No NAT on the signaling path";
+  const live = liveLines().length;
+  $("#st-lines").textContent = live ? `${live} call${live > 1 ? "s" : ""}` : "Idle";
+  $("#st-cap").textContent = st ? `${st.capture_packets.toLocaleString()} packets captured` : "";
+  $("#trace-count").textContent = S.trace.length ? S.trace.length.toLocaleString() : "";
+  const e = $("#st-err");
+  e.hidden = !S.errors;
+  e.textContent = `${S.errors} problem${S.errors === 1 ? "" : "s"}`;
+}
+
+let lastIncoming = new Set();
+function onState(st) {
+  const prev = S.st;
+  S.st = st;
+  // New incoming calls take the selection and the user's attention.
+  const inc = st.calls.filter((c) => c.state === "incoming").map((c) => c.line);
+  for (const id of inc) {
+    if (!lastIncoming.has(id)) {
+      S.sel = id;
+      const c = line(id);
+      toast(`Incoming call from ${c.remote_name || c.remote}`);
+      flashTitle(`Incoming: ${c.remote_name || c.remote}`);
+    }
+  }
+  lastIncoming = new Set(inc);
+  // Lines that just ended with a recording become downloadable.
+  if (prev) {
+    for (const c of st.calls) {
+      const was = prev.calls.find((p) => p.line === c.line);
+      if (was && was.state !== "ended" && c.state === "ended") {
+        if (c.recording && S.ctl.features.record) S.recordings.unshift({ line: c.line, remote: c.remote, ended: c.ended_ms });
+        if (S.page === "calls") setTimeout(renderHistory, 400);
+      }
+    }
+  }
+  pickSelection();
+  renderAccounts();
+  renderLines();
+  renderControls();
+  renderMeters();
+  renderStatus();
+  if (S.page === "calls") renderCallDetail();
+  if (S.page === "settings" && SET.cfg) renderSetNav();
+}
+
+function flashTitle(text) {
+  clearInterval(flashTitle.t);
+  let on = false;
+  flashTitle.t = setInterval(() => {
+    const ringing = liveLines().some((l) => l.state === "incoming");
+    if (!ringing) {
+      document.title = "Sidetone";
+      clearInterval(flashTitle.t);
+      return;
+    }
+    on = !on;
+    document.title = on ? text : "Sidetone";
+  }, 900);
+}
+
+async function cmd(o, quiet = false) {
+  try {
+    return await S.ctl.cmd(o);
+  } catch (e) {
+    if (!quiet) toast(e.message || String(e), 4500);
+    return null;
+  }
+}
+
+function parseHeaders(text) {
+  return text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const i = l.indexOf(":");
+      return i > 0 ? [l.slice(0, i).trim(), l.slice(i + 1).trim()] : null;
+    })
+    .filter(Boolean);
+}
+
+function rememberDialed(t) {
+  const h = store.get("sidetone.dialed", []).filter((x) => x !== t);
+  h.unshift(t);
+  store.set("sidetone.dialed", h.slice(0, 30));
+  renderDialHistory();
+}
+function renderDialHistory() {
+  $("#dial-history").innerHTML = store.get("sidetone.dialed", []).map((t) => `<option value="${esc(t)}">`).join("");
+}
+
+async function dial(target) {
+  target = (target ?? $("#dial").value).trim();
+  if (!target) {
+    $("#dial").focus();
+    return;
+  }
+  const a = currentAccount();
+  const req = { cmd: "call", target, account: a ? a.id : null };
+  const hdr = parseHeaders($("#opt-headers").value);
+  if (hdr.length) req.headers = hdr;
+  const ov = $("#opt-overrides").value.trim();
+  if (ov && S.ctl.features.overrides) {
+    try {
+      req.overrides = JSON.parse(ov);
+    } catch (e) {
+      toast(`Profile overrides are not valid JSON: ${e.message}`, 5000);
+      return;
+    }
+  }
+  rememberDialed(target);
+  const r = await cmd(req);
+  if (r && r.line) S.sel = r.line;
+  return r;
+}
+
+function callOrAnswer() {
+  const l = selLine();
+  if (l && l.state === "incoming") return cmd({ cmd: "answer", line: l.line });
+  return dial();
+}
+
+function hangupSel() {
+  const l = selLine();
+  if (!l || l.state === "ended") return;
+  if (l.state === "incoming") return cmd({ cmd: "reject", line: l.line, code: 486 });
+  return cmd({ cmd: "hangup", line: l.line });
+}
+
+function keyPress(k) {
+  const b = $(`#keypad [data-key="${CSS.escape(k)}"]`);
+  if (b) {
+    b.classList.add("hit");
+    setTimeout(() => b.classList.remove("hit"), 140);
+  }
+  const l = selLine();
+  if (l && (l.state === "connected" || l.state === "early")) cmd({ cmd: "dtmf", line: l.line, digits: k });
+  else {
+    const d = $("#dial");
+    d.value += k;
+  }
+}
+
+async function analyzeLine(callId) {
+  try {
+    const bytes = await S.ctl.capture(S.be);
+    await load(bytes, `sidetone-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "")}.pcapng`, S.ctl.kind === "web" ? S.ctl.lastSummary : null);
+    showWs("analysis");
+    if (callId && S.report) {
+      const i = S.report.calls.findIndex((c) => c.call_id === callId);
+      if (i >= 0) selectCall(i);
+    }
+  } catch (e) {
+    toast(`Nothing to analyze yet: ${e.message || e}`, 4000);
+  }
+}
+
+function openXfer() {
+  const l = selLine();
+  if (!l || l.state !== "connected") return;
+  S.xfer = { from: l.line, consult: null };
+  $("#xfer").hidden = false;
+  $("#xfer-who").textContent = l.remote_name || l.remote;
+  $("#xfer-complete").hidden = true;
+  $("#xfer-consult").hidden = !S.ctl.features.attended;
+  $("#xfer-note").textContent = S.ctl.features.attended ? "Blind sends the call away now. Consult calls the target first, then you complete the transfer." : "The browser phone supports blind transfer.";
+  $("#xfer-to").value = "";
+  $("#xfer-to").focus();
+}
+function closeXfer() {
+  S.xfer = null;
+  $("#xfer").hidden = true;
+}
+
+function bindPhone() {
+  $("#acct").addEventListener("change", () => {
+    store.set("sidetone.acct", $("#acct").value);
+    if (S.ctl.kind === "web") S.ctl.activate($("#acct").value);
+    renderAccounts();
+    renderStatus();
+  });
+  $("#acct-reg").addEventListener("click", () => {
+    const a = currentAccount();
+    if (a) cmd({ cmd: "register", account: a.id });
+  });
+  $("#opts-toggle").addEventListener("click", () => {
+    const o = $("#opts");
+    o.hidden = !o.hidden;
+    $("#opts-toggle").setAttribute("aria-expanded", String(!o.hidden));
+  });
+  $("#btn-call").addEventListener("click", callOrAnswer);
+  $("#btn-hangup").addEventListener("click", hangupSel);
+  $("#dial").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      callOrAnswer();
+    }
+  });
+  $$("#keypad button").forEach((b) => b.addEventListener("click", () => keyPress(b.dataset.key)));
+
+  $(".tools").addEventListener("click", async (e) => {
+    const b = e.target.closest(".tool");
+    if (!b || b.disabled) return;
+    const l = selLine();
+    const st = S.st ? S.st.settings : {};
+    switch (b.dataset.tool) {
+      case "hold":
+        if (l) cmd({ cmd: "hold", line: l.line, on: !l.held });
+        break;
+      case "mute":
+        if (l) cmd({ cmd: "mute", line: l.line, on: !l.muted });
+        break;
+      case "record":
+        if (l) cmd({ cmd: "record", line: l.line, on: !l.recording });
+        break;
+      case "transfer":
+        if ($("#xfer").hidden) openXfer();
+        else closeXfer();
+        break;
+      case "keypad": {
+        const on = $("#keypad").hidden;
+        $("#keypad").hidden = !on;
+        b.setAttribute("aria-pressed", String(on));
+        store.set("sidetone.keypad", on);
+        break;
+      }
+      case "dnd":
+        await cmd({ cmd: "dnd", on: !st.dnd });
+        toast(!st.dnd ? "Do not disturb: incoming calls are rejected" : "Do not disturb off");
+        break;
+      case "aa":
+        await cmd({ cmd: "auto_answer", on: !st.auto_answer });
+        toast(!st.auto_answer ? "Auto answer on" : "Auto answer off");
+        break;
+      case "analyze": {
+        const target = l || lines()[lines().length - 1];
+        analyzeLine(target ? target.call_id : null);
+        break;
+      }
+    }
+  });
+
+  $("#lines").addEventListener("click", (e) => {
+    const li = e.target.closest("li[data-line]");
+    if (!li) return;
+    const id = +li.dataset.line;
+    const act = e.target.closest("[data-act]");
+    S.sel = id;
+    if (act) {
+      const a = act.dataset.act;
+      if (a === "answer") cmd({ cmd: "answer", line: id });
+      if (a === "reject") cmd({ cmd: "reject", line: id, code: 486 });
+      if (a === "resume") cmd({ cmd: "hold", line: id, on: false });
+      if (a === "hangup") cmd({ cmd: "hangup", line: id });
+    }
+    renderLines();
+    renderControls();
+    renderMeters();
+    if (S.page === "calls") renderCallDetail();
+  });
+
+  $("#xfer-blind").addEventListener("click", async () => {
+    const t = $("#xfer-to").value.trim();
+    if (!t || !S.xfer) return;
+    await cmd({ cmd: "transfer", line: S.xfer.from, target: t });
+    closeXfer();
+  });
+  $("#xfer-consult").addEventListener("click", async () => {
+    const t = $("#xfer-to").value.trim();
+    if (!t || !S.xfer) return;
+    const from = line(S.xfer.from);
+    if (from && !from.held) await cmd({ cmd: "hold", line: from.line, on: true });
+    const r = await dial(t);
+    if (r && r.line) S.xfer.consult = r.line;
+    renderControls();
+  });
+  $("#xfer-complete").addEventListener("click", async () => {
+    if (!S.xfer || !S.xfer.consult) return;
+    await cmd({ cmd: "attended_transfer", line: S.xfer.from, to_line: S.xfer.consult });
+    toast("Transfer requested");
+    closeXfer();
+  });
+  $("#xfer-cancel").addEventListener("click", closeXfer);
+  $("#xfer-to").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      $("#xfer-blind").click();
+    }
+    if (e.key === "Escape") closeXfer();
+  });
+
+  // Hotkeys: Enter call/answer, Esc hang up, F2 transfer, F3 hold, F4 mute, digits send DTMF.
+  document.addEventListener("keydown", (e) => {
+    const tag = (e.target.tagName || "").toLowerCase();
+    const typing = ["input", "textarea", "select"].includes(tag) && e.target.id !== "dial";
+    if (e.key === "F2") { e.preventDefault(); $('.tool[data-tool="transfer"]').click(); return; }
+    if (e.key === "F3") { e.preventDefault(); $('.tool[data-tool="hold"]').click(); return; }
+    if (e.key === "F4") { e.preventDefault(); $('.tool[data-tool="mute"]').click(); return; }
+    if (typing) return;
+    const l = selLine();
+    if (e.key === "Escape") {
+      if ($$(".menu.open").length) return;
+      if (!$("#xfer").hidden) return closeXfer();
+      if (l && l.state !== "ended") {
+        e.preventDefault();
+        hangupSel();
+      }
+      return;
+    }
+    if (e.target.id === "dial") return;
+    if (e.key === "Enter" && l && l.state === "incoming") {
+      e.preventDefault();
+      cmd({ cmd: "answer", line: l.line });
+      return;
+    }
+    if (/^[0-9*#]$/.test(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (l && (l.state === "connected" || l.state === "early")) {
+        e.preventDefault();
+        keyPress(e.key);
+      } else {
+        e.preventDefault();
+        $("#dial").value += e.key;
+        $("#dial").focus();
+      }
+    }
+  });
+
+  if (store.get("sidetone.keypad", true) === false) {
+    $("#keypad").hidden = true;
+    $('.tool[data-tool="keypad"]').setAttribute("aria-pressed", "false");
+  }
+  renderDialHistory();
+  setInterval(() => {
+    if (liveLines().length) renderLines();
+  }, 1000);
+}
+
+// ============================================================================
+// Calls page
+
+function kv(rows) {
+  return `<dl class="kv">${rows
+    .filter(([, v]) => v !== null && v !== undefined && v !== "")
+    .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`)
+    .join("")}</dl>`;
+}
+
+function renderCallDetail() {
+  const l = selLine() || lines()[lines().length - 1];
+  const body = $("#call-detail-body");
+  if (!l) {
+    body.innerHTML = `<p class="empty-note">Details of the selected line show here: media addresses, codec, packets, DTMF and transfer progress.</p>`;
+    renderRecordings();
+    return;
+  }
+  const now = Date.now();
+  const m = (s) => `<span class="mono">${esc(s)}</span>`;
+  body.innerHTML = `
+    <div class="cd-head"><span class="badge st-${l.state}">${esc(STATE_TEXT[l.state] || l.state)}</span><b>${esc(l.remote_name || "")}</b> ${m(l.remote)}</div>
+    ${kv([
+      ["Direction", l.direction === "in" ? "Incoming" : "Outgoing"],
+      ["Account", esc(accName(l.account))],
+      ["Call-ID", m(l.call_id)],
+      ["Talk time", l.answered_ms ? dur((l.ended_ms || now) - l.answered_ms) : ""],
+      ["Codec", esc(l.codec || "")],
+      ["Local media", l.local_media ? m(l.local_media) : ""],
+      ["Remote media", l.remote_media ? m(l.remote_media) : ""],
+      ["RTP sent / received", l.rtp_sent || l.rtp_received ? `${l.rtp_sent.toLocaleString()} / ${l.rtp_received.toLocaleString()}${l.state === "connected" && !l.held && l.rtp_sent > 100 && l.rtp_received === 0 ? ` <span class="bad">no audio from the far end</span>` : ""}` : ""],
+      ["Hold", l.held ? "held by you" : l.remote_held ? "held by the remote side" : ""],
+      ["DTMF received", l.dtmf_rx ? m(l.dtmf_rx) : ""],
+      ["Transfer", esc(l.transfer || "")],
+      ["Result", l.final_code || l.reason ? esc(resultText(l.final_code, l.reason)) : ""],
+      ["Ended by", esc(l.ended_by || "")],
+    ])}
+    <div class="row">
+      <button type="button" class="btn small" id="cd-analyze">Analyze this call</button>
+      ${l.recording && S.ctl.features.record ? `<button type="button" class="btn small" id="cd-rec">Download recording</button>` : ""}
+    </div>`;
+  $("#cd-analyze").addEventListener("click", () => analyzeLine(l.call_id));
+  const rb = $("#cd-rec");
+  if (rb) rb.addEventListener("click", () => downloadRecording(l.line, l.remote));
+  renderRecordings();
+}
+
+async function downloadRecording(lineId, remote) {
+  try {
+    const w = await S.ctl.recording(lineId);
+    await download(w, `sidetone-${String(remote).replace(/[^\w@.-]+/g, "_")}-line${lineId}.wav`, "audio/wav");
+  } catch (e) {
+    toast(e.message || String(e), 4000);
+  }
+}
+
+function renderRecordings() {
+  let el = $("#recs");
+  if (!S.recordings.length) {
+    if (el) el.remove();
+    return;
+  }
+  if (!el) {
+    $("#call-detail").insertAdjacentHTML("beforeend", `<div id="recs" class="recs"></div>`);
+    el = $("#recs");
+  }
+  el.innerHTML = `<h3>Recordings this session</h3><ul>${S.recordings
+    .map((r) => `<li><button type="button" class="linklike" data-rec="${r.line}">${esc(r.remote)}, ${clock(r.ended)}</button></li>`)
+    .join("")}</ul><p class="hint">Stereo WAV: left is what Sidetone sent, right is what it received.</p>`;
+  el.querySelectorAll("[data-rec]").forEach((b) => b.addEventListener("click", () => downloadRecording(+b.dataset.rec, S.recordings.find((r) => r.line === +b.dataset.rec).remote)));
+}
+
+const EV_KIND = { reg: "Registration", call: "Call", incoming: "Incoming", media: "Media", dtmf: "DTMF", transfer: "Transfer", error: "Problem", account: "Account", diag: "Diagnostics", message: "Message", info: "Info" };
+
+function onEvents(evs) {
+  for (const e of evs) {
+    S.events.push(e);
+    if (e.kind === "error") S.errors++;
+  }
+  if (S.events.length > 1000) S.events.splice(0, S.events.length - 1000);
+  renderEvents(evs);
+}
+
+function renderEvents(newOnes) {
+  const ol = $("#events");
+  const fmt = (e) => `<li class="ev-${esc(e.kind)}"><span class="ev-t">${clock(e.ts_ms)}</span><span class="ev-k">${esc(EV_KIND[e.kind] || e.kind)}${e.line ? ` L${e.line}` : ""}</span><span class="ev-x">${esc(e.text)}</span></li>`;
+  if (!newOnes) {
+    ol.innerHTML = S.events.slice(-300).reverse().map(fmt).join("");
+    return;
+  }
+  ol.insertAdjacentHTML("afterbegin", newOnes.slice().reverse().map(fmt).join(""));
+  while (ol.children.length > 300) ol.lastElementChild.remove();
+}
+
+/// "404 Not Found" from a code and a reason that may already start with it.
+function resultText(code, reason) {
+  if (reason && code && String(reason).startsWith(String(code))) return reason;
+  return [code, reason].filter(Boolean).join(" ");
+}
+
+function accName(id) {
+  const a = S.st && S.st.accounts.find((x) => x.id === id);
+  return a ? accLabel(a) : id;
+}
+
+async function renderHistory() {
+  try {
+    S.history = await S.ctl.history();
+  } catch {
+    S.history = [];
+  }
+  const f = $("#hist-filter").value.trim().toLowerCase();
+  const rows = S.history.filter((h) => !f || `${h.remote} ${h.remote_name || ""} ${h.final_code || ""} ${h.reason || ""} ${h.call_id}`.toLowerCase().includes(f));
+  $("#hist-empty").hidden = rows.length > 0;
+  $("#hist").innerHTML = rows
+    .slice(0, 300)
+    .map((h, i) => {
+      const missed = h.direction === "in" && !h.answered;
+      const icon = missed ? "missed" : h.direction === "in" ? "in" : "out";
+      const result = h.answered ? "Answered" : resultText(h.final_code, h.reason) || "Not answered";
+      return `<tr class="${missed ? "missed" : ""}">
+        <td><svg class="hi" aria-label="${icon}"><use href="#i-${icon}"/></svg></td>
+        <td>${h.remote_name ? `<b>${esc(h.remote_name)}</b> ` : ""}<span class="mono">${esc(h.remote)}</span></td>
+        <td>${when(h.started_ms)}</td>
+        <td class="num">${h.answered ? dur(h.duration_s * 1000) : ""}</td>
+        <td class="${h.answered ? "" : "muted"}">${esc(result)}</td>
+        <td class="muted">${esc(accName(h.account))}</td>
+        <td class="acts"><button type="button" class="linklike" data-redial="${i}">Call</button> <button type="button" class="linklike" data-han="${i}">Analyze</button></td>
+      </tr>`;
+    })
+    .join("");
+  $("#hist").onclick = (e) => {
+    const r = e.target.closest("[data-redial]");
+    if (r) {
+      const h = rows[+r.dataset.redial];
+      $("#dial").value = h.remote;
+      dial(h.remote);
+    }
+    const a = e.target.closest("[data-han]");
+    if (a) analyzeLine(rows[+a.dataset.han].call_id);
+  };
+  renderCallDetail();
+}
+
+// ============================================================================
+// SIP trace
+
+function traceVisible(t) {
+  if ($("#tr-hide-reg").checked && t.method === "REGISTER") return false;
+  if ($("#tr-hide-opt").checked && ["OPTIONS", "NOTIFY", "SUBSCRIBE", "PUBLISH"].includes(t.method)) return false;
+  const f = $("#tr-filter").value.trim().toLowerCase();
+  if (!f) return true;
+  return `${t.first_line} ${t.call_id} ${t.src} ${t.dst} ${t.cseq}`.toLowerCase().includes(f) || t.raw.toLowerCase().includes(f);
+}
+
+function traceRow(t) {
+  const cls = t.status ? (t.status >= 400 ? "r-err" : t.status >= 300 ? "r-warn" : t.status >= 200 ? "r-ok" : "r-prov") : "r-req";
+  return `<div class="tr-row ${t.dir} ${cls}${t.seq === S.trSel ? " sel" : ""}" data-seq="${t.seq}">
+    <span class="tr-t">${clock(t.ts_ms, true)}</span>
+    <span class="tr-d">${t.dir === "out" ? "→" : "←"}</span>
+    <span class="tr-a">${esc(t.dir === "out" ? t.dst : t.src)}</span>
+    <span class="tr-f">${esc(t.first_line)}</span>
+    <span class="tr-c">${esc(t.call_id.slice(0, 14))}</span>
+  </div>`;
+}
+
+function onTrace(items) {
+  if (!items.length) return;
+  for (const t of items) S.trace.push(t);
+  if (S.trace.length > 5000) S.trace.splice(0, S.trace.length - 5000);
+  if (S.page === "trace" && !S.trPaused) {
+    const list = $("#tr-list");
+    const atEnd = list.scrollTop + list.clientHeight >= list.scrollHeight - 30;
+    list.insertAdjacentHTML("beforeend", items.filter(traceVisible).map(traceRow).join(""));
+    while (list.children.length > 3000) list.firstElementChild.remove();
+    if (atEnd) list.scrollTop = list.scrollHeight;
+  }
+  renderStatus();
+}
+
+function renderTrace(scroll) {
+  const list = $("#tr-list");
+  const rows = S.trace.filter(traceVisible).slice(-3000);
+  list.innerHTML = rows.length ? rows.map(traceRow).join("") : `<p class="empty-note pad">${S.trace.length ? "No messages match the filter." : "SIP messages sent and received by the phone appear here live."}</p>`;
+  if (scroll) list.scrollTop = list.scrollHeight;
+}
+
+function bindTrace() {
+  ["tr-filter", "tr-hide-reg", "tr-hide-opt"].forEach((id) => $("#" + id).addEventListener("input", () => renderTrace(false)));
+  $("#tr-list").addEventListener("click", (e) => {
+    const r = e.target.closest(".tr-row");
+    if (!r) return;
+    S.trSel = +r.dataset.seq;
+    $$(".tr-row.sel").forEach((x) => x.classList.remove("sel"));
+    r.classList.add("sel");
+    const t = S.trace.find((x) => x.seq === S.trSel);
+    if (t) $("#tr-view").innerHTML = `<span class="muted">${esc(t.dir === "out" ? "Sent" : "Received")} ${clock(t.ts_ms, true)}, ${esc(t.transport)} ${esc(t.src)} → ${esc(t.dst)}, ${t.size} bytes</span>\n\n${highlightSip(t.raw)}`;
+  });
+  $("#tr-list").addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    e.preventDefault();
+    const cur = $(".tr-row.sel");
+    const next = cur ? (e.key === "ArrowDown" ? cur.nextElementSibling : cur.previousElementSibling) : $(".tr-row");
+    if (next) {
+      next.click();
+      next.scrollIntoView({ block: "nearest" });
+    }
+  });
+  $("#tr-pause").addEventListener("click", (e) => {
+    S.trPaused = !S.trPaused;
+    e.target.setAttribute("aria-pressed", String(S.trPaused));
+    e.target.textContent = S.trPaused ? "Resume" : "Pause";
+    if (!S.trPaused) renderTrace(true);
+  });
+  $("#tr-clear").addEventListener("click", async () => {
+    S.trace = [];
+    S.trSel = null;
+    $("#tr-view").innerHTML = "";
+    await S.ctl.clearCapture().catch(() => {});
+    renderTrace(false);
+    renderStatus();
+  });
+  $("#tr-save").addEventListener("click", async () => {
+    try {
+      const b = await S.ctl.capture(S.be);
+      await download(b, `sidetone-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "")}.pcapng`, "application/vnd.tcpdump.pcap");
+    } catch (e) {
+      toast(e.message || String(e), 4000);
+    }
+  });
+  $("#tr-analyze").addEventListener("click", () => {
+    const t = S.trace.find((x) => x.seq === S.trSel);
+    analyzeLine(t ? t.call_id : null);
+  });
+}
+
+// ============================================================================
+// Analysis (captures)
+
+async function load(bytes, name, webrtc = null) {
   try {
     const report = await S.be.analyze(bytes);
-    Object.assign(S, { bytes, name, report, call: null, msg: null, stream: null, webrtc });
+    Object.assign(S, { bytes, name, report, call: null, msg: null, webrtc });
   } catch (e) {
     toast(`Could not read ${name}: ${e.message || e}`, 5000);
     return;
   }
-  const r = S.report;
-  $('.view-btn[data-view="analysis"]').disabled = false;
-  if (show) setView("analysis");
-  $("#btn-export").disabled = false;
-  const s = r.summary;
-  $("#capinfo").textContent = `${name}: ${s.calls} calls, ${s.sip_messages} SIP messages, ${s.rtp_streams} RTP streams, ${s.duration_s.toFixed(1)} s`;
+  $("#an-empty").hidden = true;
+  $("#an").hidden = false;
+  const s = S.report.summary;
+  $("#capinfo").textContent = `${name}: ${s.calls} dialogs, ${s.sip_messages} SIP messages, ${s.rtp_streams} RTP streams, ${s.duration_s.toFixed(1)} s, ${s.errors} errors, ${s.warnings} warnings`;
   renderCalls();
+  const r = S.report;
   const first = r.calls.findIndex((c) => c.errors > 0);
   const inv = r.calls.findIndex((c) => c.kind === "INVITE");
-  selectCall(first >= 0 ? first : inv >= 0 ? inv : r.calls.length ? 0 : null);
+  await selectCall(first >= 0 ? first : inv >= 0 ? inv : r.calls.length ? 0 : null);
 }
 
 async function loadFile(f) {
-  const buf = new Uint8Array(await f.arrayBuffer());
-  await load(buf, f.name);
+  await load(new Uint8Array(await f.arrayBuffer()), f.name);
+  showWs("analysis");
 }
 
-// ---------- rendering ----------
-
-const STATE_LABEL = { answered: "Answered", failed: "Failed", cancelled: "Cancelled", in_progress: "No answer", non_invite: "" };
+const AN_STATE = { answered: "Answered", failed: "Failed", cancelled: "Cancelled", in_progress: "No answer", non_invite: "" };
 
 function renderCalls() {
   const r = S.report;
@@ -170,7 +954,7 @@ function renderCalls() {
   $("#calls").innerHTML = r.calls
     .map((c) => {
       const st = c.state;
-      const label = st === "non_invite" ? (c.final_status ? `${c.final_status}` : "no answer") : `${STATE_LABEL[st]}${c.final_status ? " " + c.final_status : ""}`;
+      const label = st === "non_invite" ? (c.final_status ? `${c.final_status}` : "no answer") : `${AN_STATE[st]}${c.final_status ? " " + c.final_status : ""}`;
       const counts = `${c.errors ? `<span class="cnt-e">${c.errors} error${c.errors > 1 ? "s" : ""}</span>` : ""}${c.warnings ? `<span class="cnt-w">${c.warnings} warning${c.warnings > 1 ? "s" : ""}</span>` : ""}`;
       return `<li><button type="button" data-call="${c.index}">
         <span class="c-top"><span>${esc(c.kind)}</span><span class="state ${st}">${esc(label)}</span></span>
@@ -184,7 +968,6 @@ function renderCalls() {
 async function selectCall(i) {
   S.call = i;
   S.msg = null;
-  S.stream = null;
   $$("#calls button").forEach((b) => b.setAttribute("aria-current", String(+b.dataset.call === i)));
   const r = S.report;
   const c = i == null ? null : r.calls[i];
@@ -207,15 +990,14 @@ async function selectCall(i) {
 }
 
 function callFindings() {
-  const r = S.report;
-  return r.findings.filter((f) => S.call == null || f.call === S.call || f.call == null);
+  return S.report.findings.filter((f) => S.call == null || f.call === S.call || f.call == null);
 }
 
 function renderFindings() {
   const fs = callFindings();
   $("#n-findings").textContent = fs.length || "";
   if (!fs.length) {
-    $("#tab-findings").innerHTML = `<p class="empty-note">No findings for this call. Signaling and media look as expected.</p>`;
+    $("#tab-findings").innerHTML = `<p class="empty-note">No findings for this dialog. Signaling and media look as expected.</p>`;
     return;
   }
   const sevName = { error: "Error", warning: "Warning", info: "Note" };
@@ -235,9 +1017,9 @@ function highlightSip(raw) {
   const sep = raw.search(/\r?\n\r?\n/);
   const head = sep >= 0 ? raw.slice(0, sep) : raw;
   const body = sep >= 0 ? raw.slice(sep).replace(/^\r?\n\r?\n/, "") : "";
-  const lines = head.split(/\r?\n/);
-  const out = [`<span class="sl">${esc(lines[0])}</span>`];
-  for (const l of lines.slice(1)) {
+  const ls = head.split(/\r?\n/);
+  const out = [`<span class="sl">${esc(ls[0])}</span>`];
+  for (const l of ls.slice(1)) {
     const i = l.indexOf(":");
     out.push(i > 0 ? `<span class="hn">${esc(l.slice(0, i))}</span>${esc(l.slice(i))}` : esc(l));
   }
@@ -279,7 +1061,7 @@ function renderMedia() {
     return;
   }
   if (!streams.length) {
-    $("#tab-media").innerHTML = `<p class="empty-note">${r.streams.length ? "No RTP linked to this call." : "The capture has no RTP. Capture media too (not only port 5060) to analyze audio."}</p>`;
+    $("#tab-media").innerHTML = `<p class="empty-note">${r.streams.length ? "No RTP linked to this dialog." : "The capture has no RTP. Capture media too (not only port 5060) to analyze audio."}</p>`;
     return;
   }
   const cls = (v, w, b) => (v >= b ? "bad" : v >= w ? "warn" : "");
@@ -364,12 +1146,12 @@ function aiConfig() {
 }
 
 function renderAnswer(text) {
-  const lines = esc(text).split("\n").map((l) => {
+  const ls = esc(text).split("\n").map((l) => {
     const h = l.match(/^#{1,4}\s+(.*)$/);
     if (h) return `<h3>${h[1]}</h3>`;
     return l.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>");
   });
-  return `<div class="answer">${lines.join("\n")}</div>`;
+  return `<div class="answer">${ls.join("\n")}</div>`;
 }
 
 async function askAI(preview) {
@@ -395,8 +1177,7 @@ async function askAI(preview) {
   btn.disabled = true;
   out.innerHTML = `<p class="muted">Asking ${esc(cfg.provider)} (${esc(cfg.model)})…</p>`;
   try {
-    const text = await S.be.ai(cfg, system, prompt);
-    out.innerHTML = renderAnswer(text);
+    out.innerHTML = renderAnswer(await S.be.ai(cfg, system, prompt));
   } catch (e) {
     out.innerHTML = `<p class="err">${esc(e.message || e)}</p>`;
   } finally {
@@ -404,11 +1185,8 @@ async function askAI(preview) {
   }
 }
 
-// ---------- wiring ----------
-
-function bind() {
+function bindAnalysis() {
   $("#file").addEventListener("change", (e) => e.target.files[0] && loadFile(e.target.files[0]));
-
   document.addEventListener("dragover", (e) => {
     e.preventDefault();
     document.body.classList.add("dragging");
@@ -422,7 +1200,6 @@ function bind() {
     const f = e.dataTransfer.files[0];
     if (f) loadFile(f);
   });
-
   $$(".menu > .btn").forEach((b) =>
     b.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -436,7 +1213,6 @@ function bind() {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") $$(".menu").forEach((x) => x.classList.remove("open"));
   });
-
   $("#calls").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-call]");
     if (b) selectCall(+b.dataset.call);
@@ -444,8 +1220,7 @@ function bind() {
   $("#ladder").addEventListener("click", (e) => {
     const g = e.target.closest(".msg");
     if (g) selectMessage(+g.dataset.msg);
-    const st = e.target.closest(".stream");
-    if (st) showTab("media");
+    if (e.target.closest(".stream")) showTab("media");
   });
   const openFinding = (li) => {
     const f = S.report.findings[+li.dataset.finding];
@@ -464,7 +1239,6 @@ function bind() {
     }
   });
   $$(".tabs [role=tab]").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
-
   $$("[data-export]").forEach((b) =>
     b.addEventListener("click", async () => {
       const kind = b.dataset.export;
@@ -482,7 +1256,6 @@ function bind() {
       }
     })
   );
-
   $("#ai-provider").addEventListener("change", () => {
     $("#ai-model").value = AI_DEFAULT_MODEL[$("#ai-provider").value];
     aiPlaceholders();
@@ -492,7 +1265,611 @@ function bind() {
     askAI(false);
   });
   $("#ai-preview").addEventListener("click", () => askAI(true));
+}
 
+// ============================================================================
+// Diagnostics
+
+function diagAccounts() {
+  const opts = (S.st ? S.st.accounts : []).map((a) => `<option value="${esc(a.id)}">${esc(accLabel(a))}</option>`).join("");
+  const sel = $("#dg-opt-acct");
+  const keep = sel.value || $("#acct").value;
+  sel.innerHTML = opts;
+  if (keep) sel.value = keep;
+}
+
+function table(head, rows) {
+  return `<table class="mini"><thead><tr>${head.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+}
+
+let audioPoll = null;
+async function diagOpen() {
+  diagAccounts();
+  const a = currentAccount();
+  if (a && !$("#dg-dns-host").value) $("#dg-dns-host").value = (a.domain || "").replace(/:\d+$/, "");
+  const nat = (S.st ? S.st.accounts : []).filter((x) => x.public);
+  $("#dg-reg-nat").innerHTML = nat.length
+    ? `<h3>What the SIP server sees</h3>${table(["Account", "Local", "Seen as", ""], nat.map((x) => [esc(accLabel(x)), `<span class="mono">${esc(x.local)}</span>`, `<span class="mono">${esc(x.public)}</span>`, x.public !== x.local ? `<span class="warn">NAT between you and the server</span>` : "same address, no NAT"]))}<p class="hint">From the received and rport parameters of the server's response to REGISTER.</p>`
+    : "";
+  if (S.ctl.kind === "native") {
+    try {
+      const d = await S.ctl.audio();
+      const dev = d.devices;
+      const st = d.audio;
+      const prefs = st.prefs || {};
+      const opt = (list, cur) => [`<option value="">System default</option>`, ...list.map((n) => `<option ${n === cur ? "selected" : ""}>${esc(n)}</option>`)].join("");
+      $("#dg-audio").innerHTML = `
+        <p class="muted">${st.status ? `Open: microphone <b>${esc(st.status.input || "none")}</b>${st.status.input_rate ? ` at ${st.status.input_rate} Hz` : ""}, speaker <b>${esc(st.status.output || "none")}</b>${st.status.output_rate ? ` at ${st.status.output_rate} Hz` : ""}.` : esc(st.error || dev.error || "No sound card is open. Calls send a test tone instead.")}</p>
+        <div class="row">
+          <label class="grow">Microphone <select id="dg-in">${opt(dev.inputs || [], prefs.input)}</select></label>
+          <label class="grow">Speaker <select id="dg-out">${opt(dev.outputs || [], prefs.output)}</select></label>
+          <button type="button" class="btn" id="dg-audio-apply">Use these</button>
+        </div>
+        <div class="meters">
+          <div class="meter-row"><svg><use href="#i-mic"/></svg><div class="meter"><i id="dg-m-in"></i></div></div>
+          <div class="meter-row"><svg><use href="#i-spk"/></svg><div class="meter"><i id="dg-m-out"></i></div></div>
+        </div>
+        <label class="check"><input type="checkbox" id="dg-loop"> Play the microphone on the speaker (use headphones)</label>
+        <p class="hint">Audio host: ${esc(dev.host || "")}. Calls use the sound card when Settings, Audio, Send is set to Sound card.</p>`;
+      $("#dg-audio-apply").addEventListener("click", async () => {
+        const c = await S.ctl.getConfig();
+        c.audio = { ...(c.audio || {}), enabled: true, input: $("#dg-in").value || null, output: $("#dg-out").value || null };
+        await S.ctl.setConfig({ audio: c.audio });
+        toast("Audio devices changed");
+        diagOpen();
+      });
+      $("#dg-loop").addEventListener("change", async (e) => {
+        try {
+          await S.ctl.loopback(e.target.checked);
+        } catch (err) {
+          toast(err.message || String(err), 4000);
+          e.target.checked = false;
+        }
+      });
+      clearInterval(audioPoll);
+      audioPoll = setInterval(async () => {
+        if (S.page !== "diag") {
+          clearInterval(audioPoll);
+          S.ctl.loopback(false).catch(() => {});
+          return;
+        }
+        try {
+          const s = await S.ctl.audioStatus();
+          if (s.status) {
+            setMeter($("#dg-m-in"), levelPct(s.status.mic_level));
+            setMeter($("#dg-m-out"), levelPct(s.status.speaker_level));
+          }
+        } catch { /* ignore */ }
+      }, 200);
+    } catch (e) {
+      $("#dg-audio").innerHTML = `<p class="err">${esc(e.message || e)}</p>`;
+    }
+  } else {
+    $("#dg-audio").innerHTML = `<p class="muted">The browser phone uses the microphone and speaker chosen in the browser. Test the microphone level here:</p>
+      <div class="meters"><div class="meter-row"><svg><use href="#i-mic"/></svg><div class="meter"><i id="dg-m-in"></i></div></div></div>
+      <button type="button" class="btn" id="dg-mic">Test microphone</button>`;
+    $("#dg-mic").addEventListener("click", async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const ac = new AudioContext();
+        const an = ac.createAnalyser();
+        ac.createMediaStreamSource(stream).connect(an);
+        const buf = new Float32Array(an.fftSize);
+        const t = setInterval(() => {
+          an.getFloatTimeDomainData(buf);
+          const peak = Math.max(...buf.map(Math.abs));
+          setMeter($("#dg-m-in"), levelPct(peak * 32767));
+        }, 100);
+        setTimeout(() => {
+          clearInterval(t);
+          stream.getTracks().forEach((x) => x.stop());
+          ac.close();
+          setMeter($("#dg-m-in"), 0);
+        }, 10000);
+      } catch (e) {
+        toast(`Microphone: ${e.message || e}`, 4000);
+      }
+    });
+  }
+}
+
+function bindDiag() {
+  $("#dg-opt-go").addEventListener("click", async () => {
+    const out = $("#dg-opt-out");
+    out.innerHTML = `<p class="muted">Waiting for a response (up to 32 s)…</p>`;
+    try {
+      const r = await S.ctl.options($("#dg-opt-acct").value || null, $("#dg-opt-target").value.trim());
+      out.innerHTML = r && r.code ? `<p class="${r.code < 300 || r.code === 404 || r.code === 405 ? "ok" : "warn"}"><b>${esc(r.summary)}</b></p>` : `<p class="bad"><b>No response.</b> ${esc((r && r.summary) || "")}</p>`;
+    } catch (e) {
+      out.innerHTML = `<p class="bad">${esc(e.message || e)}</p>`;
+    }
+  });
+  $("#dg-dns-go").addEventListener("click", async () => {
+    const host = $("#dg-dns-host").value.trim();
+    if (!host) return;
+    const out = $("#dg-dns-out");
+    out.innerHTML = `<p class="muted">Looking up ${esc(host)}…</p>`;
+    try {
+      const r = await S.ctl.dns(host);
+      out.innerHTML = `
+        ${r.chosen ? `<p class="ok"><b>UDP requests go to ${esc(r.chosen)}</b></p>` : `<p class="bad"><b>No usable address.</b></p>`}
+        ${r.naptr.length ? `<h3>NAPTR</h3>${table(["Order", "Pref", "Flags", "Service", "Replacement"], r.naptr.map((n) => [n.order, n.preference, esc(n.flags), esc(n.service), `<span class="mono">${esc(n.replacement)}</span>`]))}` : ""}
+        ${r.srv.length ? `<h3>SRV</h3>${table(["Name", "Prio", "Weight", "Port", "Target", "Addresses"], r.srv.map((s) => [`<span class="mono">${esc(s.name)}</span>`, s.priority, s.weight, s.port, `<span class="mono">${esc(s.target)}</span>`, `<span class="mono">${esc(s.addresses.join(", "))}</span>`]))}` : ""}
+        <h3>Steps</h3><ol class="steps">${r.steps.map((s) => `<li>${esc(s)}</li>`).join("")}</ol>
+        <p class="hint">${r.elapsed_ms} ms</p>`;
+    } catch (e) {
+      out.innerHTML = `<p class="bad">${esc(e.message || e)}</p>`;
+    }
+  });
+  $("#dg-dns-host").addEventListener("keydown", (e) => e.key === "Enter" && $("#dg-dns-go").click());
+  $("#dg-stun-go").addEventListener("click", async () => {
+    const servers = $("#dg-stun-servers").value.split(/[,\s]+/).filter(Boolean);
+    const out = $("#dg-stun-out");
+    out.innerHTML = `<p class="muted">Asking ${servers.length} server${servers.length > 1 ? "s" : ""}…</p>`;
+    try {
+      const r = await S.ctl.stun(servers);
+      out.innerHTML = `<p><b>${esc(r.nat)}</b></p>${table(["Server", "Seen as", "Round trip", ""], r.probes.map((p) => [`<span class="mono">${esc(p.server)}</span>`, `<span class="mono">${esc(p.mapped || "")}</span>`, p.rtt_ms != null ? `${p.rtt_ms} ms` : "", esc(p.error || "")]))}${r.local ? `<p class="hint">Local socket ${esc(r.local)}</p>` : ""}`;
+    } catch (e) {
+      out.innerHTML = `<p class="bad">${esc(e.message || e)}</p>`;
+    }
+  });
+}
+
+// ============================================================================
+// Settings
+
+const get = (o, path) => path.split(".").reduce((x, k) => (x == null ? x : x[k]), o);
+function set(o, path, v) {
+  const ks = path.split(".");
+  let x = o;
+  for (const k of ks.slice(0, -1)) x = x[k] ??= {};
+  x[ks[ks.length - 1]] = v;
+}
+
+// Field: [path, label, type, hint, extra]
+const NATIVE_ACC_TABS = [
+  ["Account", [
+    ["label", "Name in the phone", "text", "e.g. Genesys lab 2001"],
+    ["enabled", "Enabled", "bool"],
+    ["profile.account.user", "User (extension or number)", "text"],
+    ["profile.account.display_name", "Display name", "opt"],
+    ["profile.account.auth_user", "Authentication user", "opt", "only when it differs from the user"],
+    ["profile.account.password", "Password", "password"],
+    ["profile.account.domain", "Domain or registrar", "text", "host or host:port. Without a port, DNS SRV (_sip._udp) is tried first."],
+  ]],
+  ["Server and registration", [
+    ["register", "Register", "bool", "turn off for trunks, peer-to-peer tests or call-only use"],
+    ["profile.account.outbound_proxy", "Outbound proxy", "opt", "host:port. Every request goes here, whatever the destination."],
+    ["profile.account.expires", "Registration expiry (s)", "number"],
+    ["retry_s", "Retry a failed registration after (s)", "number"],
+    ["profile.account.q_value", "Contact q-value", "opt"],
+    ["profile.behavior.keepalive_interval", "CRLF keepalive every (s)", "number", "0 = off. Keeps NAT bindings open."],
+    ["profile.behavior.filter_registrar", "Accept requests only from the registrar", "bool"],
+  ]],
+  ["Network", [
+    ["profile.behavior.local_ip", "Local IP", "opt", "empty = the interface the OS routes to the server"],
+    ["profile.behavior.local_port", "Local SIP port", "number", "0 = random. Use 5060 to look like a desk phone."],
+    ["profile.behavior.rport", "Request rport (RFC 3581)", "bool"],
+    ["profile.behavior.symmetric_rtp", "Symmetric RTP (send audio back where it comes from)", "bool"],
+    ["profile.behavior.rtp_port_start", "RTP ports from", "number"],
+    ["profile.behavior.rtp_port_end", "RTP ports to", "number"],
+    ["profile.behavior.dscp_sip", "DSCP for SIP", "number", "24 = CS3, 26 = AF31"],
+    ["profile.behavior.dscp_rtp", "DSCP for RTP", "number", "46 = EF"],
+    ["profile.behavior.sdp_ip_override", "Address in SDP", "opt", "advertise another address, e.g. to reproduce one-way audio behind NAT"],
+    ["profile.behavior.t1_ms", "Timer T1 (ms)", "number", "RFC 3261 retransmission base, 500 by default"],
+  ]],
+  ["Media", [
+    ["profile.behavior.codecs", "Codecs, in order of preference", "codecs"],
+    ["profile.behavior.ptime_ms", "Packet time (ms)", "select", "", [["10", "10"], ["20", "20"], ["30", "30"], ["40", "40"], ["60", "60"]]],
+    ["profile.behavior.sdp_direction", "Direction offered", "select", "", [["sendrecv", "sendrecv"], ["sendonly", "sendonly"], ["recvonly", "recvonly"], ["inactive", "inactive"]]],
+  ]],
+  ["DTMF", [
+    ["profile.behavior.dtmf_mode", "Send DTMF as", "select", "", [["rfc4733", "RTP events (RFC 4733)"], ["info", "SIP INFO (dtmf-relay)"], ["inband", "Tones in the audio"]]],
+    ["profile.behavior.dtmf_payload_type", "telephone-event payload type", "number"],
+  ]],
+  ["Advanced SIP", [
+    ["profile.behavior.user_agent", "User-Agent", "text"],
+    ["profile.behavior.max_forwards", "Max-Forwards", "number"],
+    ["profile.behavior.session_timer", "Session timer (s)", "number", "0 = off; otherwise Session-Expires is requested and refreshed with UPDATE"],
+    ["profile.behavior.user_phone", "Add user=phone to numeric destinations", "bool"],
+    ["profile.behavior.compact_headers", "Compact header names (v, f, t, i, m, l)", "bool"],
+    ["profile.behavior.require_prack", "Require reliable provisional responses (100rel)", "bool"],
+    ["profile.behavior.offer_gruu", "Advertise GRUU", "bool"],
+    ["profile.behavior.long_contact", "Long Contact (+sip.instance, feature tags)", "bool"],
+    ["profile.behavior.proxy_require", "Proxy-Require", "opt"],
+    ["profile.behavior.skip_ack", "Do not send ACK for 2xx (reproduces the 32 s drop)", "bool", "testing only"],
+  ]],
+  ["Headers", [["profile.behavior.extra_headers", "Headers added to every request", "headers"]]],
+];
+
+const WEB_ACC_TABS = [
+  ["Account", [
+    ["label", "Name in the phone", "text"],
+    ["enabled", "Enabled", "bool"],
+    ["user", "User (extension or number)", "text"],
+    ["displayName", "Display name", "text"],
+    ["authUser", "Authentication user", "text", "only when it differs from the user"],
+    ["password", "Password", "password"],
+    ["rememberPassword", "Remember the password in this browser", "bool"],
+    ["domain", "SIP domain", "text"],
+  ]],
+  ["Server and registration", [
+    ["ws", "WebSocket URL", "text", "wss://pbx.example.com:8089/ws. Pages served over https need wss with a trusted certificate."],
+    ["register", "Register", "bool"],
+    ["expires", "Registration expiry (s)", "number"],
+  ]],
+  ["Network", [["ice", "STUN or TURN servers", "text", "comma separated, e.g. stun:stun.l.google.com:19302"]]],
+];
+
+const CALL_SETTINGS = [
+  ["dnd", "Do not disturb", "bool"],
+  ["dnd_code", "Reject calls in DND with", "select", "", [["486", "486 Busy Here"], ["480", "480 Temporarily Unavailable"], ["603", "603 Decline"]], "native"],
+  ["auto_answer", "Auto answer", "bool"],
+  ["auto_answer_delay_ms", "Auto answer after (ms)", "number"],
+  ["intercom", "Answer intercom calls at once (Call-Info answer-after, Alert-Info)", "bool", "", null, "native"],
+  ["max_lines", "Lines", "number", "", null, "native"],
+  ["auto_hold", "Put the other calls on hold when you answer or resume one", "bool", "", null, "native"],
+  ["busy_code", "When all lines are busy, reject with", "select", "", [["486", "486 Busy Here"], ["480", "480 Temporarily Unavailable"], ["503", "503 Service Unavailable"]], "native"],
+  ["ring_timeout_s", "Cancel unanswered outgoing calls after (s)", "number", "", null, "native"],
+];
+
+function fieldHtml(f, value, id) {
+  const [, label, type, hint = "", opts] = f;
+  const h = hint ? `<span class="hint">${esc(hint)}</span>` : "";
+  switch (type) {
+    case "bool":
+      return `<label class="check fld"><input type="checkbox" id="${id}" ${value ? "checked" : ""}> ${esc(label)} ${h}</label>`;
+    case "number":
+      return `<label class="fld">${esc(label)} ${h}<input type="number" id="${id}" value="${esc(value ?? "")}"></label>`;
+    case "password":
+      return `<label class="fld">${esc(label)} ${h}<input type="password" id="${id}" value="${esc(value ?? "")}" autocomplete="new-password"></label>`;
+    case "select":
+      return `<label class="fld">${esc(label)} ${h}<select id="${id}">${opts.map(([v, t]) => `<option value="${esc(v)}" ${String(value) === v ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label>`;
+    case "codecs": {
+      const all = ["PCMU", "PCMA"];
+      const cur = (value || []).filter((c) => all.includes(c));
+      const order = [...cur, ...all.filter((c) => !cur.includes(c))];
+      return `<div class="fld"><span>${esc(label)}</span><ol class="codecs" id="${id}">${order
+        .map((c) => `<li data-codec="${c}"><label class="check"><input type="checkbox" ${cur.includes(c) ? "checked" : ""}> ${c === "PCMU" ? "PCMU (G.711 μ-law)" : "PCMA (G.711 A-law)"}</label><button type="button" class="linklike" data-up>Up</button></li>`)
+        .join("")}</ol><span class="hint">This build sends and receives G.711. Other codecs in a capture are still analyzed.</span></div>`;
+    }
+    case "headers": {
+      const rows = (value || []).map(([k, v]) => `<div class="hdr-row"><input placeholder="Name" value="${esc(k)}"><input placeholder="Value" value="${esc(v)}"><button type="button" class="linklike" data-del>Remove</button></div>`).join("");
+      return `<div class="fld"><span>${esc(label)}</span><div class="hdrs" id="${id}">${rows}</div><button type="button" class="btn small" data-addhdr="${id}">Add header</button></div>`;
+    }
+    case "opt":
+    default:
+      return `<label class="fld">${esc(label)} ${h}<input id="${id}" value="${esc(value ?? "")}" spellcheck="false"></label>`;
+  }
+}
+
+function readField(f, id, obj) {
+  const [path, , type] = f;
+  const el = document.getElementById(id);
+  if (!el) return;
+  let v;
+  switch (type) {
+    case "bool": v = el.checked; break;
+    case "number": v = el.value === "" ? 0 : Number(el.value); break;
+    case "select": v = /^\d+$/.test(el.value) && typeof get(obj, path) === "number" ? Number(el.value) : el.value; break;
+    case "codecs": v = [...el.querySelectorAll("li")].filter((li) => li.querySelector("input").checked).map((li) => li.dataset.codec); break;
+    case "headers": v = [...el.querySelectorAll(".hdr-row")].map((r) => [r.children[0].value.trim(), r.children[1].value.trim()]).filter(([k]) => k); break;
+    case "opt": v = el.value.trim() || null; break;
+    default: v = el.value;
+  }
+  set(obj, path, v);
+}
+
+const SET = { cfg: null, accId: null, accTab: 0, section: null, dirty: false };
+
+async function settingsOpen() {
+  try {
+    SET.cfg = await S.ctl.getConfig();
+  } catch (e) {
+    $("#set-body").innerHTML = `<p class="err">${esc(e.message || e)}</p>`;
+    return;
+  }
+  if (!SET.accId && !SET.section) SET.accId = SET.cfg.accounts.length ? SET.cfg.accounts[0].id : null;
+  if (!SET.accId && !SET.section) SET.section = SET.cfg.accounts.length ? null : "new";
+  renderSetNav();
+  renderSetBody();
+}
+
+function renderSetNav() {
+  $("#acc-list").innerHTML = SET.cfg.accounts
+    .map((a) => {
+      const live = S.st && S.st.accounts.find((x) => x.id === a.id);
+      const name = a.label || (S.ctl.kind === "web" ? a.user : a.profile.account.user) || "Unnamed";
+      return `<li><button type="button" data-acc="${esc(a.id)}" aria-current="${a.id === SET.accId && !SET.section}"><span class="dot ${regClass(live)}"></span>${esc(name)}</button></li>`;
+    })
+    .join("") || `<li class="muted small pad">No accounts</li>`;
+  $$(".set-nav [data-set]").forEach((b) => b.setAttribute("aria-current", String(b.dataset.set === SET.section)));
+}
+
+function newNativeAccount() {
+  const n = SET.cfg.accounts.length + 1;
+  let id = String(n);
+  while (SET.cfg.accounts.some((a) => a.id === id)) id = String(+id + 1);
+  return { id, label: "", enabled: true, register: true, retry_s: 30, profile: { name: "", account: { user: "", auth_user: null, password: null, domain: "", display_name: null, outbound_proxy: null, expires: 300, q_value: null }, behavior: null } };
+}
+
+async function renderSetBody() {
+  const body = $("#set-body");
+  const native = S.ctl.kind === "native";
+  if (SET.section === "new" || (!SET.section && !SET.accId)) {
+    body.innerHTML = `<div class="set-empty"><h1>Add your first account</h1><p class="muted">${native ? "Sidetone registers over UDP from this computer, like a desk phone. You need the server address, the extension and its password." : "In the browser Sidetone talks SIP over WebSocket (RFC 7118) with WebRTC audio. Your PBX needs a WSS listener, for example Asterisk on port 8089 or a Genesys/Ribbon SBC with WebRTC enabled."}</p><button type="button" class="btn primary" id="acc-first">Add account</button></div>`;
+    $("#acc-first").addEventListener("click", addAccount);
+    return;
+  }
+  if (SET.section) return renderGlobal(SET.section);
+  const acc = SET.cfg.accounts.find((a) => a.id === SET.accId);
+  if (!acc) {
+    SET.accId = null;
+    return renderSetBody();
+  }
+  // Fill behavior defaults so every field shows a value.
+  if (native && !acc.profile.behavior) acc.profile.behavior = (await defaultBehavior()) || {};
+  const tabs = native ? NATIVE_ACC_TABS : WEB_ACC_TABS;
+  const t = Math.min(SET.accTab, tabs.length - 1);
+  const [, fields] = tabs[t];
+  body.innerHTML = `
+    <div class="set-head">
+      <h1>${esc(acc.label || (native ? acc.profile.account.user : acc.user) || "New account")}</h1>
+      <div class="row"><button type="button" class="btn small" id="acc-dup">Duplicate</button><button type="button" class="btn small danger" id="acc-del">Delete</button></div>
+    </div>
+    <div class="seg" role="tablist">${tabs.map(([n], i) => `<button type="button" role="tab" data-acctab="${i}" aria-selected="${i === t}">${esc(n)}</button>`).join("")}</div>
+    <form class="set-form" id="acc-form" autocomplete="off">
+      <div class="fields">${fields.map((f, i) => fieldHtml(f, get(acc, f[0]), `af-${i}`)).join("")}</div>
+      ${native && tabs[t][0] === "Advanced SIP" ? `<h3>What an INVITE from this account looks like</h3><pre class="sipmsg preview" id="inv-preview"></pre>` : ""}
+      <div class="set-actions"><span class="hint" id="acc-dirty"></span><button type="submit" class="btn primary">Save account</button></div>
+    </form>`;
+  const form = $("#acc-form");
+  const collect = () => fields.forEach((f, i) => readField(f, `af-${i}`, acc));
+  const preview = () => {
+    const p = $("#inv-preview");
+    if (p) {
+      collect();
+      p.innerHTML = highlightSip(invitePreview(acc));
+    }
+  };
+  preview();
+  form.addEventListener("input", () => {
+    $("#acc-dirty").textContent = "Unsaved changes";
+    preview();
+  });
+  form.addEventListener("click", (e) => {
+    const up = e.target.closest("[data-up]");
+    if (up) {
+      const li = up.closest("li");
+      if (li.previousElementSibling) li.parentElement.insertBefore(li, li.previousElementSibling);
+      $("#acc-dirty").textContent = "Unsaved changes";
+      preview();
+    }
+    const del = e.target.closest("[data-del]");
+    if (del) {
+      del.closest(".hdr-row").remove();
+      $("#acc-dirty").textContent = "Unsaved changes";
+    }
+    const add = e.target.closest("[data-addhdr]");
+    if (add) {
+      $("#" + add.dataset.addhdr).insertAdjacentHTML("beforeend", `<div class="hdr-row"><input placeholder="Name"><input placeholder="Value"><button type="button" class="linklike" data-del>Remove</button></div>`);
+    }
+  });
+  $$("[data-acctab]").forEach((b) =>
+    b.addEventListener("click", () => {
+      collect();
+      SET.accTab = +b.dataset.acctab;
+      renderSetBody();
+    })
+  );
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    collect();
+    await saveAccounts();
+  });
+  $("#acc-del").addEventListener("click", async () => {
+    SET.cfg.accounts = SET.cfg.accounts.filter((a) => a.id !== acc.id);
+    SET.accId = SET.cfg.accounts.length ? SET.cfg.accounts[0].id : null;
+    await saveAccounts();
+  });
+  $("#acc-dup").addEventListener("click", () => {
+    collect();
+    const copy = JSON.parse(JSON.stringify(acc));
+    copy.id = native ? newNativeAccount().id : webAccountDefaults().id;
+    copy.label = `${acc.label || "Account"} copy`;
+    SET.cfg.accounts.push(copy);
+    SET.accId = copy.id;
+    renderSetNav();
+    renderSetBody();
+    toast("Copied. Save to keep it.");
+  });
+}
+
+let behaviorDefaults = null;
+async function defaultBehavior() {
+  if (behaviorDefaults) return JSON.parse(JSON.stringify(behaviorDefaults));
+  // The engine fills defaults for a missing behavior; save then read back gives them.
+  behaviorDefaults = {
+    local_port: 0, local_ip: null, t1_ms: 500, max_forwards: 70, session_timer: 0, user_phone: false, compact_headers: false, require_prack: false,
+    offer_gruu: false, long_contact: false, rport: true, codecs: ["PCMU", "PCMA"], ptime_ms: 20, dtmf_mode: "rfc4733", dtmf_payload_type: 101, srtp: "off",
+    symmetric_rtp: true, rtcp: false, rtp_port_start: 40000, rtp_port_end: 49999, dscp_sip: 0, dscp_rtp: 0, keepalive_interval: 0, user_agent: `Sidetone/${S.version || ""}`,
+    proxy_require: null, filter_registrar: false, extra_headers: [], sdp_direction: "sendrecv", skip_ack: false, sdp_ip_override: null,
+  };
+  return JSON.parse(JSON.stringify(behaviorDefaults));
+}
+
+async function addAccount() {
+  const native = S.ctl.kind === "native";
+  const a = native ? newNativeAccount() : webAccountDefaults();
+  if (native) a.profile.behavior = await defaultBehavior();
+  SET.cfg.accounts.push(a);
+  SET.accId = a.id;
+  SET.section = null;
+  SET.accTab = 0;
+  renderSetNav();
+  renderSetBody();
+}
+
+async function saveAccounts() {
+  try {
+    await S.ctl.setConfig({ accounts: SET.cfg.accounts });
+    toast("Saved. Registering…");
+    const d = $("#acc-dirty");
+    if (d) d.textContent = "";
+    SET.cfg = await S.ctl.getConfig();
+    renderSetNav();
+    renderSetBody();
+  } catch (e) {
+    toast(`Not saved: ${e.message || e}`, 5000);
+  }
+}
+
+function invitePreview(acc) {
+  const b = acc.profile.behavior;
+  const a = acc.profile.account;
+  const hn = (n) => (b.compact_headers ? { Via: "v", From: "f", To: "t", "Call-ID": "i", Contact: "m", "Content-Length": "l", "Content-Type": "c", Supported: "k" }[n] || n : n);
+  const host = (a.domain || "pbx.example.com").replace(/:\d+$/, "");
+  const target = `sip:600@${a.domain || "pbx.example.com"}${b.user_phone ? ";user=phone" : ""}`;
+  const local = `${b.local_ip || "192.0.2.10"}:${b.local_port || 50600}`;
+  const sup = ["replaces", "100rel", "norefersub", ...(b.session_timer > 0 ? ["timer"] : []), ...(b.offer_gruu ? ["gruu"] : [])];
+  const lines = [
+    `INVITE ${target} SIP/2.0`,
+    `${hn("Via")}: SIP/2.0/UDP ${local};branch=z9hG4bK3f1c9a${b.rport ? ";rport" : ""}`,
+    `Max-Forwards: ${b.max_forwards}`,
+    `${hn("From")}: ${a.display_name ? `"${a.display_name}" ` : ""}<sip:${a.user || "2001"}@${host}>;tag=8d2e`,
+    `${hn("To")}: <${target}>`,
+    `${hn("Call-ID")}: 5b0c7e@${local.split(":")[0]}`,
+    "CSeq: 1 INVITE",
+    ...(b.proxy_require ? [`Proxy-Require: ${b.proxy_require}`] : []),
+    `User-Agent: ${b.user_agent}`,
+    `${hn("Contact")}: <sip:${a.user || "2001"}@${local}>${b.long_contact ? ';+sip.instance="<urn:uuid:…>";reg-id=1;audio;…' : ""}`,
+    "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE, PRACK, REFER, NOTIFY, MESSAGE",
+    `${hn("Supported")}: ${sup.join(", ")}`,
+    ...(b.require_prack ? ["Require: 100rel"] : []),
+    ...(b.session_timer > 0 ? [`Session-Expires: ${b.session_timer};refresher=uac`, "Min-SE: 90"] : []),
+    ...(b.extra_headers || []).map(([k, v]) => `${k}: ${v}`),
+    `${hn("Content-Type")}: application/sdp`,
+  ];
+  const ip = b.sdp_ip_override || local.split(":")[0];
+  const pts = (b.codecs || []).map((c) => (c === "PCMA" ? 8 : 0));
+  const dt = b.dtmf_mode === "rfc4733" ? [b.dtmf_payload_type] : [];
+  const sdp = [
+    "v=0", `o=sidetone 1 1 IN IP4 ${ip}`, "s=Sidetone", `c=IN IP4 ${ip}`, "t=0 0",
+    `m=audio ${b.rtp_port_start} RTP/AVP ${[...pts, ...dt].join(" ")}`,
+    ...(b.codecs || []).map((c) => `a=rtpmap:${c === "PCMA" ? 8 : 0} ${c}/8000`),
+    ...(dt.length ? [`a=rtpmap:${dt[0]} telephone-event/8000`, `a=fmtp:${dt[0]} 0-16`] : []),
+    `a=ptime:${b.ptime_ms}`, `a=${b.sdp_direction}`,
+  ];
+  return `${lines.join("\r\n")}\r\n\r\n${sdp.join("\r\n")}`;
+}
+
+async function renderGlobal(section) {
+  const body = $("#set-body");
+  const native = S.ctl.kind === "native";
+  const st = SET.cfg.settings || {};
+  if (section === "calls") {
+    const fields = CALL_SETTINGS.filter((f) => native || f[5] !== "native");
+    body.innerHTML = `<div class="set-head"><h1>Call handling</h1></div>
+      <form class="set-form" id="g-form"><div class="fields">${fields.map((f, i) => fieldHtml(f, get(st, f[0]), `gf-${i}`)).join("")}</div>
+      <div class="set-actions"><button type="submit" class="btn primary">Save</button></div></form>`;
+    $("#g-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      fields.forEach((f, i) => readField(f, `gf-${i}`, st));
+      await S.ctl.setConfig({ settings: st });
+      toast("Saved");
+    });
+  } else if (section === "audio") {
+    if (!native) {
+      body.innerHTML = `<div class="set-head"><h1>Audio</h1></div><p class="muted">The browser phone uses the browser's microphone and speaker. Choose devices in the browser's site settings. Echo cancellation and noise suppression are on.</p>`;
+      return;
+    }
+    let dev = { devices: { inputs: [], outputs: [] }, audio: {} };
+    try { dev = await S.ctl.audio(); } catch { /* keep empty */ }
+    const ap = SET.cfg.audio || {};
+    const opt = (list, cur) => [`<option value="">System default</option>`, ...list.map((n) => `<option ${n === cur ? "selected" : ""}>${esc(n)}</option>`)].join("");
+    body.innerHTML = `<div class="set-head"><h1>Audio</h1></div>
+      <form class="set-form" id="g-form"><div class="fields">
+        <label class="check fld"><input type="checkbox" id="au-en" ${ap.enabled !== false ? "checked" : ""}> Use the sound card</label>
+        <label class="fld">Microphone<select id="au-in">${opt(dev.devices.inputs || [], ap.input)}</select></label>
+        <label class="fld">Speaker or headset<select id="au-out">${opt(dev.devices.outputs || [], ap.output)}</select></label>
+        ${fieldHtml(["audio_source", "Send during calls", "select", "test tone and echo help when nobody is at the other end", [["device", "Sound card (microphone)"], ["tone", "Test tone"], ["echo", "Echo what is received"], ["silence", "Silence"]]], st.audio_source, "au-src")}
+        ${fieldHtml(["tone_hz", "Test tone frequency (Hz)", "number"], st.tone_hz, "au-hz")}
+      </div>
+      <p class="hint">${esc(dev.audio && dev.audio.error ? `Sound card: ${dev.audio.error}` : dev.audio && dev.audio.status ? `Open: ${dev.audio.status.input || "no microphone"} / ${dev.audio.status.output || "no speaker"}` : "")}</p>
+      <div class="set-actions"><button type="submit" class="btn primary">Save</button></div></form>`;
+    $("#g-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      st.audio_source = $("#au-src").value;
+      st.tone_hz = Number($("#au-hz").value) || 440;
+      const audio = { enabled: $("#au-en").checked, input: $("#au-in").value || null, output: $("#au-out").value || null };
+      await S.ctl.setConfig({ settings: st, audio });
+      SET.cfg = await S.ctl.getConfig();
+      toast("Saved");
+      renderGlobal("audio");
+    });
+  } else if (section === "capture") {
+    if (!native) {
+      body.innerHTML = `<div class="set-head"><h1>Capture and recording</h1></div><p class="muted">The browser phone logs every SIP message and rebuilds a pcapng from it for analysis. Media is DTLS-SRTP inside the browser, so quality comes from WebRTC statistics instead of RTP packets.</p>`;
+      return;
+    }
+    const fields = [
+      ["capture", "Capture every SIP packet in memory for analysis and pcapng export", "bool"],
+      ["capture_rtp", "Include RTP (needed for jitter, loss and MOS)", "bool"],
+      ["record_calls", "Record the audio of every call (WAV)", "bool", "you can also press Record during a call"],
+    ];
+    body.innerHTML = `<div class="set-head"><h1>Capture and recording</h1></div>
+      <form class="set-form" id="g-form"><div class="fields">${fields.map((f, i) => fieldHtml(f, get(st, f[0]), `gf-${i}`)).join("")}</div>
+      <p class="hint">${S.st ? `${S.st.capture_packets.toLocaleString()} packets in memory now.` : ""} Accounts, settings and call history are saved in your user configuration folder.</p>
+      <div class="set-actions"><button type="button" class="btn" id="cap-clear">Clear capture now</button><button type="submit" class="btn primary">Save</button></div></form>`;
+    $("#g-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      fields.forEach((f, i) => readField(f, `gf-${i}`, st));
+      await S.ctl.setConfig({ settings: st });
+      toast("Saved");
+    });
+    $("#cap-clear").addEventListener("click", async () => {
+      await S.ctl.clearCapture();
+      S.trace = [];
+      toast("Capture cleared");
+    });
+  } else if (section === "keys") {
+    const rows = [
+      ["Enter", "Call the number in the dial field, or answer the selected incoming call"],
+      ["Esc", "Hang up, cancel or reject the selected line"],
+      ["0 to 9, *, #", "Send DTMF on the selected call (outside text fields)"],
+      ["F2", "Transfer"],
+      ["F3", "Hold or resume"],
+      ["F4", "Mute or unmute"],
+      ["Up and down arrows", "Move through the SIP trace"],
+    ];
+    body.innerHTML = `<div class="set-head"><h1>Keyboard</h1></div>${table(["Key", "Action"], rows.map(([k, v]) => [`<kbd>${esc(k)}</kbd>`, esc(v)]))}`;
+  }
+}
+
+function bindSettings() {
+  $("#acc-list").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-acc]");
+    if (!b) return;
+    SET.accId = b.dataset.acc;
+    SET.section = null;
+    renderSetNav();
+    renderSetBody();
+  });
+  $$(".set-nav [data-set]").forEach((b) =>
+    b.addEventListener("click", () => {
+      SET.section = b.dataset.set;
+      renderSetNav();
+      renderSetBody();
+    })
+  );
+  $("#acc-add").addEventListener("click", addAccount);
+}
+
+// ============================================================================
+// Boot
+
+function bindChrome() {
+  $$(".ws-tabs [data-ws]").forEach((b) => b.addEventListener("click", () => showWs(b.dataset.ws)));
   const modes = ["system", "light", "dark"];
   const applyTheme = (m) => {
     if (m === "system") document.documentElement.removeAttribute("data-theme");
@@ -506,218 +1883,66 @@ function bind() {
     store.set("sidetone.theme", mode);
     applyTheme(mode);
   });
-
-  $$(".view-btn").forEach((b) => b.addEventListener("click", () => !b.disabled && setView(b.dataset.view)));
-}
-
-// ---------- web phone ----------
-
-async function setupPhone() {
-  const { WebPhone } = await import("./webphone.js");
-  const native = S.be.features.includes("ua");
-  const saved = store.get("sidetone.phone", {});
-  const fields = [["p-ws", "ws"], ["p-domain", "domain"], ["p-user", "user"], ["p-auth", "authUser"], ["p-stun", "stun"], ["p-target", "target"], ["p-dur", "dur"]];
-  for (const [id, k] of fields) if (saved[k] != null && saved[k] !== "") $("#" + id).value = saved[k];
-  if (saved.profile) $("#p-profile").value = saved.profile;
-  let mode = native && saved.mode === "udp" ? "udp" : "ws";
-  let phone = null; // WebPhone in ws mode
-  let udpReady = false;
-  const logEl = $("#p-log");
-  const busy = { on: false };
-
-  const ui = {
-    log: (t) => {
-      logEl.textContent += `${new Date().toISOString().slice(11, 23)}  ${t}\n`;
-      logEl.scrollTop = logEl.scrollHeight;
-    },
-    state: (t) => ($("#p-state").textContent = t ? t[0].toUpperCase() + t.slice(1) : ""),
-    stats: (s) => ($("#p-stats").textContent = `${s.codec || ""}  rx ${s.recv ?? 0}  lost ${s.lost ?? 0}  jitter ${(s.jitter_ms ?? 0).toFixed(1)} ms  RTT ${(s.rtt_ms ?? 0).toFixed(0)} ms`),
-    onIncoming: (from) => {
-      ui.state(`incoming call from ${from.replace(/^.*<sip:([^>;]+).*$/, "$1")}`);
-      $("#p-answer").hidden = false;
-      $("#p-hangup").disabled = false;
-      setView("phone");
-    },
-    onCallEnded: async (p, why) => {
-      $("#p-answer").hidden = true;
-      $("#p-hangup").disabled = true;
-      $("#p-dial").disabled = false;
-      $("#p-stats").textContent = "";
-      await showResult(await S.be.captureFromLog(p.captureLog()), "web-phone-call.pcapng", p.summary());
-    },
-  };
-
-  // After a call: analyze in the background and offer the result from the phone screen.
-  async function showResult(bytes, name, webrtc) {
-    try {
-      await load(bytes, name, webrtc, false);
-      const s = S.report.summary;
-      const el = $("#p-result");
-      el.hidden = false;
-      el.innerHTML = `Call analyzed: ${s.errors} error${s.errors === 1 ? "" : "s"}, ${s.warnings} warning${s.warnings === 1 ? "" : "s"}. <a id="p-open">View analysis</a>`;
-      $("#p-open").addEventListener("click", () => setView("analysis"));
-    } catch (e) {
-      ui.log(`could not analyze the call: ${e.message || e}`);
-    }
-  }
-
-  const setMode = (m) => {
-    mode = m;
-    $$(".seg [data-mode]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.mode === m)));
-    $$(".server-card [data-for]").forEach((el) => (el.hidden = el.dataset.for !== m));
-    $("#p-connect").textContent = m === "ws" ? "Connect and register" : "Register";
-    $("#p-dial").disabled = m === "ws" ? !phone : false;
-    if (m === "udp") ui.state(udpReady ? "ready" : "ready to call over UDP");
-    else ui.state(phone ? "connected" : "set up a SIP server to start");
-  };
-  if (native) $("#mode-udp").hidden = false;
-  $$(".seg [data-mode]").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
-
-  const cfg = () => ({
-    ws: $("#p-ws").value.trim(),
-    domain: $("#p-domain").value.trim(),
-    user: $("#p-user").value.trim(),
-    authUser: $("#p-auth").value.trim() || null,
-    password: $("#p-pass").value,
-    stun: $("#p-stun").value.trim(),
+  $("#st-err").addEventListener("click", () => {
+    S.errors = 0;
+    renderStatus();
+    showWs("calls");
   });
-  const remember = () =>
-    store.set("sidetone.phone", { ...cfg(), password: undefined, target: $("#p-target").value.trim(), dur: $("#p-dur").value, profile: $("#p-profile").value, mode });
-
-  function udpParams(target) {
-    const c = cfg();
-    let profile = null;
-    const raw = $("#p-profile").value.trim();
-    if (raw) profile = JSON.parse(raw);
-    if (c.authUser) profile = { ...(profile || {}), account: { ...((profile && profile.account) || {}), auth_user: c.authUser } };
-    return { domain: c.domain, user: c.user, password: c.password, target, duration: +$("#p-dur").value || 20, audio: $("#p-audio-src").value, register: $("#p-register").checked, profile };
-  }
-
-  $("#p-connect").addEventListener("click", async () => {
-    const c = cfg();
-    remember();
-    if (mode === "udp") {
-      if (!c.domain) return ui.state("enter the server");
-      ui.state("registering…");
-      try {
-        const res = await S.be.sipRegister(udpParams(""));
-        (res.events || []).forEach((e) => ui.log(e.text));
-        udpReady = res.status === 200;
-        ui.state(res.status === 200 ? `registered as ${c.user} (from ${res.local})` : `register answered ${res.status ?? "nothing"}`);
-        await showResult(b64ToBytes(res.pcap_b64), "register.pcapng", null);
-      } catch (e) {
-        ui.state(`register failed: ${e.message || e}`);
-      }
-      return;
-    }
-    if (!c.ws || !c.domain || !c.user) return ui.state("fill in WebSocket URL, domain and user");
-    c.iceServers = c.stun ? [{ urls: c.stun }] : [];
-    if (phone) phone.close();
-    phone = new WebPhone(c, ui);
-    window.__phone = phone;
-    try {
-      ui.state("connecting…");
-      await phone.connect();
-      const st = await phone.register();
-      ui.state(st === 200 ? `registered as ${c.user}` : `register answered ${st ?? "nothing"}`);
-      $("#p-dial").disabled = false;
-    } catch (e) {
-      ui.state(e.message);
-    }
+  $("#events-clear").addEventListener("click", () => {
+    S.events = [];
+    renderEvents();
   });
-
-  $("#p-options").addEventListener("click", async () => {
-    remember();
-    const p = udpParams($("#p-target").value.trim() || cfg().domain);
-    ui.state(`OPTIONS to ${p.target}…`);
-    try {
-      const res = await S.be.sipOptions(p);
-      ui.state(`OPTIONS: ${res.status ?? "no response"}${res.rtt_ms != null ? ` in ${res.rtt_ms} ms` : ""}`);
-      (res.events || []).forEach((e) => ui.log(e.text));
-      await showResult(b64ToBytes(res.pcap_b64), "options.pcapng", null);
-    } catch (e) {
-      ui.state(`OPTIONS failed: ${e.message || e}`);
-    }
+  $("#hist-filter").addEventListener("input", renderHistory);
+  $("#hist-clear").addEventListener("click", async () => {
+    await S.ctl.clearHistory();
+    renderHistory();
   });
-
-  $("#p-dial").addEventListener("click", async () => {
-    const t = $("#p-target").value.trim();
-    if (!t || busy.on) return;
-    remember();
-    $("#p-result").hidden = true;
-    $("#p-dial").disabled = true;
-    if (mode === "udp") {
-      const p = udpParams(t);
-      busy.on = true;
-      ui.state(`calling ${t}, ends after ${p.duration} s`);
-      try {
-        const res = await S.be.sipCall(p);
-        const o = res.outcome;
-        (res.events || []).forEach((e) => ui.log(e.text));
-        ui.state(o.answered ? `call ended: ${o.final_status} ${o.final_reason || ""}, ${o.codec}, rx ${o.rtp_received} pkts` : `call failed: ${o.final_status ?? "no answer"} ${o.final_reason || ""}`);
-        await showResult(b64ToBytes(res.pcap_b64), `call-${t}.pcapng`, null);
-      } catch (e) {
-        ui.state(`call failed: ${e.message || e}`);
-      } finally {
-        busy.on = false;
-        $("#p-dial").disabled = false;
-      }
-      return;
-    }
-    if (!phone) return;
-    $("#p-hangup").disabled = false;
-    try {
-      await phone.dial(t, $("#p-audio"));
-    } catch (e) {
-      ui.state(`call failed: ${e.message || e}`);
-      $("#p-dial").disabled = false;
-    }
-  });
-  $("#p-answer").addEventListener("click", async () => {
-    $("#p-answer").hidden = true;
-    await phone.answer($("#p-audio"));
-  });
-  $("#p-hangup").addEventListener("click", () => phone && phone.hangup());
-  $("#p-backspace").addEventListener("click", () => ($("#p-target").value = $("#p-target").value.slice(0, -1)));
-
-  // Keys dial the number when idle and send DTMF during a call; the keyboard works too.
-  const press = (k) => {
-    const b = $(`#p-keypad [data-key="${CSS.escape(k)}"]`);
-    if (b) {
-      b.classList.add("hit");
-      setTimeout(() => b.classList.remove("hit"), 140);
-    }
-    if (phone && phone.call && phone.call.answered) phone.dtmf(k);
-    else $("#p-target").value += k;
-  };
-  $$("#p-keypad button").forEach((b) => b.addEventListener("click", () => press(b.dataset.key)));
-  $(".phone-card").addEventListener("keydown", (e) => {
-    if (phone && phone.call && phone.call.answered && /^[0-9*#]$/.test(e.key)) {
-      e.preventDefault();
-      press(e.key);
-    } else if (e.key === "Enter" && e.target.id === "p-target" && !$("#p-dial").disabled) {
-      e.preventDefault();
-      $("#p-dial").click();
-    }
-  });
-  setMode(mode);
 }
 
 async function main() {
   S.be = await pickBackend();
-  $("#where").textContent = S.be.kind === "wasm" ? "in this browser" : "on the machine running Sidetone";
-  bind();
+  if (S.be.kind === "http") {
+    try { S.version = (await (await S.be.get("api/info")).json()).version; } catch { /* ignore */ }
+  }
+  $("#where").textContent = S.be.kind === "wasm" ? "in this browser" : "on this computer";
+  // ?phone=web uses the browser phone (WebRTC) even when the native engine is available.
+  const forceWeb = new URLSearchParams(location.search).get("phone") === "web";
+  S.ctl = !forceWeb && S.be.kind === "http" && S.be.features.includes("phone") ? new NativeController(S.be) : new WebController();
+  document.body.classList.toggle("web-mode", S.ctl.kind === "web");
+  $("#st-mode").textContent = S.ctl.kind === "web" ? "Browser phone (WebRTC)" : "Desktop engine (UDP)";
+  bindChrome();
+  bindPhone();
+  bindTrace();
+  bindAnalysis();
+  bindDiag();
+  bindSettings();
   aiSettingsLoad();
-  setupPhone().catch((e) => console.warn("web phone unavailable", e));
+
+  S.ctl.on((u) => {
+    if (u.error) toast(u.error, 6000);
+    if (u.events && u.events.length) onEvents(u.events);
+    if (u.trace && u.trace.length) onTrace(u.trace);
+    if (u.state) onState(u.state);
+  });
+  await S.ctl.start();
+
   const samples = await S.be.samples();
-  const open = async (n) => load(await S.be.sample(n), `${n}.pcapng`);
+  const open = async (n) => {
+    await load(await S.be.sample(n), `${n}.pcapng`);
+    showWs("analysis");
+  };
   $("#samples-list").innerHTML = samples.map((s) => `<button type="button" role="menuitem" data-sample="${esc(s.name)}">${esc(s.name)}<small>${esc(s.description)}</small></button>`).join("");
   $("#sample-grid").innerHTML = samples.map((s) => `<button type="button" data-sample="${esc(s.name)}"><b>${esc(s.name)}</b><span>${esc(s.description)}</span></button>`).join("");
   $$("[data-sample]").forEach((b) => b.addEventListener("click", () => open(b.dataset.sample)));
-  const want = new URLSearchParams(location.search).get("sample");
+
+  const params = new URLSearchParams(location.search);
+  const want = params.get("sample");
+  const noAccounts = S.st && !S.st.accounts.length;
   if (want) await open(want);
+  else showWs(params.get("page") || (noAccounts ? "settings" : store.get("sidetone.page", "calls")));
 }
 
 main().catch((e) => {
+  console.error(e);
   document.body.insertAdjacentHTML("beforeend", `<p style="padding:16px;color:#b91c1c">Sidetone could not start: ${esc(e.message || e)}</p>`);
 });

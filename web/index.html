@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sidetone</title>
-<meta name="description" content="SIP softphone and call analyzer for troubleshooting: test calls, ladder diagrams, RTP quality, diagnostics and AI interpretation.">
+<meta name="description" content="SIP softphone and call analyzer for troubleshooting: multi-line phone, live SIP trace, ladder diagrams, RTP quality, DNS and NAT diagnostics, AI interpretation.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
@@ -12,177 +12,331 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23172033'/%3E%3Cpath d='M9 7v18M23 7v18M9 12h14M23 19H9' stroke='%23F5C400' stroke-width='2.4' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-call" viewBox="0 0 24 24"><path d="M5 4h3l2 5-2.5 1.5a11 11 0 0 0 6 6L15 14l5 2v3a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z"/></symbol>
+    <symbol id="i-hangup" viewBox="0 0 24 24"><path d="M3 14.5c5-4.7 13-4.7 18 0l-2 3-4-1.6v-2.7a10 10 0 0 0-6 0v2.7L5 17.5z"/></symbol>
+    <symbol id="i-hold" viewBox="0 0 24 24"><rect x="6.5" y="5" width="3.5" height="14" rx="1"/><rect x="14" y="5" width="3.5" height="14" rx="1"/></symbol>
+    <symbol id="i-mute" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/><path d="M4 4l16 16" class="slash"/></symbol>
+    <symbol id="i-transfer" viewBox="0 0 24 24"><path d="M4 12h13M13 7l5 5-5 5"/><path d="M20 5v14"/></symbol>
+    <symbol id="i-consult" viewBox="0 0 24 24"><circle cx="8" cy="8" r="3"/><circle cx="16.5" cy="9.5" r="2.5"/><path d="M2.5 19a5.5 5.5 0 0 1 11 0M13 18.5a4 4 0 0 1 8 0"/></symbol>
+    <symbol id="i-keypad" viewBox="0 0 24 24"><circle cx="6" cy="5" r="1.4"/><circle cx="12" cy="5" r="1.4"/><circle cx="18" cy="5" r="1.4"/><circle cx="6" cy="11" r="1.4"/><circle cx="12" cy="11" r="1.4"/><circle cx="18" cy="11" r="1.4"/><circle cx="6" cy="17" r="1.4"/><circle cx="12" cy="17" r="1.4"/><circle cx="18" cy="17" r="1.4"/><circle cx="12" cy="22" r="1.4"/></symbol>
+    <symbol id="i-record" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5" class="fill"/></symbol>
+    <symbol id="i-dnd" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M7.5 12h9"/></symbol>
+    <symbol id="i-aa" viewBox="0 0 24 24"><path d="M4 20l5-14h2l5 14M6.2 14.5h7.6"/><path d="M17 4.5a4 4 0 0 1 0 6M19.5 2.5a7 7 0 0 1 0 10"/></symbol>
+    <symbol id="i-opts" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></symbol>
+    <symbol id="i-analyze" viewBox="0 0 24 24"><path d="M3 12h3.5l2.5-6 4 12 3-8 1.5 2H21"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></symbol>
+    <symbol id="i-spk" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5v14l-4.5-4.5H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></symbol>
+    <symbol id="i-in" viewBox="0 0 24 24"><path d="M18 6L7 17M7 9v8h8"/></symbol>
+    <symbol id="i-out" viewBox="0 0 24 24"><path d="M6 18L17 7M9 7h8v8"/></symbol>
+    <symbol id="i-missed" viewBox="0 0 24 24"><path d="M4 8l6 6 4-4 6 6"/><path d="M15 16h5v-5"/></symbol>
+  </defs>
+</svg>
+
 <header class="bar">
   <div class="brand" aria-label="Sidetone">
-    <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true"><rect width="32" height="32" rx="7" class="brand-bg"/><path d="M9 7v18M23 7v18M9 12h14M23 19H9" class="brand-ink" stroke-width="2.4" fill="none" stroke-linecap="round"/></svg>
+    <svg viewBox="0 0 32 32" width="24" height="24" aria-hidden="true"><rect width="32" height="32" rx="7" class="brand-bg"/><path d="M9 7v18M23 7v18M9 12h14M23 19H9" class="brand-ink" stroke-width="2.4" fill="none" stroke-linecap="round"/></svg>
     <span>Sidetone</span>
   </div>
-  <nav class="views" aria-label="Views">
-    <button type="button" class="view-btn" data-view="phone" aria-current="true">Phone</button>
-    <button type="button" class="view-btn" data-view="analysis" disabled>Analysis</button>
+  <nav class="ws-tabs" role="tablist" aria-label="Workspace">
+    <button type="button" role="tab" data-ws="calls" aria-selected="true">Calls</button>
+    <button type="button" role="tab" data-ws="trace">SIP trace <b id="trace-count"></b></button>
+    <button type="button" role="tab" data-ws="analysis">Analysis</button>
+    <button type="button" role="tab" data-ws="diag">Diagnostics</button>
+    <button type="button" role="tab" data-ws="settings">Settings</button>
   </nav>
-  <div class="actions">
-    <label class="btn" for="file">Open capture<input id="file" type="file" accept=".pcap,.pcapng,.cap" hidden></label>
-    <div class="menu" data-menu="samples">
-      <button class="btn" type="button" aria-haspopup="true">Samples</button>
-      <div class="menu-list" id="samples-list" role="menu"></div>
-    </div>
-    <div class="menu" data-menu="export">
-      <button class="btn" type="button" aria-haspopup="true" id="btn-export" disabled>Export</button>
-      <div class="menu-list" role="menu">
-        <button type="button" role="menuitem" data-export="all">Annotated pcapng (whole capture)</button>
-        <button type="button" role="menuitem" data-export="call">Annotated pcapng (this call)</button>
-        <button type="button" role="menuitem" data-export="redacted">Redacted pcapng (this call)</button>
-        <button type="button" role="menuitem" data-export="svg">Ladder as SVG</button>
-        <button type="button" role="menuitem" data-export="json">Report as JSON</button>
-      </div>
-    </div>
+  <div class="bar-right">
+    <label class="btn small" for="file">Open capture<input id="file" type="file" accept=".pcap,.pcapng,.cap" hidden></label>
+    <button class="btn small ghost" type="button" id="theme" title="Switch light or dark">Theme</button>
   </div>
-  <div class="capinfo" id="capinfo"></div>
-  <button class="btn ghost" type="button" id="theme" title="Switch light/dark">Theme</button>
 </header>
 
-<main id="app" class="view-phone">
-  <section class="home" aria-label="Phone">
-    <div class="home-grid">
-      <section class="phone-card" aria-label="Phone">
-        <div class="phone-screen">
-          <span class="phone-state" id="p-state">Set up a SIP server to start</span>
-          <input id="p-target" class="phone-number" placeholder="Number or user@host" spellcheck="false" autocomplete="off" aria-label="Number to call">
-          <span class="phone-stats" id="p-stats"></span>
-          <span class="phone-result" id="p-result" hidden></span>
-        </div>
-        <div class="keypad" id="p-keypad" aria-label="Keypad">
-          <button type="button" data-key="1">1<small>&nbsp;</small></button>
-          <button type="button" data-key="2">2<small>ABC</small></button>
-          <button type="button" data-key="3">3<small>DEF</small></button>
-          <button type="button" data-key="4">4<small>GHI</small></button>
-          <button type="button" data-key="5">5<small>JKL</small></button>
-          <button type="button" data-key="6">6<small>MNO</small></button>
-          <button type="button" data-key="7">7<small>PQRS</small></button>
-          <button type="button" data-key="8">8<small>TUV</small></button>
-          <button type="button" data-key="9">9<small>WXYZ</small></button>
-          <button type="button" data-key="*">&lowast;<small>&nbsp;</small></button>
-          <button type="button" data-key="0">0<small>+</small></button>
-          <button type="button" data-key="#">#<small>&nbsp;</small></button>
-        </div>
-        <div class="phone-actions">
-          <button class="pbtn call" type="button" id="p-dial" disabled>Call</button>
-          <button class="pbtn answer" type="button" id="p-answer" hidden>Answer</button>
-          <button class="pbtn hangup" type="button" id="p-hangup" disabled>Hang up</button>
-        </div>
-        <button class="linklike" type="button" id="p-backspace" aria-label="Delete last digit">Delete last digit</button>
-      </section>
+<div class="shell">
+  <!-- ================= Phone panel ================= -->
+  <aside class="phone" aria-label="Phone">
+    <div class="acct-row">
+      <span class="dot" id="acct-dot" aria-hidden="true"></span>
+      <select id="acct" aria-label="Account"></select>
+      <button type="button" class="icon-btn" id="acct-reg" title="Register again"><svg><use href="#i-refresh"/></svg></button>
+    </div>
+    <div class="acct-state" id="acct-state">No account yet. Open Settings to add one.</div>
 
-      <section class="server-card" aria-label="SIP server">
-        <h2>SIP server</h2>
-        <div class="seg" role="radiogroup" aria-label="How to connect">
-          <button type="button" role="radio" data-mode="ws" aria-checked="true">WebSocket from this browser</button>
-          <button type="button" role="radio" data-mode="udp" aria-checked="false" id="mode-udp" hidden>UDP from this computer</button>
-        </div>
-        <p class="muted mode-note" data-for="ws">SIP over WebSocket (RFC 7118) with WebRTC audio. Pages served over https need a <code>wss://</code> server with a valid certificate.</p>
-        <p class="muted mode-note" data-for="udp" hidden>Classic SIP over UDP with G.711, sent by Sidetone on this machine. Every packet is recorded for analysis.</p>
-        <label data-for="ws">WebSocket URL <input id="p-ws" placeholder="wss://pbx.example.com:8089/ws" spellcheck="false"></label>
-        <div class="row">
-          <label class="grow">Server or domain <input id="p-domain" placeholder="pbx.example.com or 10.0.0.5:5060" spellcheck="false"></label>
-        </div>
-        <div class="row">
-          <label class="grow">User <input id="p-user" spellcheck="false"></label>
-          <label class="grow">Auth user <input id="p-auth" placeholder="same as user" spellcheck="false"></label>
-        </div>
-        <label>Password <input id="p-pass" type="password" autocomplete="off"></label>
-        <label data-for="ws">STUN server <input id="p-stun" placeholder="optional, e.g. stun:stun.l.google.com:19302" spellcheck="false"></label>
-        <div class="row" data-for="udp" hidden>
-          <label>Call length (s) <input id="p-dur" type="number" min="1" max="600" value="20"></label>
-          <label>Audio
-            <select id="p-audio-src"><option value="tone">Tone 440 Hz</option><option value="echo">Echo back</option><option value="silence">Silence</option></select>
-          </label>
-          <label class="check"><input type="checkbox" id="p-register" checked> Register before calling</label>
-        </div>
-        <details data-for="udp" hidden>
-          <summary>Behavior profile (JSON)</summary>
-          <textarea id="p-profile" rows="7" spellcheck="false" placeholder='{"behavior": {"codecs": ["PCMA"], "dtmf_mode": "info", "user_phone": true}}'></textarea>
-        </details>
-        <div class="row">
-          <button class="btn primary" type="button" id="p-connect">Connect and register</button>
-          <button class="btn" type="button" id="p-options" data-for="udp" hidden>Send OPTIONS</button>
-        </div>
-      </section>
+    <div class="dial">
+      <input id="dial" list="dial-history" placeholder="Number or SIP URI" autocomplete="off" spellcheck="false" aria-label="Destination">
+      <datalist id="dial-history"></datalist>
+      <button type="button" class="icon-btn" id="opts-toggle" title="Options for the next call" aria-expanded="false"><svg><use href="#i-opts"/></svg></button>
+    </div>
+    <div class="opts" id="opts" hidden>
+      <label>Extra headers for the next call <span class="hint">one per line, Name: value</span>
+        <textarea id="opt-headers" rows="2" spellcheck="false" placeholder="X-Test-Case: 42"></textarea></label>
+      <label>Profile overrides (JSON) <span class="hint" data-native>any account knob, e.g. codecs or dtmf_mode</span>
+        <textarea id="opt-overrides" rows="2" spellcheck="false" placeholder='{"codecs": ["PCMA"], "dtmf_mode": "info"}'></textarea></label>
+      <p class="hint">Dial string shortcuts: <code>600?Subject=test</code> adds headers, <code>600,,1234#</code> sends DTMF after answer (each comma waits 1 s).</p>
+    </div>
+    <div class="callbar">
+      <button type="button" class="big call" id="btn-call"><svg><use href="#i-call"/></svg><span>Call</span></button>
+      <button type="button" class="big hangup" id="btn-hangup" disabled><svg><use href="#i-hangup"/></svg><span>Hang up</span></button>
     </div>
 
-    <section class="analyze-strip" aria-label="Analyze a capture">
-      <div>
-        <h2>Analyze a capture</h2>
-        <p class="muted">Drop a pcap or pcapng anywhere on this page, or open one from Wireshark, tcpdump, sngrep or an SBC. Analysis runs <span id="where">in this browser</span>; nothing is uploaded. Or try an example with a known problem:</p>
+    <div class="tools" role="toolbar" aria-label="Call controls">
+      <button type="button" class="tool" data-tool="hold" disabled><svg><use href="#i-hold"/></svg><span>Hold</span></button>
+      <button type="button" class="tool" data-tool="mute" disabled><svg><use href="#i-mute"/></svg><span>Mute</span></button>
+      <button type="button" class="tool" data-tool="transfer" disabled><svg><use href="#i-transfer"/></svg><span>Transfer</span></button>
+      <button type="button" class="tool" data-tool="record" disabled data-native><svg><use href="#i-record"/></svg><span>Record</span></button>
+      <button type="button" class="tool" data-tool="keypad" aria-pressed="true"><svg><use href="#i-keypad"/></svg><span>Keypad</span></button>
+      <button type="button" class="tool" data-tool="dnd" aria-pressed="false"><svg><use href="#i-dnd"/></svg><span>DND</span></button>
+      <button type="button" class="tool" data-tool="aa" aria-pressed="false"><svg><use href="#i-aa"/></svg><span>Auto answer</span></button>
+      <button type="button" class="tool" data-tool="analyze"><svg><use href="#i-analyze"/></svg><span>Analyze</span></button>
+    </div>
+
+    <div class="xfer" id="xfer" hidden>
+      <div class="xfer-head">Transfer <span id="xfer-who"></span></div>
+      <div class="dial"><input id="xfer-to" placeholder="Transfer to" autocomplete="off" spellcheck="false"></div>
+      <div class="xfer-btns">
+        <button type="button" class="btn small primary" id="xfer-blind">Blind</button>
+        <button type="button" class="btn small" id="xfer-consult" data-native>Consult first</button>
+        <button type="button" class="btn small" id="xfer-complete" data-native hidden>Complete transfer</button>
+        <button type="button" class="btn small ghost" id="xfer-cancel">Close</button>
       </div>
-      <div class="sample-grid" id="sample-grid"></div>
+      <p class="hint" id="xfer-note"></p>
+    </div>
+
+    <div class="keypad" id="keypad" aria-label="Keypad">
+      <button type="button" data-key="1">1<small>&nbsp;</small></button>
+      <button type="button" data-key="2">2<small>ABC</small></button>
+      <button type="button" data-key="3">3<small>DEF</small></button>
+      <button type="button" data-key="4">4<small>GHI</small></button>
+      <button type="button" data-key="5">5<small>JKL</small></button>
+      <button type="button" data-key="6">6<small>MNO</small></button>
+      <button type="button" data-key="7">7<small>PQRS</small></button>
+      <button type="button" data-key="8">8<small>TUV</small></button>
+      <button type="button" data-key="9">9<small>WXYZ</small></button>
+      <button type="button" data-key="*">&lowast;<small>&nbsp;</small></button>
+      <button type="button" data-key="0">0<small>+</small></button>
+      <button type="button" data-key="#">#<small>&nbsp;</small></button>
+    </div>
+
+    <section class="lines" aria-label="Lines">
+      <div class="sect-head"><h2>Lines</h2><span id="lines-count" class="muted"></span></div>
+      <ol id="lines"></ol>
+      <p class="empty-note small" id="lines-empty">No calls. Dial a number or wait for a call.</p>
     </section>
 
-    <details class="phone-log"><summary>SIP log of this session</summary><pre class="call-status" id="p-log"></pre></details>
-    <audio id="p-audio" autoplay></audio>
-  </section>
-
-  <aside class="calls" aria-label="Calls">
-    <div class="calls-head"><h2>Calls</h2><span id="calls-count"></span></div>
-    <ol id="calls"></ol>
+    <div class="audio-strip" id="audio-strip">
+      <div class="meter-row"><svg><use href="#i-mic"/></svg><div class="meter"><i id="m-tx"></i></div></div>
+      <div class="meter-row"><svg><use href="#i-spk"/></svg><div class="meter"><i id="m-rx"></i></div></div>
+      <span class="audio-src" id="audio-src"></span>
+    </div>
+    <audio id="remote-audio" autoplay></audio>
   </aside>
 
-  <section class="ladder-wrap" aria-label="Ladder diagram">
-    <div class="call-head" id="call-head"></div>
-    <div class="ladder" id="ladder"></div>
-  </section>
-
-  <section class="detail" aria-label="Details">
-    <div class="tabs" role="tablist">
-      <button role="tab" data-tab="findings" aria-selected="true">Findings <b id="n-findings"></b></button>
-      <button role="tab" data-tab="message">Message</button>
-      <button role="tab" data-tab="media">Media <b id="n-media"></b></button>
-      <button role="tab" data-tab="log">Trace log</button>
-      <button role="tab" data-tab="ai">Ask AI</button>
-    </div>
-    <div class="tab-body" id="tab-findings"></div>
-    <div class="tab-body" id="tab-message" hidden></div>
-    <div class="tab-body" id="tab-media" hidden></div>
-    <div class="tab-body" id="tab-log" hidden></div>
-    <div class="tab-body" id="tab-ai" hidden>
-      <form id="ai-form" class="ai-form">
+  <!-- ================= Workspace ================= -->
+  <main class="ws" id="ws">
+    <!-- Calls -->
+    <section class="ws-page" data-page="calls">
+      <div class="page-head">
+        <h1>Calls</h1>
         <div class="row">
-          <label>Provider
-            <select id="ai-provider">
-              <option value="anthropic">Anthropic</option>
-              <option value="openai">OpenAI-compatible</option>
-              <option value="ollama">Ollama (local)</option>
-            </select>
-          </label>
-          <label>Model <input id="ai-model" autocomplete="off" spellcheck="false"></label>
-          <label class="grow">Base URL <input id="ai-base" placeholder="default for the provider" autocomplete="off" spellcheck="false"></label>
+          <input id="hist-filter" placeholder="Filter history" spellcheck="false" aria-label="Filter history">
+          <button type="button" class="btn small" id="hist-clear">Clear history</button>
         </div>
+      </div>
+      <div class="calls-grid">
+        <section class="card" id="call-detail">
+          <h2>Current call</h2>
+          <div id="call-detail-body"><p class="empty-note">Details of the selected line show here: media addresses, codec, packets, DTMF and transfer progress.</p></div>
+        </section>
+        <section class="card events-card">
+          <div class="sect-head"><h2>Phone events</h2><button type="button" class="linklike" id="events-clear">Clear</button></div>
+          <ol class="events" id="events"></ol>
+        </section>
+      </div>
+      <section class="card">
+        <h2>History</h2>
+        <table class="hist">
+          <thead><tr><th></th><th>Remote</th><th>Started</th><th>Duration</th><th>Result</th><th>Account</th><th></th></tr></thead>
+          <tbody id="hist"></tbody>
+        </table>
+        <p class="empty-note" id="hist-empty">No calls yet.</p>
+      </section>
+    </section>
+
+    <!-- SIP trace -->
+    <section class="ws-page trace-page" data-page="trace" hidden>
+      <div class="page-head">
+        <h1>SIP trace</h1>
         <div class="row">
-          <label class="grow">API key <input id="ai-key" type="password" autocomplete="off" placeholder="kept in this browser only"></label>
-          <label>Answer in
-            <select id="ai-lang"><option>English</option><option>Portuguese (Brazil)</option><option>Spanish</option><option>German</option></select>
-          </label>
+          <input id="tr-filter" placeholder="Filter: method, number, Call-ID, address" spellcheck="false" aria-label="Filter trace">
+          <label class="check"><input type="checkbox" id="tr-hide-reg" checked> Hide REGISTER</label>
+          <label class="check"><input type="checkbox" id="tr-hide-opt" checked> Hide OPTIONS and NOTIFY</label>
+          <button type="button" class="btn small" id="tr-pause" aria-pressed="false">Pause</button>
+          <button type="button" class="btn small" id="tr-clear">Clear</button>
+          <button type="button" class="btn small" id="tr-save">Save pcapng</button>
+          <button type="button" class="btn small primary" id="tr-analyze">Analyze capture</button>
         </div>
-        <div class="row checks">
-          <label class="check"><input type="checkbox" id="ai-redact" checked> Mask numbers, names, credentials and public IPs before sending</label>
-          <label class="check"><input type="checkbox" id="ai-remember"> Remember the key on this device</label>
+      </div>
+      <div class="trace-split">
+        <div class="trace-list" id="tr-list" tabindex="0" aria-label="SIP messages"></div>
+        <div class="trace-view"><pre class="sipmsg" id="tr-view"><span class="muted">Select a message to see it in full.</span></pre></div>
+      </div>
+    </section>
+
+    <!-- Analysis -->
+    <section class="ws-page analysis-page" data-page="analysis" hidden>
+      <div class="an-empty" id="an-empty">
+        <h1>Analyze a capture</h1>
+        <p class="muted">Calls made with Sidetone are captured automatically: use <b>Analyze</b> on the phone or in the call history. You can also drop a pcap or pcapng from Wireshark, tcpdump, sngrep or an SBC anywhere on this page. Analysis runs <span id="where">in this browser</span>; nothing is uploaded. Or try an example with a known problem:</p>
+        <div class="sample-grid" id="sample-grid"></div>
+      </div>
+      <div class="an" id="an" hidden>
+        <div class="an-bar">
+          <span class="capinfo" id="capinfo"></span>
+          <div class="menu" data-menu="export">
+            <button class="btn small" type="button" aria-haspopup="true" id="btn-export">Export</button>
+            <div class="menu-list" role="menu">
+              <button type="button" role="menuitem" data-export="all">Annotated pcapng (whole capture)</button>
+              <button type="button" role="menuitem" data-export="call">Annotated pcapng (this call)</button>
+              <button type="button" role="menuitem" data-export="redacted">Redacted pcapng (this call)</button>
+              <button type="button" role="menuitem" data-export="svg">Ladder as SVG</button>
+              <button type="button" role="menuitem" data-export="json">Report as JSON</button>
+            </div>
+          </div>
+          <div class="menu" data-menu="samples">
+            <button class="btn small" type="button" aria-haspopup="true">Samples</button>
+            <div class="menu-list right" id="samples-list" role="menu"></div>
+          </div>
         </div>
-        <label class="block">Question (optional)
-          <textarea id="ai-question" rows="2" placeholder="e.g. why does the customer hear nothing after the transfer?"></textarea>
-        </label>
-        <div class="row">
-          <button class="btn primary" type="submit" id="ai-go">Ask about this call</button>
-          <button class="btn" type="button" id="ai-preview">Show what will be sent</button>
+        <div class="an-grid">
+          <aside class="calls" aria-label="Calls in the capture">
+            <div class="calls-head"><h2>Dialogs</h2><span id="calls-count"></span></div>
+            <ol id="calls"></ol>
+          </aside>
+          <section class="ladder-wrap" aria-label="Ladder diagram">
+            <div class="call-head" id="call-head"></div>
+            <div class="ladder" id="ladder"></div>
+          </section>
+          <section class="detail" aria-label="Details">
+            <div class="tabs" role="tablist">
+              <button role="tab" data-tab="findings" aria-selected="true">Findings <b id="n-findings"></b></button>
+              <button role="tab" data-tab="message">Message</button>
+              <button role="tab" data-tab="media">Media <b id="n-media"></b></button>
+              <button role="tab" data-tab="log">Trace log</button>
+              <button role="tab" data-tab="ai">Ask AI</button>
+            </div>
+            <div class="tab-body" id="tab-findings"></div>
+            <div class="tab-body" id="tab-message" hidden></div>
+            <div class="tab-body" id="tab-media" hidden></div>
+            <div class="tab-body" id="tab-log" hidden></div>
+            <div class="tab-body" id="tab-ai" hidden>
+              <form id="ai-form" class="ai-form">
+                <div class="row">
+                  <label>Provider
+                    <select id="ai-provider">
+                      <option value="anthropic">Anthropic</option>
+                      <option value="openai">OpenAI-compatible</option>
+                      <option value="ollama">Ollama (local)</option>
+                    </select>
+                  </label>
+                  <label>Model <input id="ai-model" autocomplete="off" spellcheck="false"></label>
+                  <label class="grow">Base URL <input id="ai-base" placeholder="default for the provider" autocomplete="off" spellcheck="false"></label>
+                </div>
+                <div class="row">
+                  <label class="grow">API key <input id="ai-key" type="password" autocomplete="off" placeholder="kept on this device only"></label>
+                  <label>Answer in
+                    <select id="ai-lang"><option>English</option><option>Portuguese (Brazil)</option><option>Spanish</option><option>German</option></select>
+                  </label>
+                </div>
+                <div class="row checks">
+                  <label class="check"><input type="checkbox" id="ai-redact" checked> Mask numbers, names, credentials and public IPs before sending</label>
+                  <label class="check"><input type="checkbox" id="ai-remember"> Remember the key on this device</label>
+                </div>
+                <label class="block">Question (optional)
+                  <textarea id="ai-question" rows="2" placeholder="e.g. why does the customer hear nothing after the transfer?"></textarea>
+                </label>
+                <div class="row">
+                  <button class="btn primary" type="submit" id="ai-go">Ask about this call</button>
+                  <button class="btn" type="button" id="ai-preview">Show what will be sent</button>
+                </div>
+              </form>
+              <div class="ai-out" id="ai-out" aria-live="polite"></div>
+            </div>
+          </section>
         </div>
-      </form>
-      <div class="ai-out" id="ai-out" aria-live="polite"></div>
-    </div>
-  </section>
-</main>
+      </div>
+    </section>
 
+    <!-- Diagnostics -->
+    <section class="ws-page" data-page="diag" hidden>
+      <div class="page-head"><h1>Diagnostics</h1></div>
+      <div class="diag-grid">
+        <section class="card">
+          <h2>Server reachability</h2>
+          <p class="muted">Sends SIP OPTIONS from the selected account and measures the round trip. A 200, 404 or 405 all prove the server is reachable; silence points at the address, port, firewall or network interface.</p>
+          <div class="row">
+            <label>Account <select id="dg-opt-acct"></select></label>
+            <label class="grow">Target <input id="dg-opt-target" placeholder="empty = the account's server" spellcheck="false"></label>
+            <button type="button" class="btn primary" id="dg-opt-go">Send OPTIONS</button>
+          </div>
+          <div class="dg-out" id="dg-opt-out"></div>
+        </section>
+        <section class="card" data-native>
+          <h2>DNS (RFC 3263)</h2>
+          <p class="muted">Shows how a SIP domain resolves: NAPTR, SRV for UDP, TCP and TLS, then A/AAAA, and which address Sidetone would use.</p>
+          <div class="row">
+            <label class="grow">Domain <input id="dg-dns-host" placeholder="pbx.example.com" spellcheck="false"></label>
+            <button type="button" class="btn primary" id="dg-dns-go">Look up</button>
+          </div>
+          <div class="dg-out" id="dg-dns-out"></div>
+        </section>
+        <section class="card">
+          <h2>NAT and public address</h2>
+          <p class="muted">Asks STUN servers which public address and port they see. Different ports for different servers mean a symmetric NAT, the usual cause of one-way audio.</p>
+          <div class="row">
+            <label class="grow">STUN servers <input id="dg-stun-servers" value="stun.l.google.com:19302, stun.cloudflare.com:3478" spellcheck="false"></label>
+            <button type="button" class="btn primary" id="dg-stun-go">Test</button>
+          </div>
+          <div class="dg-out" id="dg-stun-out"></div>
+          <div class="dg-out" id="dg-reg-nat"></div>
+        </section>
+        <section class="card">
+          <h2>Audio</h2>
+          <div id="dg-audio"></div>
+        </section>
+      </div>
+    </section>
 
+    <!-- Settings -->
+    <section class="ws-page" data-page="settings" hidden>
+      <div class="settings">
+        <nav class="set-nav" aria-label="Settings sections">
+          <div class="set-nav-head"><span>Accounts</span><button type="button" class="linklike" id="acc-add">Add</button></div>
+          <ol id="acc-list"></ol>
+          <div class="set-nav-head"><span>Phone</span></div>
+          <ol>
+            <li><button type="button" data-set="calls">Call handling</button></li>
+            <li><button type="button" data-set="audio">Audio</button></li>
+            <li><button type="button" data-set="capture">Capture and recording</button></li>
+            <li><button type="button" data-set="keys">Keyboard</button></li>
+          </ol>
+        </nav>
+        <div class="set-body" id="set-body"></div>
+      </div>
+    </section>
+  </main>
+</div>
 
- 
+<footer class="status" id="status">
+  <span class="st-item" id="st-acct"><span class="dot"></span><span>No account</span></span>
+  <span class="st-item mono" id="st-net"></span>
+  <span class="st-item" id="st-nat"></span>
+  <span class="st-item" id="st-lines"></span>
+  <span class="st-item" id="st-cap"></span>
+  <span class="st-spacer"></span>
+  <button type="button" class="st-item st-err" id="st-err" hidden></button>
+  <span class="st-item muted" id="st-mode"></span>
+</footer>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script type="module" src="app.js"></script>

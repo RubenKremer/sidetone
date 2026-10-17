@@ -38,7 +38,7 @@ const rnd = (n = 10) => Array.from(crypto.getRandomValues(new Uint8Array(n)), (b
 
 const COMPACT = { i: "call-id", m: "contact", l: "content-length", c: "content-type", f: "from", t: "to", v: "via", k: "supported" };
 
-function parse(text) {
+export function parse(text) {
   const sep = text.indexOf("\r\n\r\n");
   const head = sep >= 0 ? text.slice(0, sep) : text;
   const body = sep >= 0 ? text.slice(sep + 4) : "";
@@ -90,21 +90,21 @@ export class WebPhone {
       const t = setTimeout(() => reject(new Error(`WebSocket ${this.cfg.ws} did not open in 8 s`)), 8000);
       ws.onopen = () => {
         clearTimeout(t);
-        this.ui.state("connected");
         resolve();
       };
       ws.onerror = () => {
         clearTimeout(t);
         reject(new Error(`WebSocket ${this.cfg.ws} failed (wrong URL, certificate not trusted, or the server rejected the "sip" subprotocol / Origin)`));
       };
-      ws.onclose = (e) => this.ui.state(`disconnected (${e.code})`);
+      ws.onclose = (e) => this.ui.closed && this.ui.closed(e.code);
       ws.onmessage = (e) => this.onMessage(typeof e.data === "string" ? e.data : new TextDecoder().decode(e.data));
     });
   }
 
   send(text) {
-    this.log.push({ t_ms: performance.timeOrigin + performance.now(), out: true, text });
-    this.ui.log(`→ ${text.split("\r\n")[0]}`);
+    const e = { t_ms: performance.timeOrigin + performance.now(), out: true, text };
+    this.log.push(e);
+    this.ui.trace && this.ui.trace(e);
     this.ws.send(text);
   }
 
@@ -169,9 +169,10 @@ export class WebPhone {
 
   onMessage(text) {
     if (!text.trim()) return; // keepalive
-    this.log.push({ t_ms: performance.timeOrigin + performance.now(), out: false, text });
+    const e = { t_ms: performance.timeOrigin + performance.now(), out: false, text };
+    this.log.push(e);
+    this.ui.trace && this.ui.trace(e);
     const m = parse(text);
-    this.ui.log(`← ${m.first}`);
     if (m.status) {
       const p = this.pending.get(m.branch);
       if (!p) {
@@ -229,16 +230,25 @@ export class WebPhone {
           this.reply(m, 486, "Busy Here", { toTag: rnd(8) });
           return;
         }
-        this.call = { incoming: true, invite: m, callId: m.h("call-id"), localTag: rnd(8) };
+        this.call = { incoming: true, invite: m, callId: m.h("call-id"), localTag: rnd(8), started: Date.now() };
         this.reply(m, 180, "Ringing", { toTag: this.call.localTag });
-        this.ui.onIncoming(m.h("from"));
+        this.ui.onIncoming(m.h("from"), m);
         break;
       case "ACK":
         if (c) c.acked = true;
         break;
       case "NOTIFY":
-      case "INFO":
+        this.reply(m, 200, "OK");
+        if (/refer/i.test(m.h("event") || "") && this.ui.onNotify) this.ui.onNotify(m.body.split("\r\n")[0] || m.body);
+        break;
+      case "INFO": {
+        this.reply(m, 200, "OK");
+        const d = (m.body.match(/Signal\s*=\s*(\S)/) || [])[1];
+        if (d && this.ui.onDtmf) this.ui.onDtmf(d);
+        break;
+      }
       case "UPDATE":
+      case "MESSAGE":
         this.reply(m, 200, "OK");
         break;
       default:
@@ -261,9 +271,75 @@ export class WebPhone {
         auth = `${r.status === 401 ? "Authorization" : "Proxy-Authorization"}: ${this.digest(ch, "REGISTER", uri)}`;
         continue;
       }
+      if (r.status >= 200 && r.status < 300) {
+        const mine = (r.headers["contact"] || []).find((c) => c.includes(this.host));
+        this.granted = +(param(mine, "expires") || r.h("expires") || expires);
+        const via = r.h("via") || "";
+        const rcv = param(via, "received");
+        const rport = param(via, "rport");
+        this.publicAddr = rcv ? `${rcv}${rport ? ":" + rport : ""}` : null;
+      }
+      this.lastReg = { status: r.status, reason: r.reason };
       return r.status;
     }
     return null;
+  }
+
+  async options(target) {
+    const uri = target ? this.targetUri(target) : `sip:${this.cfg.domain}`;
+    const branch = `z9hG4bK${rnd(14)}`;
+    const t = performance.now();
+    const text = this.build("OPTIONS", uri, { from: `<${this.aor()}>;tag=${rnd(8)}`, to: `<${uri}>`, callId: rnd(20), cseq: 1, branch, extra: ["Accept: application/sdp"] });
+    const r = await this.request(text, branch);
+    return r ? { code: r.status, rtt_ms: Math.round(performance.now() - t), summary: `${r.status} ${r.reason} in ${Math.round(performance.now() - t)} ms${r.h("user-agent") || r.h("server") ? ", " + (r.h("user-agent") || r.h("server")) : ""}` } : null;
+  }
+
+  async reinvite(direction) {
+    const c = this.call;
+    if (!c || !c.answered || !c.pc) return null;
+    c.pc.getTransceivers().forEach((t) => {
+      if (t.receiver.track && t.receiver.track.kind === "audio") t.direction = direction;
+    });
+    await c.pc.setLocalDescription(await c.pc.createOffer());
+    await this.gathered(c.pc);
+    const cseq = this.cseq++;
+    const text = this.inDialog("INVITE", cseq, [], c.pc.localDescription.sdp);
+    const branch = text.match(/branch=([^;\r\n]+)/)[1];
+    const r = await this.request(text, branch);
+    if (r && r.status >= 200 && r.status < 300) {
+      await c.pc.setRemoteDescription({ type: "answer", sdp: r.body });
+      this.send(this.inDialog("ACK", cseq));
+      return r.status;
+    }
+    if (r && r.status >= 300) this.send(this.inDialog("ACK", cseq).replace(/branch=[^;\r\n]+/, `branch=${branch}`));
+    await c.pc.setLocalDescription({ type: "rollback" }).catch(() => {});
+    return r ? r.status : null;
+  }
+
+  hold(on) {
+    return this.reinvite(on ? "sendonly" : "sendrecv");
+  }
+
+  mute(on) {
+    const c = this.call;
+    if (c && c.stream) c.stream.getAudioTracks().forEach((t) => (t.enabled = !on));
+  }
+
+  async refer(target) {
+    const c = this.call;
+    if (!c || !c.answered) return null;
+    const uri = this.targetUri(target);
+    const text = this.inDialog("REFER", this.cseq++, [`Refer-To: <${uri}>`, `Referred-By: <${this.aor()}>`]);
+    const branch = text.match(/branch=([^;\r\n]+)/)[1];
+    const r = await this.request(text, branch);
+    return r ? r.status : null;
+  }
+
+  reject(code = 486, reason = "Busy Here") {
+    const c = this.call;
+    if (!c || !c.incoming || c.answered) return;
+    this.reply(c.invite, code, reason, { toTag: c.localTag });
+    this.end(`rejected with ${code}`);
   }
 
   async media(remoteAudio) {
@@ -274,7 +350,7 @@ export class WebPhone {
       remoteAudio.srcObject = e.streams[0];
       remoteAudio.play().catch(() => {});
     };
-    pc.oniceconnectionstatechange = () => this.ui.state(`ICE ${pc.iceConnectionState}`);
+    pc.oniceconnectionstatechange = () => this.ui.ice && this.ui.ice(pc.iceConnectionState);
     return { pc, stream };
   }
 
@@ -308,8 +384,11 @@ export class WebPhone {
       if (auth) extra.push(auth);
       const text = this.build("INVITE", uri, { from: `<${this.aor()}>;tag=${c.localTag}`, to: `<${uri}>`, callId: c.callId, cseq, branch, extra, body: pc.localDescription.sdp });
       c.inviteText = text;
-      this.ui.state("calling");
-      const r = await this.request(text, branch, (p) => this.ui.state(`${p.status} ${p.reason}`));
+      const r = await this.request(text, branch, (p) => {
+        c.provisional = p.status;
+        if (p.status > 100) c.ringing = true;
+        this.ui.progress && this.ui.progress(p);
+      });
       if (!r) {
         this.end("no answer (timeout)");
         return null;
@@ -325,6 +404,7 @@ export class WebPhone {
         continue;
       }
       if (r.status >= 300) {
+        c.final = r.status;
         this.end(`${r.status} ${r.reason}`);
         return r.status;
       }
@@ -337,7 +417,8 @@ export class WebPhone {
       c.ack = this.inDialog("ACK", cseq);
       this.send(c.ack);
       c.answered = Date.now();
-      this.ui.state("in call");
+      c.final = r.status;
+      this.ui.progress && this.ui.progress(r);
       this.startStats();
       return r.status;
     }
@@ -366,7 +447,8 @@ export class WebPhone {
     c.routes = c.invite.headers["record-route"] || [];
     this.reply(c.invite, 200, "OK", { toTag: c.localTag, body: pc.localDescription.sdp });
     c.answered = Date.now();
-    this.ui.state("in call");
+    c.final = 200;
+    this.ui.progress && this.ui.progress({ status: 200, reason: "OK" });
     this.startStats();
   }
 
@@ -382,8 +464,7 @@ export class WebPhone {
       const text = this.build("CANCEL", c.uri, { from: `<${this.aor()}>;tag=${c.localTag}`, to: `<${c.uri}>`, callId: c.callId, cseq: c.cseq, branch: c.branch });
       this.send(text);
     } else if (c.incoming) {
-      this.reply(c.invite, 486, "Busy Here", { toTag: c.localTag });
-      this.end("rejected");
+      this.reject(603, "Decline");
     }
   }
 
@@ -443,8 +524,7 @@ export class WebPhone {
     if (c.pc) c.pc.close();
     if (c.stream) c.stream.getTracks().forEach((t) => t.stop());
     this.call = null;
-    this.ui.state(`call ended: ${why}`);
-    this.ui.onCallEnded(this, why);
+    this.ui.onCallEnded(this, why, c);
   }
 
   close() {

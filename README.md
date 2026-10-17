@@ -33,9 +33,9 @@
 <br>
 
 <p align="center">
-  <img src="docs/images/sidetone-phone.jpg" alt="Sidetone's home screen: a phone with a display showing a call to 600 in progress with live Opus statistics, a 3 by 4 keypad, green Call and red Hang up buttons, and next to it the SIP server panel set to WebSocket from this browser with URL, domain, user and password" width="100%">
+  <img src="docs/images/sidetone-phone.jpg" alt="Sidetone on the desktop: the phone panel on the left with account Lab 2001 registered, Call and Hang up, a toolbar with Resume, Mute, Transfer, Record, Keypad, DND, Auto answer and Analyze, the transfer box open with Blind and Consult first, the keypad and three lines (one on hold); on the right the Calls page with the current call's media addresses, codec and RTP counters, the phone event log and the call history with 404 and 486 results" width="100%">
   <br>
-  <sub>The phone first: a WebRTC call in progress, live getStats() numbers on the display, the SIP server on the right.</sub>
+  <sub>Three lines on one account: a call on hold, a transfer about to happen, every event and result in plain words.</sub>
 </p>
 
 <p align="center">
@@ -55,7 +55,7 @@
   <tr>
     <td width="25%" valign="top">
       <h3>A real softphone</h3>
-      Register, call, answer, send DTMF. SIP over UDP from the desktop, or SIP over WebSocket with WebRTC audio straight from the browser. Every packet is recorded, no capture driver needed.
+      Several accounts and lines, hold, mute, blind and attended transfer, DTMF three ways, DND and auto answer, microphone and speaker. SIP over UDP from the desktop, or over WebSocket with WebRTC from the browser.
     </td>
     <td width="25%" valign="top">
       <h3>It explains the call</h3>
@@ -66,8 +66,8 @@
       Annotated pcapng with findings as Wireshark packet comments, TLS keys embedded when available, and a redacted export that masks numbers, names, credentials and public IPs.
     </td>
     <td width="25%" valign="top">
-      <h3>Ready for scripts and agents</h3>
-      A CLI, JSON test suites with JUnit output for CI, and an MCP server so an AI agent can analyze captures and place test calls on its own.
+      <h3>Built for troubleshooting</h3>
+      A live SIP trace, every packet captured without a driver, DNS SRV and NAT checks, and a CLI, JSON test suites and an MCP server so scripts and AI agents can do the same.
     </td>
   </tr>
 </table>
@@ -78,40 +78,56 @@
 
 Every screenshot is Sidetone itself, captured headless by
 `scripts/readme-shots.mjs` against the throwaway PBX in `lab/` and the
-built-in sample captures. Some are in the dark theme (the Theme button at
-the right of the bar, or your system setting).
+built-in sample captures, with a test tone instead of a microphone. Some
+are in the dark theme (the Theme button, or your system setting).
 
 <table>
   <tr>
     <td width="50%" valign="top">
-      <img src="docs/images/sidetone-hero.jpg" alt="The analysis view of a capture with seven calls: the calls list on the left, the ladder of a NAT call with ten retransmitted 200 OK responses marked in red, and the Findings tab listing 200 OK retransmitted, No ACK and Call ended 32 s after answer" width="100%">
+      <img src="docs/images/sidetone-trace-live.jpg" alt="Dark theme: the SIP trace page with a live list of messages (time, direction, address, first line coloured by result, Call-ID), filters to hide REGISTER and OPTIONS, Pause, Clear, Save pcapng and Analyze capture, and the selected INVITE shown in full below" width="100%">
+      <br>
+      <sub>The live SIP trace: every request and response as it happens.</sub>
+      <h3>See the wire while you talk</h3>
+      Each message the phone sends or receives appears at once with its time, direction and peer; responses are coloured by class. Filter by number, method or Call-ID, hide the REGISTER and OPTIONS noise, pause, save the session as pcapng, or open it in the analyzer with one click.
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/images/sidetone-hero.jpg" alt="The analysis view of a capture with seven calls: the dialogs list on the left, the ladder of a NAT call with ten retransmitted 200 OK responses marked in red, and the Findings tab listing 200 OK retransmitted, No ACK and Call ended 32 s after answer" width="100%">
       <br>
       <sub>A remote worker behind NAT: 200 OK retransmitted ten times, no ACK, drop at 32 s.</sub>
       <h3>The ladder, with the diagnosis on it</h3>
-      Calls are grouped by Call-ID with their outcome, post-dial delay, talk time and error count. The ladder marks retransmissions and colours requests, provisional, success and failure responses; a dot on the left shows which messages a finding points to. Click an arrow to read the message.
+      Calls you make are captured and analyzed with the same engine as any pcap or pcapng from Wireshark, tcpdump, sngrep or an SBC. Dialogs are grouped by Call-ID; the ladder marks retransmissions and colours each response class; a dot shows which messages a finding points to.
     </td>
+  </tr>
+  <tr>
     <td width="50%" valign="top">
       <img src="docs/images/sidetone-message.jpg" alt="Dark theme: the INVITE selected in the ladder and, below, the two findings it triggered (private Contact and private SDP address) above the full SIP message with coloured header names" width="100%">
       <br>
       <sub>The INVITE that started it: private Contact and private SDP address.</sub>
-      <h3>Every message, in full</h3>
-      Header names highlighted, SDP set apart, parse problems called out (bad Content-Length, folding, missing mandatory headers) and the findings that refer to that exact message shown above it.
+      <h3>About 40 rules that explain the call</h3>
+      Missing ACK, NAT in SDP, one-way audio, codec mismatch, failed authentication, glare, session timer expiry, loss and jitter: each finding says what happened in words, with the message numbers as evidence.
     </td>
-  </tr>
-  <tr>
     <td width="50%" valign="top">
       <img src="docs/images/sidetone-media.jpg" alt="The Media tab for a call with two PCMU streams: packets, lost, loss 13.40 and 15.00 percent in red, jitter 46.4 ms, max gap 1513 ms and MOS estimates of 2.92 and 2.90" width="100%">
       <br>
       <sub>Both directions of a bad call: loss, jitter, a 1.5 s gap and MOS below 3.</sub>
       <h3>Media you can measure</h3>
-      Each RTP stream is tied to its call through the SDP: codec, packets, loss with sequence wrap handling, RFC 3550 jitter, the longest gap, ptime, RFC 4733 digits and an ITU-T G.107 E-model MOS estimate. One-way audio, asymmetric RTP and unnegotiated payload types are findings of their own.
+      Each RTP stream is tied to its call through the SDP: codec, packets, loss, RFC 3550 jitter, the longest gap, ptime, RFC 4733 digits and an ITU-T G.107 E-model MOS estimate.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/sidetone-settings.jpg" alt="Account settings on the Advanced SIP tab: User-Agent, Max-Forwards, session timer, user=phone and compact header names ticked, PRACK, GRUU, long Contact, Proxy-Require and skip ACK, with a preview of the INVITE this account sends using compact header names and user=phone" width="100%">
+      <br>
+      <sub>Account settings with a live preview of the INVITE they produce.</sub>
+      <h3>Every knob a desk phone has, and a preview</h3>
+      Per account: outbound proxy, expiry and retry, keepalives, local IP and port, rport, symmetric RTP, RTP ports, DSCP, SDP address override, T1, codec order, ptime, DTMF mode and payload type, session timers, <code>user=phone</code>, compact headers, PRACK, GRUU, long Contact, extra headers. Some exist to reproduce a broken client on purpose, like skipping the ACK.
     </td>
     <td width="50%" valign="top">
-      <img src="docs/images/sidetone-trace.jpg" alt="The Trace log tab: each message headed with transport, source, destination, timestamp and size, followed by the full text, like a desk phone's SIP trace page" width="100%">
+      <img src="docs/images/sidetone-diag.jpg" alt="Dark theme: the Diagnostics page with an OPTIONS ping answered 200 OK in 4 ms by Asterisk, a DNS lookup showing where UDP requests go, the NAT card with STUN servers and what the SIP server sees for each account, and the Audio card with microphone and speaker choice, level meters and a loopback test" width="100%">
       <br>
-      <sub>The trace log, desk-phone style: who sent what, when and how big.</sub>
-      <h3>The trace log you already know</h3>
-      The same call as a plain log, each message headed by transport, source and destination, a millisecond timestamp and its size, the way a desk phone's SIP Trace page shows it.
+      <sub>Reachability, DNS, NAT and audio checks in one place.</sub>
+      <h3>Diagnostics before the call</h3>
+      OPTIONS ping with round trip and server agent, RFC 3263 lookups (NAPTR, SRV for UDP, TCP and TLS, A/AAAA), STUN against two servers to spot a symmetric NAT, the address each registrar sees you from, and a microphone and speaker test with level meters.
     </td>
   </tr>
   <tr>
@@ -120,14 +136,14 @@ the right of the bar, or your system setting).
       <br>
       <sub>Ask AI, with "Show what will be sent" before anything leaves.</sub>
       <h3>An AI second opinion</h3>
-      The model gets the findings, the ladder, the RTP statistics and the relevant raw messages, masked by default, and is asked to explain the root cause with evidence and fixes. Anthropic, any OpenAI-compatible service or a local Ollama; preview the exact prompt first.
+      The model gets the findings, the ladder, the RTP statistics and the relevant raw messages, masked by default, and explains the root cause with evidence and fixes. Anthropic, any OpenAI-compatible service or a local Ollama.
     </td>
     <td width="50%" valign="top">
-      <img src="docs/images/sidetone-phone-udp.jpg" alt="Dark theme: the phone after a UDP call to 600 that ended 200 OK, PCMU, 154 packets received, with Call analyzed: 0 errors, 1 warning and a View analysis link, next to the SIP server panel in UDP mode with call length, audio, register before calling and behavior profile" width="100%">
+      <img src="docs/images/sidetone-webrtc.jpg" alt="The browser version registered over WebSocket as 4001, a call to 600 connected with Opus, live packet counters and the ICE path, the phone events and DTMF sent as RFC 4733" width="100%">
       <br>
-      <sub>A UDP test call from the desktop, analyzed the moment it ends.</sub>
-      <h3>Test calls with a behavior profile</h3>
-      Over UDP the desktop app places calls with G.711, tone, echo or a WAV file, digest auth, PRACK and DTMF by RFC 4733 or SIP INFO. A behavior profile reproduces difficult clients on purpose: T1, session timers, <code>user=phone</code>, compact headers, long Contact, symmetric RTP, DSCP, even a skipped ACK or a fake SDP address.
+      <sub>No install: the browser version on GitHub Pages, calling over WebRTC.</sub>
+      <h3>The same phone in the browser</h3>
+      On GitHub Pages Sidetone talks SIP over WebSocket (RFC 7118) with WebRTC audio, so it reaches any PBX or SBC with a WSS listener. One line at a time with hold, mute, blind transfer and DTMF; analysis runs in the page through WebAssembly.
     </td>
   </tr>
 </table>
@@ -150,7 +166,7 @@ the right of the bar, or your system setting).
     </td>
     <td width="33%" valign="top">
       <h4>The phone</h4>
-      REGISTER with digest (MD5, qop auth) &middot; INVITE, PRACK, ACK, BYE, CANCEL, INFO, UPDATE &middot; answer mode with echo &middot; G.711 &mu;-law and A-law &middot; RFC 4733 and SIP INFO DTMF &middot; session refresh &middot; route-based choice of the local interface &middot; in-process capture &middot; WebRTC web phone with Opus, ICE and DTLS-SRTP, incoming calls and getStats()
+      Several accounts with re-registration at 90% of the expiry and retry on failure &middot; digest auth (MD5, qop auth) &middot; several lines with automatic hold &middot; hold and resume by re-INVITE &middot; mute &middot; blind transfer (REFER) and attended transfer (REFER with Replaces), and being transferred &middot; DTMF as RFC 4733, SIP INFO or inband tones, and received digits shown &middot; DND and auto answer with the reject code you choose &middot; intercom answer (Call-Info, Alert-Info) &middot; PRACK, UPDATE, session timers, late offer &middot; ringback and ring tones &middot; per-call WAV recording &middot; DNS SRV and outbound proxy &middot; dial strings with headers and post-answer DTMF (<code>600?Subject=x,,123#</code>) &middot; G.711 &mu;-law and A-law &middot; WebRTC with Opus, ICE and DTLS-SRTP in the browser
     </td>
   </tr>
   <tr>
@@ -245,14 +261,22 @@ Ollama needs `OLLAMA_ORIGINS` to include the page origin.
   analyzer in WASM, behind `sidetone serve`, and inside the Tauri desktop
   app, which starts the local server on a random loopback port protected by
   a per-launch token.
+- **A phone engine, not a script:** `crates/sidetone-ua` runs one
+  signaling thread with RFC 3261 client transactions and timers, dialogs,
+  re-INVITE, REFER/NOTIFY and Replaces, and a media thread pair per line;
+  the UI drives it through a small HTTP API and reads snapshots, events and
+  the trace. Accounts, settings and history live in your user
+  configuration folder (`SIDETONE_CONFIG_DIR` overrides it).
 - **Capture without drivers:** the phone records its own datagrams with
   real addresses and timestamps, so no Npcap, libpcap or root is needed.
 - **The interface the OS would use:** the local address comes from the
   route to the server, so a VPN or virtual adapter does not end up in Via,
   Contact and SDP.
 - **Tested against a real PBX:** CI runs unit tests on Linux, Windows and
-  macOS, builds the WASM, starts Asterisk from `lab/` and runs the example
-  suite, and opens every exported capture with tshark.
+  macOS, builds the WASM, starts Asterisk from `lab/`, runs the example
+  suite, drives the phone engine through calls, hold, DTMF, both kinds of
+  transfer, DND and auto answer, and opens every exported capture with
+  tshark.
 
 ## Get started
 
@@ -270,12 +294,12 @@ For a local PBX to call: `lab/run-asterisk.sh` (Asterisk with UDP,
 WebSocket and WebRTC endpoints, echo, busy and unallocated numbers).
 
 > [!IMPORTANT]
-> **Status: alpha.** The analyzer, the UDP phone, the web phone, test
+> **Status: alpha.** The analyzer, the desktop and browser phones, test
 > suites and the MCP server work and are covered by tests and a live PBX
 > in CI, but Sidetone is young. Not yet there: SIP over TCP/TLS, SRTP and
-> Opus in the native phone, passive capture of other hosts' traffic, DNS
-> SRV/NAPTR, and an interactive hang-up for native calls (they run for a
-> set length). MOS is an estimate from one capture point.
+> Opus in the native phone, conferences, BLF and presence, and passive
+> capture of other hosts' traffic. The browser phone handles one call at a
+> time. MOS is an estimate from one capture point.
 
 ## Help wanted
 

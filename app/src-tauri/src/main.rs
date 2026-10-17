@@ -1,5 +1,5 @@
 // Sidetone desktop: starts the embedded local server (analysis, AI proxy,
-// test UA) on a random loopback port and opens it in a native window.
+// softphone engine) on a random loopback port and opens it in a native window.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -25,11 +25,17 @@ fn main() {
             let target: tauri::Url = url.parse()?;
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(target))
                 .title("Sidetone")
-                .inner_size(1360.0, 860.0)
-                .min_inner_size(820.0, 560.0)
+                .inner_size(1400.0, 880.0)
+                .min_inner_size(900.0, 600.0)
                 .build()?;
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Sidetone");
+        .build(tauri::generate_context!())
+        .expect("error while building Sidetone")
+        .run(|_app, event| {
+            // Hang up and unregister before the process goes away.
+            if let tauri::RunEvent::Exit = event {
+                sidetone_cli::phone::shutdown();
+            }
+        });
 }

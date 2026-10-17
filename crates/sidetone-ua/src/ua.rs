@@ -4,6 +4,7 @@
 
 use crate::media::{bind_udp, AudioSource, Codec, RtpSession};
 use crate::profile::{DtmfMode, Profile};
+use crate::sipmsg;
 use crate::tap::Tap;
 use md5::{Digest, Md5};
 use sidetone_core::sdp;
@@ -29,7 +30,7 @@ impl From<std::io::Error> for UaError {
 
 type Result<T> = std::result::Result<T, UaError>;
 
-fn rand_hex(n: usize) -> String {
+pub(crate) fn rand_hex(n: usize) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static CTR: AtomicU64 = AtomicU64::new(0x2545F4914F6CDD1D);
     let mut x = CTR.fetch_add(0x9E3779B97F4A7C15, Ordering::Relaxed)
@@ -250,65 +251,24 @@ impl Ua {
         });
     }
 
-    fn host_str(&self) -> String {
-        match self.local.ip() {
-            IpAddr::V6(v6) => format!("[{v6}]:{}", self.local.port()),
-            IpAddr::V4(v4) => format!("{v4}:{}", self.local.port()),
-        }
-    }
-
     fn domain(&self) -> String {
         self.profile.account.domain.clone()
     }
 
     fn aor(&self) -> String {
-        format!(
-            "sip:{}@{}",
-            self.profile.account.user,
-            sip::split_host_port(&self.domain()).0
-        )
+        sipmsg::aor(&self.profile)
     }
 
     fn from_header(&self, tag: &str) -> String {
-        let name = self
-            .profile
-            .account
-            .display_name
-            .clone()
-            .map(|n| format!("\"{n}\" "))
-            .unwrap_or_default();
-        format!("{name}<{}>;tag={tag}", self.aor())
+        sipmsg::from_header(&self.profile, tag)
     }
 
     fn contact(&self, register: bool) -> String {
-        let b = &self.profile.behavior;
-        let mut c = format!("<sip:{}@{}>", self.profile.account.user, self.host_str());
-        if register {
-            if let Some(q) = &self.profile.account.q_value {
-                c.push_str(&format!(";q={q}"));
-            }
-        }
-        if b.long_contact {
-            c.push_str(&format!(";+sip.instance=\"<urn:uuid:{}>\";reg-id=1;audio;mobility=\"fixed\";duplex=\"full\";description=\"Sidetone\";methods=\"INVITE,ACK,CANCEL,BYE,OPTIONS,INFO,UPDATE,PRACK\"", self.instance));
-        }
-        c
+        sipmsg::contact(&self.profile, self.local, &self.instance, register)
     }
 
     fn hn(&self, full: &'static str) -> &'static str {
-        if !self.profile.behavior.compact_headers {
-            return full;
-        }
-        match full {
-            "Via" => "v",
-            "From" => "f",
-            "To" => "t",
-            "Call-ID" => "i",
-            "Contact" => "m",
-            "Content-Length" => "l",
-            "Content-Type" => "c",
-            "Supported" => "k",
-            _ => full,
-        }
+        sipmsg::hn(&self.profile.behavior, full)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -326,46 +286,21 @@ impl Ua {
         extra: &[(String, String)],
         body: Option<(&str, &str)>,
     ) -> String {
-        let b = &self.profile.behavior;
-        let mut s = format!("{method} {ruri} SIP/2.0\r\n");
-        let rport = if b.rport { ";rport" } else { "" };
-        s.push_str(&format!(
-            "{}: SIP/2.0/UDP {};branch={branch}{rport}\r\n",
-            self.hn("Via"),
-            self.host_str()
-        ));
-        s.push_str(&format!("Max-Forwards: {}\r\n", b.max_forwards));
-        for r in routes {
-            s.push_str(&format!("Route: {r}\r\n"));
-        }
-        s.push_str(&format!(
-            "{}: {from}\r\n{}: {to}\r\n{}: {call_id}\r\nCSeq: {cseq} {cseq_method}\r\n",
-            self.hn("From"),
-            self.hn("To"),
-            self.hn("Call-ID")
-        ));
-        if let Some(pr) = &b.proxy_require {
-            s.push_str(&format!("Proxy-Require: {pr}\r\n"));
-        }
-        s.push_str(&format!("User-Agent: {}\r\n", b.user_agent));
-        for (k, v) in extra {
-            s.push_str(&format!("{k}: {v}\r\n"));
-        }
-        for (k, v) in &b.extra_headers {
-            s.push_str(&format!("{k}: {v}\r\n"));
-        }
-        match body {
-            Some((ct, body)) => {
-                s.push_str(&format!(
-                    "{}: {ct}\r\n{}: {}\r\n\r\n{body}",
-                    self.hn("Content-Type"),
-                    self.hn("Content-Length"),
-                    body.len()
-                ));
-            }
-            None => s.push_str(&format!("{}: 0\r\n\r\n", self.hn("Content-Length"))),
-        }
-        s
+        sipmsg::build_request(
+            &self.profile.behavior,
+            self.local,
+            method,
+            ruri,
+            branch,
+            from,
+            to,
+            call_id,
+            cseq,
+            cseq_method,
+            routes,
+            extra,
+            body,
+        )
     }
 
     fn send(&self, text: &str, dest: SocketAddr) -> Result<()> {
@@ -407,6 +342,7 @@ impl Ua {
     }
 
     /// Replies to a request with a minimal response copying the dialog headers.
+    #[allow(clippy::too_many_arguments)]
     fn reply(
         &self,
         req: &SipMessage,
@@ -417,49 +353,18 @@ impl Ua {
         extra: &[(String, String)],
         body: Option<(&str, &str)>,
     ) -> Result<()> {
-        let mut s = format!("SIP/2.0 {code} {reason}\r\n");
-        for (k, v) in &req.headers {
-            match k.as_str() {
-                "Via" => {
-                    // RFC 3581: fill received/rport on the top Via.
-                    let mut v2 = v.clone();
-                    if s.matches("Via:").count() == 0 {
-                        if v2.contains(";rport") && !v2.contains(";rport=") {
-                            v2 = v2.replacen(";rport", &format!(";rport={}", from.port()), 1);
-                        }
-                        v2.push_str(&format!(";received={}", from.ip()));
-                    }
-                    s.push_str(&format!("Via: {v2}\r\n"));
-                }
-                "Record-Route" | "From" | "Call-ID" | "CSeq" => {
-                    s.push_str(&format!("{k}: {v}\r\n"))
-                }
-                "To" => {
-                    let has_tag = sip::param(v, "tag").is_some();
-                    match (has_tag, to_tag, code) {
-                        (false, Some(t), c) if c > 100 => {
-                            s.push_str(&format!("To: {v};tag={t}\r\n"))
-                        }
-                        _ => s.push_str(&format!("To: {v}\r\n")),
-                    }
-                }
-                _ => {}
-            }
-        }
-        if (200..300).contains(&code) || (180..190).contains(&code) {
-            s.push_str(&format!("Contact: {}\r\n", self.contact(false)));
-        }
-        s.push_str(&format!("Server: {}\r\n", self.profile.behavior.user_agent));
-        for (k, v) in extra {
-            s.push_str(&format!("{k}: {v}\r\n"));
-        }
-        match body {
-            Some((ct, b)) => s.push_str(&format!(
-                "Content-Type: {ct}\r\nContent-Length: {}\r\n\r\n{b}",
-                b.len()
-            )),
-            None => s.push_str("Content-Length: 0\r\n\r\n"),
-        }
+        let s = sipmsg::build_response(
+            &self.profile,
+            self.local,
+            &self.instance,
+            req,
+            from,
+            code,
+            reason,
+            to_tag,
+            extra,
+            body,
+        );
         self.send(&s, from)
     }
 
@@ -674,23 +579,7 @@ impl Ua {
     }
 
     fn target_uri(&self, target: &str) -> String {
-        if target.starts_with("sip:") || target.starts_with("sips:") {
-            return target.to_string();
-        }
-        let (user, host) = match target.split_once('@') {
-            Some((u, h)) => (u.to_string(), h.to_string()),
-            None => (target.to_string(), self.domain()),
-        };
-        let numeric = user
-            .trim_start_matches('+')
-            .chars()
-            .all(|c| c.is_ascii_digit());
-        let up = if self.profile.behavior.user_phone && numeric {
-            ";user=phone"
-        } else {
-            ""
-        };
-        format!("sip:{user}@{host}{up}")
+        sipmsg::target_uri(&self.profile, target)
     }
 
     fn dest_for_uri(&self, uri: &str) -> Result<SocketAddr> {
@@ -1130,9 +1019,7 @@ impl Ua {
                                 ));
                             }
                         }
-                        DtmfMode::Inband => {
-                            out.notes.push("inband DTMF not implemented yet".into())
-                        }
+                        DtmfMode::Inband => rtp.ctl.inband.lock().unwrap().extend(digits.chars()),
                     }
                     self.ev(format!("DTMF {digits} via {:?}", b.dtmf_mode));
                 }

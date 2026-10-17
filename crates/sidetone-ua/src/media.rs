@@ -1,8 +1,9 @@
 //! G.711 codecs, tone generation, WAV output and the RTP session.
 
 use crate::tap::Tap;
+use std::collections::VecDeque;
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -126,6 +127,124 @@ pub enum AudioSource {
     Samples(Arc<Vec<i16>>),
     /// Send back whatever is received (echo test).
     Echo,
+    /// Live microphone samples pushed into `MediaCtl::mic` (silence when empty).
+    Device,
+}
+
+/// Bounded PCM queue at 8 kHz shared with audio devices.
+#[derive(Default)]
+pub struct Ring {
+    q: Mutex<VecDeque<i16>>,
+    cap: usize,
+}
+
+impl Ring {
+    pub fn new(cap: usize) -> Arc<Ring> {
+        Arc::new(Ring {
+            q: Mutex::new(VecDeque::with_capacity(cap)),
+            cap,
+        })
+    }
+    pub fn push(&self, s: &[i16]) {
+        let mut q = self.q.lock().unwrap();
+        q.extend(s.iter().copied());
+        while q.len() > self.cap {
+            q.pop_front();
+        }
+    }
+    pub fn pop(&self) -> Option<i16> {
+        self.q.lock().unwrap().pop_front()
+    }
+    pub fn pop_into(&self, out: &mut [i16]) -> usize {
+        let mut q = self.q.lock().unwrap();
+        let n = out.len().min(q.len());
+        for o in out.iter_mut().take(n) {
+            *o = q.pop_front().unwrap_or(0);
+        }
+        n
+    }
+    pub fn len(&self) -> usize {
+        self.q.lock().unwrap().len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub fn clear(&self) {
+        self.q.lock().unwrap().clear();
+    }
+}
+
+/// Live controls of a running RTP session, changed from the signaling side.
+pub struct MediaCtl {
+    /// Do not send media (local hold).
+    pub hold: AtomicBool,
+    /// Send silence instead of the source (mute).
+    pub mute: AtomicBool,
+    /// Keep sent/received PCM for the WAV recording.
+    pub record: AtomicBool,
+    /// New remote address after a re-INVITE/UPDATE.
+    pub remote: Mutex<Option<SocketAddr>>,
+    /// Digits to play as inband dual tones.
+    pub inband: Mutex<VecDeque<char>>,
+    /// Peak levels of the last packet, 0..=32767.
+    pub tx_level: AtomicU32,
+    pub rx_level: AtomicU32,
+    /// Microphone input for `AudioSource::Device`.
+    pub mic: Mutex<Option<Arc<Ring>>>,
+    /// Decoded received audio goes here when set (speaker).
+    pub speaker: Mutex<Option<Arc<Ring>>>,
+    /// Received RFC 4733 digits (for display).
+    pub dtmf_rx: Mutex<Vec<char>>,
+}
+
+impl Default for MediaCtl {
+    fn default() -> Self {
+        MediaCtl {
+            hold: AtomicBool::new(false),
+            mute: AtomicBool::new(false),
+            record: AtomicBool::new(true),
+            remote: Mutex::new(None),
+            inband: Mutex::new(VecDeque::new()),
+            tx_level: AtomicU32::new(0),
+            rx_level: AtomicU32::new(0),
+            mic: Mutex::new(None),
+            speaker: Mutex::new(None),
+            dtmf_rx: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+/// Frequencies (low, high) of a DTMF digit.
+pub fn dtmf_freqs(d: char) -> Option<(f32, f32)> {
+    let rows = [697.0, 770.0, 852.0, 941.0];
+    let cols = [1209.0, 1336.0, 1477.0, 1633.0];
+    let (r, c) = match d.to_ascii_uppercase() {
+        '1' => (0, 0),
+        '2' => (0, 1),
+        '3' => (0, 2),
+        'A' => (0, 3),
+        '4' => (1, 0),
+        '5' => (1, 1),
+        '6' => (1, 2),
+        'B' => (1, 3),
+        '7' => (2, 0),
+        '8' => (2, 1),
+        '9' => (2, 2),
+        'C' => (2, 3),
+        '*' => (3, 0),
+        '0' => (3, 1),
+        '#' => (3, 2),
+        'D' => (3, 3),
+        _ => return None,
+    };
+    Some((rows[r], cols[c]))
+}
+
+fn peak(pcm: &[i16]) -> u32 {
+    pcm.iter()
+        .map(|s| s.unsigned_abs() as u32)
+        .max()
+        .unwrap_or(0)
 }
 
 /// Writes 8 kHz 16-bit stereo WAV: left = sent, right = received.
@@ -206,6 +325,7 @@ pub struct RtpSession {
     pub sent: Arc<Mutex<Vec<i16>>>,
     pub received: Arc<Mutex<Vec<i16>>>,
     pub stats: Arc<Mutex<MediaStats>>,
+    pub ctl: Arc<MediaCtl>,
     dtmf_queue: Arc<Mutex<Vec<char>>>,
 }
 
@@ -235,6 +355,7 @@ impl RtpSession {
                     sent: Arc::new(Mutex::new(Vec::new())),
                     received: Arc::new(Mutex::new(Vec::new())),
                     stats: Arc::new(Mutex::new(MediaStats::default())),
+                    ctl: Arc::new(MediaCtl::default()),
                     dtmf_queue: Arc::new(Mutex::new(Vec::new())),
                 });
             }
@@ -267,11 +388,16 @@ impl RtpSession {
         let received = self.received.clone();
         let stats = self.stats.clone();
         let latched: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
+        let last_dtmf_ts: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
         let echo_buf: Arc<Mutex<std::collections::VecDeque<i16>>> =
             Arc::new(Mutex::new(Default::default()));
         let local = self.local;
+        let ctl = self.ctl.clone();
+        // Recording is capped at one hour per direction.
+        const REC_CAP: usize = 8000 * 3600;
 
         {
+            let ctl = ctl.clone();
             let stop = stop.clone();
             let latched = latched.clone();
             let echo_buf = echo_buf.clone();
@@ -298,13 +424,44 @@ impl RtpSession {
                             *latched.lock().unwrap() = Some(from);
                         }
                     }
+                    if Some(h.pt) == dtmf_pt && n >= h.payload_offset + 4 {
+                        // RFC 4733: record the digit once, on the first end packet.
+                        let p = &buf[h.payload_offset..n];
+                        if p[1] & 0x80 != 0 {
+                            let ts = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+                            let mut last = last_dtmf_ts.lock().unwrap();
+                            if *last != Some(ts) {
+                                *last = Some(ts);
+                                let d = b"0123456789*#ABCD".get(p[0] as usize).copied();
+                                if let Some(d) = d {
+                                    ctl.dtmf_rx.lock().unwrap().push(d as char);
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     if let Some(c) = Codec::from_pt(h.pt) {
                         let pcm: Vec<i16> = buf[h.payload_offset..n]
                             .iter()
                             .map(|&b| c.decode(b))
                             .collect();
-                        echo_buf.lock().unwrap().extend(pcm.iter().copied());
-                        received.lock().unwrap().extend(pcm);
+                        ctl.rx_level.store(peak(&pcm), Ordering::Relaxed);
+                        if let Some(spk) = ctl.speaker.lock().unwrap().as_ref() {
+                            spk.push(&pcm);
+                        }
+                        {
+                            let mut eb = echo_buf.lock().unwrap();
+                            eb.extend(pcm.iter().copied());
+                            while eb.len() > 8000 {
+                                eb.pop_front();
+                            }
+                        }
+                        if ctl.record.load(Ordering::Relaxed) {
+                            let mut r = received.lock().unwrap();
+                            if r.len() < REC_CAP {
+                                r.extend(pcm);
+                            }
+                        }
                     }
                 }
             }));
@@ -328,8 +485,28 @@ impl RtpSession {
             // Active RFC 4733 event: (digit code, packets sent, event timestamp).
             let mut dtmf: Option<(u8, u32, u32)> = None;
             let mut dtmf_gap = 0u32;
+            // Inband tone state: (low Hz, high Hz, samples left in tone, samples left in gap).
+            let mut tone: Option<(f32, f32, usize, usize)> = None;
+            let mut tone_t = 0usize;
+            let mut remote = remote;
             while !stop.load(Ordering::Relaxed) {
+                if let Some(r) = ctl.remote.lock().unwrap().take() {
+                    remote = r;
+                    *latched.lock().unwrap() = None;
+                    stats.lock().unwrap().latched_remote = None;
+                }
                 let dest = latched.lock().unwrap().unwrap_or(remote);
+                if ctl.hold.load(Ordering::Relaxed) {
+                    ctl.tx_level.store(0, Ordering::Relaxed);
+                    ts = ts.wrapping_add(spp as u32);
+                    n += 1;
+                    let next = start + Duration::from_millis(n * ptime_ms as u64);
+                    let now = Instant::now();
+                    if next > now {
+                        thread::sleep(next - now);
+                    }
+                    continue;
+                }
                 let mut pkt = Vec::with_capacity(12 + spp);
                 if dtmf.is_none() && dtmf_gap == 0 {
                     if let Some(pt) = dtmf_pt {
@@ -358,12 +535,23 @@ impl RtpSession {
                     } else {
                         Some((code, k + 1, ets))
                     };
-                    sent.lock().unwrap().extend(std::iter::repeat(0).take(spp));
+                    if ctl.record.load(Ordering::Relaxed) {
+                        sent.lock().unwrap().extend(std::iter::repeat(0).take(spp));
+                    }
                 } else {
                     if dtmf_gap > 0 {
                         dtmf_gap -= 1;
                     }
                     let mut pcm = Vec::with_capacity(spp);
+                    if tone.is_none() {
+                        if let Some(d) = ctl.inband.lock().unwrap().pop_front() {
+                            if let Some((lo, hi)) = dtmf_freqs(d) {
+                                tone = Some((lo, hi, 8 * 120, 8 * 80));
+                                tone_t = 0;
+                            }
+                        }
+                    }
+                    let muted = ctl.mute.load(Ordering::Relaxed);
                     for _ in 0..spp {
                         let s = match &source {
                             AudioSource::Silence => 0,
@@ -384,9 +572,37 @@ impl RtpSession {
                                 s
                             }
                             AudioSource::Echo => echo_buf.lock().unwrap().pop_front().unwrap_or(0),
+                            AudioSource::Device => ctl
+                                .mic
+                                .lock()
+                                .unwrap()
+                                .as_ref()
+                                .and_then(|m| m.pop())
+                                .unwrap_or(0),
+                        };
+                        let s = if muted { 0 } else { s };
+                        let s = match &mut tone {
+                            Some((lo, hi, on, gap)) => {
+                                let v = if *on > 0 {
+                                    *on -= 1;
+                                    let t = tone_t as f32 / 8000.0;
+                                    tone_t += 1;
+                                    let w = 2.0 * std::f32::consts::PI;
+                                    (((w * *lo * t).sin() + (w * *hi * t).sin()) * 6000.0) as i16
+                                } else {
+                                    *gap = gap.saturating_sub(1);
+                                    0
+                                };
+                                if *on == 0 && *gap == 0 {
+                                    tone = None;
+                                }
+                                v
+                            }
+                            None => s,
                         };
                         pcm.push(s);
                     }
+                    ctl.tx_level.store(peak(&pcm), Ordering::Relaxed);
                     pkt.extend_from_slice(&[
                         0x80,
                         if first { 0x80 | codec.pt() } else { codec.pt() },
@@ -395,7 +611,12 @@ impl RtpSession {
                     pkt.extend_from_slice(&ts.to_be_bytes());
                     pkt.extend_from_slice(&ssrc.to_be_bytes());
                     pkt.extend(pcm.iter().map(|&s| codec.encode(s)));
-                    sent.lock().unwrap().extend(pcm);
+                    if ctl.record.load(Ordering::Relaxed) {
+                        let mut v = sent.lock().unwrap();
+                        if v.len() < REC_CAP {
+                            v.extend(pcm);
+                        }
+                    }
                     first = false;
                 }
                 if send_sock.send_to(&pkt, dest).is_ok() {
