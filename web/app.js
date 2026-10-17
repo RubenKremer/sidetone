@@ -269,6 +269,17 @@ function renderAccounts() {
   $("#acct-state").classList.toggle("bad", regClass(a) === "bad");
 }
 
+const BLF_TEXT = { idle: "Free", ringing: "Ringing", busy: "Busy", error: "Error", unknown: "Unknown" };
+
+function renderBlf() {
+  const a = currentAccount();
+  const items = a && a.blf ? a.blf : [];
+  $("#blf-box").hidden = !items.length;
+  $("#blf").innerHTML = items
+    .map((b) => `<button type="button" class="blf-item blf-${esc(b.state)}" data-dial="${esc(b.target)}" title="${esc(b.detail || "")}"><span class="dot"></span><span class="blf-t">${esc(b.target)}</span><span class="blf-s">${esc(t(BLF_TEXT[b.state] || b.state))}</span></button>`)
+    .join("");
+}
+
 function renderLines() {
   const ls = lines();
   $("#lines-empty").hidden = ls.length > 0;
@@ -278,11 +289,13 @@ function renderLines() {
   const now = Date.now();
   $("#lines").innerHTML = ls
     .map((l) => {
-      const t = l.state === "connected" && l.answered_ms ? dur(now - l.answered_ms) : l.state === "ended" ? (l.answered_ms ? dur((l.ended_ms || now) - l.answered_ms) : "") : dur(now - l.started_ms);
+      const tm = l.state === "connected" && l.answered_ms ? dur(now - l.answered_ms) : l.state === "ended" ? (l.answered_ms ? dur((l.ended_ms || now) - l.answered_ms) : "") : dur(now - l.started_ms);
       const stTxt = l.state === "connected" && l.held ? "On hold" : l.state === "connected" && l.remote_held ? "Held by remote" : STATE_TEXT[l.state] || l.state;
       const multi = S.st && S.st.accounts.length > 1;
       const meta = [
         multi ? accName(l.account) : "",
+        l.srtp ? "SRTP" : "",
+        l.conference ? `${t("Conference")} L${l.conference}` : "",
         l.codec,
         l.state !== "incoming" && (l.rtp_sent || l.rtp_received) ? `↑${l.rtp_sent} ↓${l.rtp_received}` : "",
         l.muted ? "muted" : "",
@@ -298,7 +311,7 @@ function renderLines() {
           : "";
       const cls = `line st-${l.state}${l.held ? " held" : ""}${l.line === S.sel ? " sel" : ""}`;
       return `<li class="${cls}" data-line="${l.line}" tabindex="0">
-        <div class="ln-top"><span class="ln-dir"><svg><use href="#i-${l.direction === "in" ? "in" : "out"}"/></svg></span><span class="ln-state">${esc(stTxt)}</span><span class="ln-dur">${t}</span></div>
+        <div class="ln-top"><span class="ln-dir"><svg><use href="#i-${l.direction === "in" ? "in" : "out"}"/></svg></span><span class="ln-state">${esc(stTxt)}</span><span class="ln-dur">${tm}</span></div>
         <div class="ln-remote">${l.remote_name ? `<b>${esc(l.remote_name)}</b> ` : ""}<span>${esc(l.remote)}</span></div>
         ${meta ? `<div class="ln-meta">${meta}</div>` : ""}${actions}
       </li>`;
@@ -324,6 +337,9 @@ function renderControls() {
   tool("mute").setAttribute("aria-pressed", String(!!(l && l.muted)));
   tool("transfer").disabled = !connected;
   tool("record").disabled = !(connected && S.ctl.features.record);
+  const others = liveLines().filter((x) => x.state === "connected" && (!l || x.line !== l.line));
+  tool("conf").disabled = !(connected && (l.conference || others.length));
+  tool("conf").setAttribute("aria-pressed", String(!!(l && l.conference)));
   tool("record").setAttribute("aria-pressed", String(!!(l && l.recording)));
   const st = S.st ? S.st.settings : {};
   tool("dnd").setAttribute("aria-pressed", String(!!st.dnd));
@@ -357,7 +373,7 @@ function renderStatus() {
   const st = S.st;
   const a = currentAccount();
   $("#st-acct").innerHTML = `<span class="dot ${regClass(a)}"></span><span>${a ? `${esc(accLabel(a))}: ${esc(REG_TEXT[a.state] || a.state)}` : "No account"}</span>`;
-  $("#st-net").textContent = a && a.local ? (S.ctl.kind === "web" ? `WSS ${a.server || ""}` : `UDP ${a.local} → ${a.server || "?"}`) : "";
+  $("#st-net").textContent = a && a.local ? (S.ctl.kind === "web" ? `WSS ${a.server || ""}` : `${a.transport || "UDP"} ${a.local} → ${a.server || "direct"}`) : "";
   $("#st-nat").textContent = !a || !a.public ? "" : S.ctl.kind === "web" ? `Server sees ${a.public}` : a.public !== a.local ? `Seen as ${a.public} (NAT)` : "No NAT on the signaling path";
   const live = liveLines().length;
   $("#st-lines").textContent = live ? `${live} call${live > 1 ? "s" : ""}` : "Idle";
@@ -395,6 +411,7 @@ function onState(st) {
   }
   pickSelection();
   renderAccounts();
+  renderBlf();
   renderLines();
   renderControls();
   renderMeters();
@@ -574,6 +591,18 @@ function bindPhone() {
       case "record":
         if (l) cmd({ cmd: "record", line: l.line, on: !l.recording });
         break;
+      case "conf": {
+        if (!l) break;
+        if (l.conference) {
+          cmd({ cmd: "conference", line: l.line, to_line: l.conference, on: false });
+          break;
+        }
+        const other = liveLines()
+          .filter((x) => x.state === "connected" && x.line !== l.line)
+          .sort((a, b) => (b.answered_ms || 0) - (a.answered_ms || 0))[0];
+        if (other) cmd({ cmd: "conference", line: l.line, to_line: other.line, on: true });
+        break;
+      }
       case "transfer":
         if ($("#xfer").hidden) openXfer();
         else closeXfer();
@@ -601,6 +630,13 @@ function bindPhone() {
     }
   });
 
+  $("#blf").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-dial]");
+    if (b) {
+      $("#dial").value = b.dataset.dial;
+      dial(b.dataset.dial);
+    }
+  });
   $("#lines").addEventListener("click", (e) => {
     const li = e.target.closest("li[data-line]");
     if (!li) return;
@@ -724,6 +760,7 @@ function renderCallDetail() {
       ["Call-ID", m(l.call_id)],
       ["Talk time", l.answered_ms ? dur((l.ended_ms || now) - l.answered_ms) : ""],
       ["Codec", esc(l.codec || "")],
+      ["Media encryption", l.srtp ? `SRTP (AES_CM_128_HMAC_SHA1)${l.srtp_failed ? ` <span class="bad">${l.srtp_failed} packets failed authentication</span>` : ""}` : l.state === "connected" ? "none (RTP)" : ""],
       ["Local media", l.local_media ? m(l.local_media) : ""],
       ["Remote media", l.remote_media ? m(l.remote_media) : ""],
       ["RTP sent / received", l.rtp_sent || l.rtp_received ? `${l.rtp_sent.toLocaleString()} / ${l.rtp_received.toLocaleString()}${l.state === "connected" && !l.held && l.rtp_sent > 100 && l.rtp_received === 0 ? ` <span class="bad">no audio from the far end</span>` : ""}` : ""],
@@ -1640,6 +1677,8 @@ const NATIVE_ACC_TABS = [
     ["profile.behavior.filter_registrar", "Accept requests only from the registrar", "bool"],
   ]],
   ["Network", [
+    ["profile.behavior.transport", "SIP transport", "select", "TCP and TLS keep one connection to the server; with TLS and no port, 5061 and DNS _sips._tcp are used", [["udp", "UDP"], ["tcp", "TCP"], ["tls", "TLS"]]],
+    ["profile.behavior.tls_verify", "Check the server's TLS certificate", "bool", "turn off for labs and PBXs with self-signed certificates"],
     ["profile.behavior.local_ip", "Local IP", "opt", "empty = the interface the OS routes to the server"],
     ["profile.behavior.local_port", "Local SIP port", "number", "0 = random. Use 5060 to look like a desk phone."],
     ["profile.behavior.rport", "Request rport (RFC 3581)", "bool"],
@@ -1653,6 +1692,7 @@ const NATIVE_ACC_TABS = [
   ]],
   ["Media", [
     ["profile.behavior.codecs", "Codecs, in order of preference", "codecs"],
+    ["profile.behavior.srtp", "Media encryption (SRTP, SDES keys)", "select", "Optional offers SRTP and accepts plain RTP; Required offers only RTP/SAVP. Use it with TLS so the keys are not readable on the wire.", [["off", "Off (RTP)"], ["optional", "Optional"], ["mandatory", "Required (RTP/SAVP)"]]],
     ["profile.behavior.ptime_ms", "Packet time (ms)", "select", "", [["10", "10"], ["20", "20"], ["30", "30"], ["40", "40"], ["60", "60"]]],
     ["profile.behavior.sdp_direction", "Direction offered", "select", "", [["sendrecv", "sendrecv"], ["sendonly", "sendonly"], ["recvonly", "recvonly"], ["inactive", "inactive"]]],
   ]],
@@ -1673,6 +1713,7 @@ const NATIVE_ACC_TABS = [
     ["profile.behavior.skip_ack", "Do not send ACK for 2xx (reproduces the 32 s drop)", "bool", "testing only"],
   ]],
   ["Headers", [["profile.behavior.extra_headers", "Headers added to every request", "headers"]]],
+  ["BLF", [["blf", "Extensions to watch (busy lamp field)", "lines", "one per line: an extension, user@host or SIP URI. Sidetone subscribes to the dialog event package (RFC 4235) once the account is registered; the PBX needs hints for them."]]],
 ];
 
 const WEB_ACC_TABS = [
@@ -1726,6 +1767,8 @@ function fieldHtml(f, value, id) {
         .map((c) => `<li data-codec="${c}"><label class="check"><input type="checkbox" ${cur.includes(c) ? "checked" : ""}> ${c === "PCMU" ? "PCMU (G.711 μ-law)" : "PCMA (G.711 A-law)"}</label><button type="button" class="linklike" data-up>Up</button></li>`)
         .join("")}</ol><span class="hint">This build sends and receives G.711. Other codecs in a capture are still analyzed.</span></div>`;
     }
+    case "lines":
+      return `<label class="fld">${esc(label)} ${h}<textarea id="${id}" rows="6" spellcheck="false">${esc((value || []).join("\n"))}</textarea></label>`;
     case "headers": {
       const rows = (value || []).map(([k, v]) => `<div class="hdr-row"><input placeholder="Name" value="${esc(k)}"><input placeholder="Value" value="${esc(v)}"><button type="button" class="linklike" data-del>Remove</button></div>`).join("");
       return `<div class="fld"><span>${esc(label)}</span><div class="hdrs" id="${id}">${rows}</div><button type="button" class="btn small" data-addhdr="${id}">Add header</button></div>`;
@@ -1745,6 +1788,7 @@ function readField(f, id, obj) {
     case "bool": v = el.checked; break;
     case "number": v = el.value === "" ? 0 : Number(el.value); break;
     case "select": v = /^\d+$/.test(el.value) && typeof get(obj, path) === "number" ? Number(el.value) : el.value; break;
+    case "lines": v = el.value.split("\n").map((x) => x.trim()).filter(Boolean); break;
     case "codecs": v = [...el.querySelectorAll("li")].filter((li) => li.querySelector("input").checked).map((li) => li.dataset.codec); break;
     case "headers": v = [...el.querySelectorAll(".hdr-row")].map((r) => [r.children[0].value.trim(), r.children[1].value.trim()]).filter(([k]) => k); break;
     case "opt": v = el.value.trim() || null; break;
@@ -1883,7 +1927,7 @@ async function defaultBehavior() {
   if (behaviorDefaults) return JSON.parse(JSON.stringify(behaviorDefaults));
   // The engine fills defaults for a missing behavior; save then read back gives them.
   behaviorDefaults = {
-    local_port: 0, local_ip: null, t1_ms: 500, max_forwards: 70, session_timer: 0, user_phone: false, compact_headers: false, require_prack: false,
+    transport: "udp", tls_verify: true, local_port: 0, local_ip: null, t1_ms: 500, max_forwards: 70, session_timer: 0, user_phone: false, compact_headers: false, require_prack: false,
     offer_gruu: false, long_contact: false, rport: true, codecs: ["PCMU", "PCMA"], ptime_ms: 20, dtmf_mode: "rfc4733", dtmf_payload_type: 101, srtp: "off",
     symmetric_rtp: true, rtcp: false, rtp_port_start: 40000, rtp_port_end: 49999, dscp_sip: 0, dscp_rtp: 0, keepalive_interval: 0, user_agent: `Sidetone/${S.version || ""}`,
     proxy_require: null, filter_registrar: false, extra_headers: [], sdp_direction: "sendrecv", skip_ack: false, sdp_ip_override: null,

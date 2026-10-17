@@ -643,3 +643,19 @@ body.web-mode [data-native] { display: none !important; }
 .ai-dock-input textarea { flex: 1; font-family: var(--sans); font-size: 14px; resize: none; }
 .dock-btns { display: grid; gap: 4px; }
 @media (max-width: 860px) { .ai-dock { height: 60vh; } }
+
+/* ---------- BLF ---------- */
+.blf { display: grid; gap: 6px; }
+.blf h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.blf-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
+.blf-item { display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto auto; column-gap: 8px; align-items: center; text-align: left; font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 5px 9px; cursor: pointer; }
+.blf-item:hover { border-color: var(--rule-strong); }
+.blf-item .dot { grid-row: span 2; }
+.blf-t { font-family: var(--mono); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.blf-s { font-size: 11px; color: var(--muted); }
+.blf-idle .dot { background: #22c55e; }
+.blf-ringing .dot { background: #f59e0b; animation: blink 0.6s infinite; }
+.blf-busy .dot { background: #ef4444; }
+.blf-error .dot, .blf-unknown .dot { background: var(--rule-strong); }
+.tools { grid-template-columns: repeat(5, 1fr); }
+.tool span { font-size: 10.5px; }

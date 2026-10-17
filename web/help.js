@@ -23,6 +23,12 @@ const H = {
         "Transfer, Blind: REFER to the target and the call leaves you. Transfer, Consult first: your call goes on hold, Sidetone calls the target, and Complete transfer joins both sides (REFER with Replaces).",
         "Record keeps a stereo WAV of the call: left is what you sent, right is what you received. Download it from the Calls page.",
       ]],
+      ["TCP, TLS, SRTP, BLF and conference", [
+        "Account, Network: Transport chooses UDP, TCP or TLS. TLS uses port 5061 by default; turn Check the server's TLS certificate off for a PBX with a self-signed certificate.",
+        "Account, Media: SRTP Optional offers keys (a=crypto, SDES) and falls back to RTP; Required rejects calls without SRTP with 488. The Current call card shows whether media is encrypted.",
+        "Account, BLF: one extension per line. Each appears under the keypad as Free, Ringing or Busy (SUBSCRIBE to the dialog event); click one to call it.",
+        "Conference: with two calls up, select one and press Conference to join the other. Sidetone mixes the audio locally; holding or hanging up either call ends the conference.",
+      ]],
       ["Troubleshooting a call", [
         "SIP trace shows every message live. Click one to read it in full, filter by number or Call-ID, and save the session as pcapng for Wireshark.",
         "Analyze (on the phone, in the history or in the trace) opens the capture in Analysis: ladder diagram, findings in plain words, RTP loss, jitter and MOS.",
@@ -74,6 +80,12 @@ const H = {
         "Espera manda um re-INVITE com sendonly; Retomar manda sendrecv. Mudo só desliga o seu microfone.",
         "Transferir, Direta: REFER para o destino e a chamada sai de você. Transferir, Consultar antes: sua chamada fica em espera, o Sidetone liga para o destino e Concluir transferência junta os dois lados (REFER com Replaces).",
         "Gravar guarda um WAV estéreo da chamada: esquerda é o que você enviou, direita o que recebeu. Baixe na página Chamadas.",
+      ]],
+      ["TCP, TLS, SRTP, BLF e conferência", [
+        "Conta, Rede: Transporte escolhe UDP, TCP ou TLS. TLS usa a porta 5061 por padrão; desligue Verificar o certificado TLS do servidor para um PABX com certificado autoassinado.",
+        "Conta, Mídia: SRTP Opcional oferece chaves (a=crypto, SDES) e cai para RTP; Obrigatória rejeita chamadas sem SRTP com 488. O cartão Chamada atual mostra se a mídia está criptografada.",
+        "Conta, BLF: um ramal por linha. Cada um aparece abaixo do teclado como Livre, Tocando ou Ocupado (SUBSCRIBE ao evento dialog); clique para ligar.",
+        "Conferência: com duas chamadas ativas, selecione uma e clique Conferência para juntar a outra. O Sidetone mixa o áudio localmente; colocar em espera ou desligar qualquer uma encerra a conferência.",
       ]],
       ["Investigando uma chamada", [
         "O Trace SIP mostra cada mensagem ao vivo. Clique para ler inteira, filtre por número ou Call-ID e salve a sessão em pcapng para o Wireshark.",
@@ -127,6 +139,12 @@ const H = {
         "Transferir, Directa: REFER al destino y la llamada sale de ti. Transferir, Consultar antes: tu llamada queda en espera, Sidetone llama al destino y Completar transferencia une ambos lados (REFER con Replaces).",
         "Grabar guarda un WAV estéreo de la llamada: izquierda lo que enviaste, derecha lo que recibiste. Descárgalo en la página Llamadas.",
       ]],
+      ["TCP, TLS, SRTP, BLF y conferencia", [
+        "Cuenta, Red: Transporte elige UDP, TCP o TLS. TLS usa el puerto 5061 por defecto; desactiva Verificar el certificado TLS del servidor para una PBX con certificado autofirmado.",
+        "Cuenta, Medios: SRTP Opcional ofrece claves (a=crypto, SDES) y vuelve a RTP; Obligatorio rechaza llamadas sin SRTP con 488. La tarjeta Llamada actual indica si el audio va cifrado.",
+        "Cuenta, BLF: una extensión por línea. Cada una aparece bajo el teclado como Libre, Sonando u Ocupado (SUBSCRIBE al evento dialog); haz clic para llamar.",
+        "Conferencia: con dos llamadas activas, selecciona una y pulsa Conferencia para unir la otra. Sidetone mezcla el audio localmente; poner en espera o colgar cualquiera termina la conferencia.",
+      ]],
       ["Diagnosticar una llamada", [
         "La traza SIP muestra cada mensaje en vivo. Haz clic para leerlo completo, filtra por número o Call-ID y guarda la sesión como pcapng para Wireshark.",
         "Analizar (en el teléfono, el historial o la traza) abre la captura en Análisis: diagrama de escalera, hallazgos explicados, pérdida, jitter y MOS del RTP.",
@@ -178,6 +196,12 @@ const H = {
         "Halten sendet ein re-INVITE mit sendonly; Fortsetzen sendet sendrecv. Stumm schaltet nur Ihr Mikrofon ab.",
         "Weiterleiten, Blind: REFER an das Ziel, der Anruf verlässt Sie. Weiterleiten, Erst rückfragen: Ihr Anruf wird gehalten, Sidetone ruft das Ziel an, und Weiterleitung abschließen verbindet beide Seiten (REFER mit Replaces).",
         "Aufnehmen speichert ein Stereo-WAV: links das Gesendete, rechts das Empfangene. Download auf der Seite Anrufe.",
+      ]],
+      ["TCP, TLS, SRTP, BLF und Konferenz", [
+        "Konto, Netzwerk: Transport wählt UDP, TCP oder TLS. TLS nutzt standardmäßig Port 5061; schalte TLS-Zertifikat des Servers prüfen bei einer TK-Anlage mit selbstsigniertem Zertifikat aus.",
+        "Konto, Medien: SRTP Optional bietet Schlüssel an (a=crypto, SDES) und fällt auf RTP zurück; Erforderlich lehnt Anrufe ohne SRTP mit 488 ab. Die Karte Aktueller Anruf zeigt, ob die Medien verschlüsselt sind.",
+        "Konto, BLF: eine Nebenstelle pro Zeile. Jede erscheint unter der Wähltastatur als Frei, Klingelt oder Besetzt (SUBSCRIBE auf das Dialog-Event); Klick ruft sie an.",
+        "Konferenz: bei zwei aktiven Anrufen einen auswählen und Konferenz drücken, um den anderen dazuzuholen. Sidetone mischt das Audio lokal; Halten oder Auflegen eines Anrufs beendet die Konferenz.",
       ]],
       ["Einen Anruf untersuchen", [
         "Der SIP-Trace zeigt jede Nachricht live. Anklicken zum Lesen, nach Nummer oder Call-ID filtern und die Sitzung als pcapng für Wireshark speichern.",

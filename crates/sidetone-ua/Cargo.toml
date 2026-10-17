@@ -15,6 +15,13 @@ md-5 = "0.10"
 socket2 = "0.5"
 hickory-resolver = "0.24"
 cpal = { version = "0.15", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
+aes = "0.8"
+ctr = "0.9"
+hmac = "0.12"
+sha1 = "0.10"
+base64 = "0.22"
 
 [features]
 default = ["audio"]

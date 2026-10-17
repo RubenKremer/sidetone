@@ -88,6 +88,7 @@
       <button type="button" class="tool" data-tool="mute" disabled><svg><use href="#i-mute"/></svg><span>Mute</span></button>
       <button type="button" class="tool" data-tool="transfer" disabled><svg><use href="#i-transfer"/></svg><span>Transfer</span></button>
       <button type="button" class="tool" data-tool="record" disabled data-native><svg><use href="#i-record"/></svg><span>Record</span></button>
+      <button type="button" class="tool" data-tool="conf" disabled data-native><svg><use href="#i-consult"/></svg><span>Conference</span></button>
       <button type="button" class="tool" data-tool="keypad" aria-pressed="true"><svg><use href="#i-keypad"/></svg><span>Keypad</span></button>
       <button type="button" class="tool" data-tool="dnd" aria-pressed="false"><svg><use href="#i-dnd"/></svg><span>DND</span></button>
       <button type="button" class="tool" data-tool="aa" aria-pressed="false"><svg><use href="#i-aa"/></svg><span>Auto answer</span></button>
@@ -120,6 +121,11 @@
       <button type="button" data-key="0">0<small>+</small></button>
       <button type="button" data-key="#">#<small>&nbsp;</small></button>
     </div>
+
+    <section class="blf" id="blf-box" hidden aria-label="Busy lamp field">
+      <div class="sect-head"><h2>BLF</h2></div>
+      <div class="blf-grid" id="blf"></div>
+    </section>
 
     <section class="lines" aria-label="Lines">
       <div class="sect-head"><h2>Lines</h2><span id="lines-count" class="muted"></span></div>

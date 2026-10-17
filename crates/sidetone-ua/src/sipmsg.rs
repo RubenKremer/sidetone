@@ -69,7 +69,12 @@ pub fn contact(p: &Profile, local: SocketAddr, instance: &str, register: bool) -
     } else {
         p.account.user.trim()
     };
-    let mut c = format!("<sip:{user}@{}>", host_str(local));
+    let tp = match crate::transport::Kind::parse(&b.transport) {
+        crate::transport::Kind::Udp => "",
+        crate::transport::Kind::Tcp => ";transport=tcp",
+        crate::transport::Kind::Tls => ";transport=tls",
+    };
+    let mut c = format!("<sip:{user}@{}{tp}>", host_str(local));
     if register {
         if let Some(q) = &p.account.q_value {
             c.push_str(&format!(";q={q}"));
@@ -101,8 +106,9 @@ pub fn build_request(
     let mut s = format!("{method} {ruri} SIP/2.0\r\n");
     let rport = if b.rport { ";rport" } else { "" };
     s.push_str(&format!(
-        "{}: SIP/2.0/UDP {};branch={branch}{rport}\r\n",
+        "{}: SIP/2.0/{} {};branch={branch}{rport}\r\n",
         hn(b, "Via"),
+        crate::transport::Kind::parse(&b.transport).via(),
         host_str(local)
     ));
     s.push_str(&format!("Max-Forwards: {}\r\n", b.max_forwards));

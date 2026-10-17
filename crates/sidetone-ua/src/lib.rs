@@ -7,8 +7,10 @@ pub mod engine;
 pub mod media;
 pub mod profile;
 pub mod sipmsg;
+pub mod srtp;
 pub mod stun;
 pub mod tap;
+pub mod transport;
 pub mod ua;
 
 pub use media::AudioSource;

@@ -282,6 +282,13 @@ impl Phone {
                     .ok_or_else(|| anyhow!("missing to_line"))? as u32;
                 e.cmd(Cmd::AttendedTransfer(line()?, to))
             }
+            "conference" => {
+                let to = v
+                    .get("to_line")
+                    .and_then(|x| x.as_u64())
+                    .ok_or_else(|| anyhow!("missing to_line"))? as u32;
+                e.cmd(Cmd::Conference(line()?, to, on))
+            }
             "register" => e.cmd(Cmd::Register(s("account"))),
             "unregister" => e.cmd(Cmd::Unregister(s("account"))),
             "dnd" | "auto_answer" => {

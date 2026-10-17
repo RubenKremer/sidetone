@@ -61,6 +61,10 @@ pub enum SrtpMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Behavior {
+    /// SIP transport of the phone engine: "udp", "tcp" or "tls".
+    pub transport: String,
+    /// Check the TLS server certificate against public roots (off for self-signed labs).
+    pub tls_verify: bool,
     /// Local SIP port (0 = random).
     pub local_port: u16,
     /// Force the local IP advertised in Via/Contact/SDP (empty = route-based autodetect).
@@ -116,6 +120,8 @@ pub struct Behavior {
 impl Default for Behavior {
     fn default() -> Self {
         Behavior {
+            transport: "udp".into(),
+            tls_verify: true,
             local_port: 0,
             local_ip: None,
             t1_ms: 500,

@@ -8,12 +8,13 @@ use crate::media::{AudioSource, Codec, Ring, RtpSession};
 use crate::profile::{DtmfMode, Profile};
 use crate::sipmsg::{self, build_request, build_response};
 use crate::tap::Tap;
+use crate::transport::{Kind, Sock};
 use crate::ua::{digest_authorization, local_ip_for, rand_hex, resolve};
 use serde::{Deserialize, Serialize};
 use sidetone_core::sdp::{self, Sdp};
 use sidetone_core::sip::{self, SipMessage, StartLine, Uri};
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::net::{SocketAddr, UdpSocket};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -40,6 +41,8 @@ pub struct AccountCfg {
     pub register: bool,
     /// Seconds to wait before retrying a failed registration.
     pub retry_s: u32,
+    /// Extensions or URIs watched with SUBSCRIBE Event: dialog (busy lamp field).
+    pub blf: Vec<String>,
     pub profile: Profile,
 }
 
@@ -51,6 +54,7 @@ impl Default for AccountCfg {
             enabled: true,
             register: true,
             retry_s: 30,
+            blf: Vec::new(),
             profile: Profile::default(),
         }
     }
@@ -133,6 +137,17 @@ pub struct AccountView {
     /// Address the server saw us from (Via received/rport).
     pub public: Option<String>,
     pub error: Option<String>,
+    /// "UDP", "TCP" or "TLS".
+    pub transport: String,
+    pub blf: Vec<BlfView>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct BlfView {
+    pub target: String,
+    /// unknown, idle, ringing, busy, error
+    pub state: String,
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -164,6 +179,11 @@ pub struct CallView {
     pub ended_by: Option<String>,
     pub dtmf_rx: String,
     pub transfer: Option<String>,
+    /// Media encrypted with SRTP.
+    pub srtp: bool,
+    /// Line number of the other party when in a three-way conference.
+    pub conference: Option<u32>,
+    pub srtp_failed: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -251,6 +271,8 @@ pub enum Cmd {
     Dtmf(u32, String),
     BlindTransfer(u32, String),
     AttendedTransfer(u32, u32),
+    /// Join two lines into a three-way conference (true) or split it (false).
+    Conference(u32, u32, bool),
     Options(Option<String>, String, Sender<Option<(u16, u64, String)>>),
     ClearCapture,
     Shutdown,
@@ -324,6 +346,8 @@ impl Engine {
             last_publish: Instant::now(),
             stop: false,
             tone_t: 0,
+            conf: None,
+            subs: Vec::new(),
         };
         core.set_accounts(accounts);
         let join = thread::Builder::new()
@@ -448,7 +472,7 @@ impl Drop for Engine {
 
 struct Acc {
     cfg: AccountCfg,
-    sock: Option<UdpSocket>,
+    sock: Option<Sock>,
     local: SocketAddr,
     server: Option<SocketAddr>,
     instance: String,
@@ -571,6 +595,11 @@ struct Line {
     notify_line: Option<u32>,
     last_refresh: Instant,
     rtp_final: (u64, u64),
+    /// SRTP: our key with its crypto tag, and whether the m= line says RTP/SAVP.
+    srtp_local: Option<(u32, crate::srtp::KeyMaterial)>,
+    srtp_savp: bool,
+    /// SRTP is running (both keys known).
+    srtp_on: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -586,6 +615,51 @@ enum Purpose {
     Prack,
     Update,
     Options(u64),
+    Subscribe(String),
+}
+
+/// One BLF subscription (RFC 4235 dialog event package).
+struct Sub {
+    acc_id: String,
+    label: String,
+    uri: String,
+    call_id: String,
+    local_tag: String,
+    remote_tag: String,
+    remote_target: String,
+    route_set: Vec<String>,
+    cseq: u32,
+    state: &'static str,
+    detail: Option<String>,
+    next: Option<Instant>,
+}
+
+/// Busy-lamp state from a dialog-info+xml body.
+fn blf_state(body: &str) -> &'static str {
+    let b = body.to_ascii_lowercase();
+    let mut states = Vec::new();
+    let mut rest = b.as_str();
+    while let Some(i) = rest.find("<state") {
+        let after = &rest[i..];
+        let Some(gt) = after.find('>') else { break };
+        let Some(end) = after.find("</state>") else {
+            break;
+        };
+        if end > gt {
+            states.push(after[gt + 1..end].trim().to_string());
+        }
+        rest = &after[gt..];
+    }
+    if states.iter().any(|s| s == "confirmed") {
+        "busy"
+    } else if states
+        .iter()
+        .any(|s| s == "early" || s == "proceeding" || s == "trying")
+    {
+        "ringing"
+    } else {
+        "idle"
+    }
 }
 
 struct ClientTx {
@@ -602,6 +676,17 @@ struct ClientTx {
     auth_tries: u32,
     /// Completed INVITE transaction keeps the ACK to re-send on retransmitted finals.
     completed: Option<(Instant, String)>,
+}
+
+/// Three-way conference: two lines mixed together with the local user.
+/// Line `a` owns the microphone and the speaker; `b` gets copies.
+struct Conf {
+    a: u32,
+    b: u32,
+    mic_share: Arc<Ring>,
+    a_to_b: Arc<Ring>,
+    b_to_a: Arc<Ring>,
+    b_to_spk: Arc<Ring>,
 }
 
 struct Core {
@@ -621,6 +706,8 @@ struct Core {
     stop: bool,
     /// Sample clock of the local ring/ringback tones.
     tone_t: u64,
+    conf: Option<Conf>,
+    subs: Vec<Sub>,
 }
 
 /// Pending OPTIONS requests waiting for a reply channel.
@@ -688,6 +775,23 @@ fn media_direction(sdp: &Sdp) -> (Option<String>, bool) {
     }
 }
 
+/// Adds SRTP to an SDP body: RTP/SAVP when asked and an a=crypto line.
+fn with_srtp(sdp: String, crypto: &str, savp: bool) -> String {
+    let sdp = if savp {
+        sdp.replacen(" RTP/AVP ", " RTP/SAVP ", 1)
+    } else {
+        sdp
+    };
+    format!("{sdp}a=crypto:{crypto}\r\n")
+}
+
+/// First a=crypto of an audio stream with a suite Sidetone supports.
+fn offered_crypto(m: &sdp::Media) -> Option<(u32, crate::srtp::KeyMaterial)> {
+    m.crypto
+        .iter()
+        .find_map(|c| crate::srtp::KeyMaterial::parse_sdp(c))
+}
+
 /// Inserts a header right after the start line.
 fn insert_header(text: &str, name: &str, value: &str) -> String {
     match text.find("\r\n") {
@@ -710,16 +814,15 @@ impl Core {
             for ai in 0..self.accs.len() {
                 for _ in 0..64 {
                     let r = match &self.accs[ai].sock {
-                        Some(s) => s.recv_from(&mut buf),
+                        Some(s) => s.try_recv(&mut buf),
                         None => break,
                     };
                     match r {
-                        Ok((n, from)) => {
+                        Some((data, from)) => {
                             got = true;
-                            let data = buf[..n].to_vec();
                             self.on_datagram(ai, &data, from);
                         }
-                        Err(_) => break,
+                        None => break,
                     }
                 }
             }
@@ -744,11 +847,12 @@ impl Core {
         let end = Instant::now() + Duration::from_millis(600);
         while Instant::now() < end {
             for ai in 0..self.accs.len() {
-                if let Some(s) = &self.accs[ai].sock {
-                    if let Ok((n, from)) = s.recv_from(&mut buf) {
-                        let data = buf[..n].to_vec();
-                        self.on_datagram(ai, &data, from);
-                    }
+                let r = self.accs[ai]
+                    .sock
+                    .as_ref()
+                    .and_then(|s| s.try_recv(&mut buf));
+                if let Some((data, from)) = r {
+                    self.on_datagram(ai, &data, from);
                 }
             }
             thread::sleep(Duration::from_millis(10));
@@ -855,6 +959,19 @@ impl Core {
                 server: a.server.map(|s| s.to_string()),
                 public: a.public.clone(),
                 error: a.error.clone(),
+                transport: Kind::parse(&a.cfg.profile.behavior.transport)
+                    .via()
+                    .to_string(),
+                blf: self
+                    .subs
+                    .iter()
+                    .filter(|x| x.acc_id == a.cfg.id)
+                    .map(|x| BlfView {
+                        target: x.label.clone(),
+                        state: x.state.into(),
+                        detail: x.detail.clone(),
+                    })
+                    .collect(),
             })
             .collect();
         let calls: Vec<CallView> = self
@@ -928,6 +1045,21 @@ impl Core {
             ended_by: l.ended_by.clone(),
             dtmf_rx: l.dtmf_rx.clone(),
             transfer: l.transfer.clone(),
+            srtp: l.srtp_on,
+            conference: self.conf.as_ref().and_then(|c| {
+                if c.a == l.id {
+                    Some(c.b)
+                } else if c.b == l.id {
+                    Some(c.a)
+                } else {
+                    None
+                }
+            }),
+            srtp_failed: l
+                .rtp
+                .as_ref()
+                .map(|r| r.stats.lock().unwrap().srtp_failed)
+                .unwrap_or(0),
         }
     }
 
@@ -1059,7 +1191,9 @@ impl Core {
         // No domain, no proxy and no registration: a direct (anonymous) SIP client
         // that calls SIP URIs straight to their host.
         let direct = server_str.trim().is_empty() && !a.cfg.register;
-        let res = (|| -> Result<(UdpSocket, SocketAddr, Option<SocketAddr>), String> {
+        let kind = Kind::parse(&p.behavior.transport);
+        let direct = direct && kind == Kind::Udp;
+        let res = (|| -> Result<(Sock, SocketAddr, Option<SocketAddr>), String> {
             if direct {
                 let fixed: Option<std::net::IpAddr> = match &p.behavior.local_ip {
                     Some(s) if !s.is_empty() => {
@@ -1081,12 +1215,29 @@ impl Core {
                     local_ip_for("192.0.2.1:5060".parse().unwrap())
                         .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
                 });
+                let sock = Sock::udp(sock).map_err(|e| e.to_string())?;
                 return Ok((sock, SocketAddr::new(ip, port), None));
             }
             if server_str.trim().is_empty() {
                 return Err("no server or domain configured (leave Register off and the domain empty for direct calls)".into());
             }
-            let server = crate::dns::resolve_sip(&server_str).map_err(|e| e.to_string())?;
+            let server =
+                crate::dns::resolve_sip_for(&server_str, kind).map_err(|e| e.to_string())?;
+            if kind.reliable() {
+                let sni = sip::split_host_port(
+                    server_str
+                        .trim()
+                        .trim_start_matches("sips:")
+                        .trim_start_matches("sip:")
+                        .split(';')
+                        .next()
+                        .unwrap_or(""),
+                )
+                .0;
+                let sock = Sock::connect(kind, server, &sni, p.behavior.tls_verify)?;
+                let local = sock.local;
+                return Ok((sock, local, Some(server)));
+            }
             let ip = match &p.behavior.local_ip {
                 Some(s) if !s.is_empty() => s.parse().map_err(|_| format!("bad local IP {s}"))?,
                 _ => local_ip_for(server).map_err(|e| e.to_string())?,
@@ -1096,8 +1247,8 @@ impl Core {
                 p.behavior.dscp_sip,
             )
             .map_err(|e| format!("cannot bind {ip}:{}: {e}", p.behavior.local_port))?;
-            sock.set_nonblocking(true).map_err(|e| e.to_string())?;
-            let local = sock.local_addr().map_err(|e| e.to_string())?;
+            let sock = Sock::udp(sock).map_err(|e| e.to_string())?;
+            let local = sock.local;
             Ok((sock, local, Some(server)))
         })();
         let retry = Duration::from_secs(self.accs[ai].cfg.retry_s.max(5) as u64);
@@ -1116,7 +1267,13 @@ impl Core {
                 } else {
                     None
                 };
+                let tls = a.sock.as_ref().and_then(|s| s.tls_info.clone());
                 let text = match server {
+                    Some(server) if kind.reliable() => format!(
+                        "connected over {} from {local} to {server}{}",
+                        kind.via(),
+                        tls.map(|t| format!(" ({t})")).unwrap_or_default()
+                    ),
                     Some(server) => format!("ready on {local}, server {server}"),
                     None => format!("ready for direct calls on port {} (no registrar): dial user@host or a SIP URI", local.port()),
                 };
@@ -1231,7 +1388,7 @@ impl Core {
         let Some(sock) = &a.sock else { return };
         let local = a.local;
         match sock.send_to(text.as_bytes(), dest) {
-            Ok(_) => {
+            Ok(dest) => {
                 self.tap.record(local, dest, text.as_bytes());
                 self.trace(true, local, dest, text.as_bytes(), None);
             }
@@ -1360,7 +1517,12 @@ impl Core {
                 timeouts.push(k.clone());
                 continue;
             }
-            if now >= tx.next {
+            let reliable = self.accs[tx.acc]
+                .sock
+                .as_ref()
+                .map(|s| s.kind.reliable())
+                .unwrap_or(false);
+            if now >= tx.next && !reliable {
                 resend.push((tx.acc, tx.text.clone(), tx.dest));
                 tx.interval = if tx.invite {
                     tx.interval * 2
@@ -1384,6 +1546,26 @@ impl Core {
 
         // Registration refresh, retries and keepalives.
         for ai in 0..self.accs.len() {
+            if self.accs[ai]
+                .sock
+                .as_ref()
+                .map(|s| !s.alive())
+                .unwrap_or(false)
+            {
+                let a = &mut self.accs[ai];
+                a.sock = None;
+                a.state = "unreachable";
+                a.expires_at = None;
+                a.error = Some("the connection to the server closed".into());
+                a.next_reg = Some(Instant::now() + Duration::from_secs(5));
+                self.event(
+                    "error",
+                    None,
+                    Some(ai),
+                    "connection to the server closed; reconnecting in 5 s",
+                );
+                continue;
+            }
             let a = &self.accs[ai];
             if !a.cfg.enabled {
                 continue;
@@ -1401,7 +1583,12 @@ impl Core {
                 }
             }
             let a = &self.accs[ai];
-            let ka = a.cfg.profile.behavior.keepalive_interval;
+            let reliable = a.sock.as_ref().map(|s| s.kind.reliable()).unwrap_or(false);
+            // Streams get a CRLF keepalive every 30 s even when not configured.
+            let ka = match (a.cfg.profile.behavior.keepalive_interval, reliable) {
+                (0, true) => 30,
+                (k, _) => k,
+            };
             if ka > 0
                 && a.state == "registered"
                 && a.last_keepalive.elapsed() >= Duration::from_secs(ka as u64)
@@ -1422,6 +1609,16 @@ impl Core {
         }
 
         // Lines.
+        let acc_reliable: Vec<bool> = self
+            .accs
+            .iter()
+            .map(|a| a.sock.as_ref().map(|s| s.kind.reliable()).unwrap_or(false))
+            .collect();
+        let acc_reliable = if acc_reliable.is_empty() {
+            vec![false]
+        } else {
+            acc_reliable
+        };
         let ids: Vec<u32> = self.lines.keys().copied().collect();
         for id in ids {
             let Some(l) = self.lines.get(&id) else {
@@ -1520,13 +1717,22 @@ impl Core {
                         "ACK never arrived (Timer H); hanging up",
                     );
                     self.send_bye(id, Some("no ACK".into()));
-                } else if now >= l.uas_next {
+                } else if now >= l.uas_next
+                    && !acc_reliable[l.acc.min(acc_reliable.len().saturating_sub(1))]
+                {
                     l.uas_interval = (l.uas_interval * 2).min(Duration::from_secs(4));
                     l.uas_next = now + l.uas_interval;
                     let acc = l.acc;
                     self.send_raw(acc, &text, dest);
                 }
             }
+        }
+
+        let due: Vec<usize> = (0..self.subs.len())
+            .filter(|&i| self.subs[i].next.map(|t| now >= t).unwrap_or(false))
+            .collect();
+        for i in due {
+            self.send_subscribe(i);
         }
 
         self.local_tones();
@@ -1642,6 +1848,13 @@ impl Core {
                 self.event("diag", None, Some(tx.acc), "OPTIONS: no response");
             }
             Purpose::Info(id) => self.event("dtmf", Some(id), None, "INFO timed out"),
+            Purpose::Subscribe(cid) => {
+                if let Some(x) = self.subs.iter_mut().find(|x| x.call_id == cid) {
+                    x.state = "error";
+                    x.detail = Some("no response to SUBSCRIBE".into());
+                    x.next = Some(Instant::now() + Duration::from_secs(60));
+                }
+            }
             Purpose::Cancel | Purpose::Notify | Purpose::Prack | Purpose::Update => {}
         }
         self.dirty = true;
@@ -1709,6 +1922,7 @@ impl Core {
             Cmd::Dtmf(id, digits) => self.dtmf(id, &digits),
             Cmd::BlindTransfer(id, target) => self.blind_transfer(id, &target),
             Cmd::AttendedTransfer(a, b) => self.attended_transfer(a, b),
+            Cmd::Conference(a, b, on) => self.conference(a, b, on),
             Cmd::Options(acc, target, reply) => self.send_options(acc, target, reply),
             Cmd::ClearCapture => {
                 self.tap.clear();
@@ -1807,7 +2021,9 @@ impl Core {
             .as_ref()
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false);
-        if has_proxy {
+        let reliable = a.sock.as_ref().map(|s| s.kind.reliable()).unwrap_or(false);
+        if has_proxy || reliable {
+            // Streams carry everything over the one connection to the server.
             return a.server.ok_or_else(|| "server not resolved".to_string());
         }
         let hp = hostport_of(ruri).ok_or_else(|| format!("bad URI {ruri}"))?;
@@ -1829,6 +2045,16 @@ impl Core {
         fallback: SocketAddr,
     ) -> SocketAddr {
         let p = &self.accs[ai].cfg.profile;
+        if self.accs[ai]
+            .sock
+            .as_ref()
+            .map(|s| s.kind.reliable())
+            .unwrap_or(false)
+        {
+            if let Some(s) = self.accs[ai].server {
+                return s;
+            }
+        }
         if p.account
             .outbound_proxy
             .as_ref()
@@ -1908,8 +2134,99 @@ impl Core {
                     (Some(a), true) => Some(a.speaker.clone()),
                     _ => None,
                 };
+                r.ctl.clear_mix();
             }
         }
+        // A conference stays only while both lines are up and not held.
+        let ok = self.conf.as_ref().map(|c| {
+            [c.a, c.b].iter().all(|id| {
+                self.lines
+                    .get(id)
+                    .map(|l| l.state == LState::Connected && !l.local_hold && l.rtp.is_some())
+                    .unwrap_or(false)
+            })
+        });
+        if ok == Some(false) {
+            let c = self.conf.take().unwrap();
+            self.event(
+                "call",
+                Some(c.a),
+                None,
+                format!("conference with line {} ended", c.b),
+            );
+            return;
+        }
+        let Some(c) = &self.conf else { return };
+        let (Some(la), Some(lb)) = (self.lines.get(&c.a), self.lines.get(&c.b)) else {
+            return;
+        };
+        let (Some(ra), Some(rb)) = (&la.rtp, &lb.rtp) else {
+            return;
+        };
+        *ra.ctl.mic.lock().unwrap() = match (&self.audio, use_mic) {
+            (Some(a), true) => Some(a.mic.clone()),
+            _ => None,
+        };
+        *ra.ctl.speaker.lock().unwrap() = self.audio.as_ref().map(|a| a.speaker.clone());
+        *ra.ctl.mic_copy.lock().unwrap() = Some(c.mic_share.clone());
+        *ra.ctl.tx_adds.lock().unwrap() = vec![c.b_to_a.clone()];
+        *ra.ctl.rx_copies.lock().unwrap() = vec![c.a_to_b.clone()];
+        *ra.ctl.spk_adds.lock().unwrap() = vec![c.b_to_spk.clone()];
+        *rb.ctl.mic.lock().unwrap() = None;
+        *rb.ctl.speaker.lock().unwrap() = None;
+        *rb.ctl.tx_adds.lock().unwrap() = vec![c.a_to_b.clone(), c.mic_share.clone()];
+        *rb.ctl.rx_copies.lock().unwrap() = vec![c.b_to_a.clone(), c.b_to_spk.clone()];
+    }
+
+    /// Joins two connected lines into a three-way conference, or splits it.
+    fn conference(&mut self, a: u32, b: u32, on: bool) {
+        if !on {
+            if let Some(c) = self.conf.take() {
+                let other = if c.a == a { c.b } else { c.a };
+                self.event("call", Some(a), None, "conference split");
+                self.route_audio();
+                if self.settings.auto_hold {
+                    self.set_hold(other, true);
+                }
+            }
+            return;
+        }
+        let ready = [a, b].iter().all(|id| {
+            self.lines
+                .get(id)
+                .map(|l| l.state == LState::Connected)
+                .unwrap_or(false)
+        });
+        if a == b || !ready {
+            self.event(
+                "error",
+                Some(a),
+                None,
+                "a conference needs two connected calls",
+            );
+            return;
+        }
+        let ring = || Ring::new(1600);
+        self.conf = Some(Conf {
+            a,
+            b,
+            mic_share: ring(),
+            a_to_b: ring(),
+            b_to_a: ring(),
+            b_to_spk: ring(),
+        });
+        for id in [a, b] {
+            if self.lines.get(&id).map(|l| l.local_hold).unwrap_or(false) {
+                self.set_hold(id, false);
+            }
+        }
+        self.event(
+            "call",
+            Some(a),
+            None,
+            format!("conference: lines {a} and {b} joined"),
+        );
+        self.route_audio();
     }
 
     fn new_line(&self, id: u32, ai: usize, profile: Profile, outgoing: bool) -> Line {
@@ -1983,6 +2300,9 @@ impl Core {
             notify_line: None,
             last_refresh: now,
             rtp_final: (0, 0),
+            srtp_local: None,
+            srtp_savp: false,
+            srtp_on: false,
         }
     }
 
@@ -2071,6 +2391,13 @@ impl Core {
         }
         l.extra_headers = extra;
         l.post_dtmf = post.map(|d| (d, Instant::now()));
+        if p.behavior.srtp != crate::profile::SrtpMode::Off {
+            l.srtp_local = Some((
+                1,
+                crate::srtp::KeyMaterial::random(crate::srtp::Suite::Sha80),
+            ));
+            l.srtp_savp = p.behavior.srtp == crate::profile::SrtpMode::Mandatory;
+        }
         rtp.ctl.record.store(l.recording, Ordering::Relaxed);
         l.rtp = Some(rtp);
         self.lines.insert(id, l);
@@ -2099,7 +2426,11 @@ impl Core {
             .map(|d| d.to_string())
             .unwrap_or_else(|| b.sdp_direction.clone());
         let rtp_local = l.rtp.as_ref().map(|r| r.local).unwrap_or(l.dest);
-        sipmsg::sdp_body(b, rtp_local, &codecs, dtmf, &dir, l.sess_id, l.sdp_ver)
+        let body = sipmsg::sdp_body(b, rtp_local, &codecs, dtmf, &dir, l.sess_id, l.sdp_ver);
+        match &l.srtp_local {
+            Some((tag, km)) => with_srtp(body, &km.sdp(*tag), l.srtp_savp),
+            None => body,
+        }
     }
 
     fn send_invite(&mut self, id: u32, auth: Option<(String, String)>) {
@@ -2527,13 +2858,55 @@ impl Core {
         } else {
             b.sdp_direction.as_str()
         };
+        // SRTP (SDES): answer a=crypto with our own key for the same suite.
+        let offer_m = offer.as_ref().and_then(|o| {
+            o.media
+                .iter()
+                .find(|m| m.kind == "audio" && m.port != 0)
+                .cloned()
+        });
+        let offer_savp = offer_m.as_ref().map(|m| m.is_secure()).unwrap_or(false);
+        let offer_crypto = offer_m.as_ref().and_then(offered_crypto);
+        let mode = b.srtp;
+        let use_srtp = match (offer_crypto.is_some(), mode) {
+            (true, crate::profile::SrtpMode::Off) => {
+                if offer_savp {
+                    self.event("error", Some(id), Some(ai), "the call requires SRTP (RTP/SAVP); enable SRTP in the account's Media settings");
+                    self.reject(id, 488);
+                    return;
+                }
+                false
+            }
+            (true, _) => true,
+            (false, crate::profile::SrtpMode::Mandatory) => {
+                self.event(
+                    "error",
+                    Some(id),
+                    Some(ai),
+                    "SRTP is mandatory on this account but the offer has no a=crypto",
+                );
+                self.reject(id, 488);
+                return;
+            }
+            (false, _) => false,
+        };
+        let mut rtp = rtp;
         let l = self.lines.get_mut(&id).unwrap();
         let codecs = if offer.is_some() {
             vec![codec]
         } else {
             mine.clone()
         };
-        let body = sipmsg::sdp_body(&b, rtp.local, &codecs, dtmf_pt, dir, l.sess_id, l.sdp_ver);
+        let mut body = sipmsg::sdp_body(&b, rtp.local, &codecs, dtmf_pt, dir, l.sess_id, l.sdp_ver);
+        if use_srtp {
+            let (tag, remote_km) = offer_crypto.clone().unwrap();
+            let mine_km = crate::srtp::KeyMaterial::random(remote_km.suite);
+            body = with_srtp(body, &mine_km.sdp(tag), offer_savp);
+            rtp.srtp = Some((mine_km.clone(), remote_km));
+            l.srtp_local = Some((tag, mine_km));
+            l.srtp_savp = offer_savp;
+            l.srtp_on = true;
+        }
         rtp.ctl.record.store(l.recording, Ordering::Relaxed);
         l.rtp = Some(rtp);
         l.codec = Some(codec);
@@ -2672,10 +3045,186 @@ impl Core {
             .values()
             .filter(|o| o.id != id && o.state == LState::Connected && !o.local_hold)
             .map(|o| o.id)
+            .filter(|o| {
+                !self
+                    .conf
+                    .as_ref()
+                    .map(|c| (c.a == id || c.b == id) && (c.a == *o || c.b == *o))
+                    .unwrap_or(false)
+            })
             .collect();
         for o in others {
             self.set_hold(o, true);
         }
+    }
+
+    // ----- busy lamp field
+
+    /// Starts subscriptions for the account's BLF list and drops stale ones.
+    fn ensure_subs(&mut self, ai: usize) {
+        let a = &self.accs[ai];
+        let id = a.cfg.id.clone();
+        let want: Vec<String> = a
+            .cfg
+            .blf
+            .iter()
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect();
+        self.subs
+            .retain(|x| x.acc_id != id || want.contains(&x.label));
+        for t in want {
+            if self.subs.iter().any(|x| x.acc_id == id && x.label == t) {
+                continue;
+            }
+            let uri = sipmsg::target_uri(&self.accs[ai].cfg.profile, &t);
+            self.subs.push(Sub {
+                acc_id: id.clone(),
+                label: t,
+                uri: uri.clone(),
+                call_id: String::new(),
+                local_tag: String::new(),
+                remote_tag: String::new(),
+                remote_target: uri,
+                route_set: Vec::new(),
+                cseq: 0,
+                state: "unknown",
+                detail: None,
+                next: Some(Instant::now()),
+            });
+        }
+        self.dirty = true;
+    }
+
+    fn send_subscribe(&mut self, i: usize) {
+        let Some(ai) = self
+            .accs
+            .iter()
+            .position(|a| a.cfg.id == self.subs[i].acc_id)
+        else {
+            return;
+        };
+        if self.accs[ai].sock.is_none() || self.accs[ai].state != "registered" {
+            self.subs[i].next = Some(Instant::now() + Duration::from_secs(10));
+            return;
+        }
+        let x = &mut self.subs[i];
+        if x.call_id.is_empty() {
+            x.call_id = format!("{}@blf", rand_hex(16));
+            x.local_tag = rand_hex(10);
+            x.remote_tag.clear();
+            x.remote_target = x.uri.clone();
+            x.route_set.clear();
+        }
+        x.cseq += 1;
+        x.next = None;
+        let p = self.accs[ai].cfg.profile.clone();
+        let local = self.accs[ai].local;
+        let to = if x.remote_tag.is_empty() {
+            format!("<{}>", x.uri)
+        } else {
+            format!("<{}>;tag={}", x.uri, x.remote_tag)
+        };
+        let extra = vec![
+            (
+                "Contact".to_string(),
+                sipmsg::contact(&p, local, &self.accs[ai].instance, false),
+            ),
+            ("Event".to_string(), "dialog".to_string()),
+            (
+                "Accept".to_string(),
+                "application/dialog-info+xml".to_string(),
+            ),
+            ("Expires".to_string(), "600".to_string()),
+        ];
+        let branch = new_branch();
+        let text = build_request(
+            &p.behavior,
+            local,
+            "SUBSCRIBE",
+            &x.remote_target,
+            &branch,
+            &sipmsg::from_header(&p, &x.local_tag),
+            &to,
+            &x.call_id,
+            x.cseq,
+            "SUBSCRIBE",
+            &x.route_set,
+            &extra,
+            None,
+        );
+        let cid = x.call_id.clone();
+        let uri = x.uri.clone();
+        let dest = match self.dest_for(ai, &uri) {
+            Ok(d) => d,
+            Err(e) => {
+                self.subs[i].state = "error";
+                self.subs[i].detail = Some(e);
+                return;
+            }
+        };
+        self.start_tx(
+            ai,
+            "SUBSCRIBE",
+            &branch,
+            text,
+            dest,
+            Purpose::Subscribe(cid),
+        );
+    }
+
+    fn subscribe_result(&mut self, cid: &str, m: &SipMessage) {
+        let code = m.status().unwrap_or(0);
+        let Some(x) = self.subs.iter_mut().find(|x| x.call_id == cid) else {
+            return;
+        };
+        if (200..300).contains(&code) {
+            if let Some(t) = m.to_tag() {
+                x.remote_tag = t;
+            }
+            if let Some(c) = m.header("Contact").and_then(sipmsg::uri_from_contact) {
+                x.remote_target = c;
+            }
+            x.route_set = m.header_values("Record-Route").into_iter().rev().collect();
+            let exp = m
+                .header("Expires")
+                .and_then(|e| e.trim().parse::<u64>().ok())
+                .unwrap_or(600)
+                .max(30);
+            x.next = Some(Instant::now() + Duration::from_secs(exp * 9 / 10));
+            x.detail = None;
+        } else {
+            x.state = "error";
+            x.detail = Some(format!("{code} {}", reason_of(m)));
+            // Start a new subscription later.
+            x.call_id.clear();
+            x.next = Some(Instant::now() + Duration::from_secs(60));
+        }
+        self.dirty = true;
+    }
+
+    fn blf_notify(&mut self, m: &SipMessage) {
+        let cid = m.call_id().unwrap_or("");
+        let Some(x) = self.subs.iter_mut().find(|x| x.call_id == cid) else {
+            return;
+        };
+        if x.remote_tag.is_empty() {
+            if let Some(t) = m.from_tag() {
+                x.remote_tag = t;
+            }
+        }
+        let terminated = m
+            .header("Subscription-State")
+            .map(|v| v.trim().to_ascii_lowercase().starts_with("terminated"))
+            .unwrap_or(false);
+        if !m.body.trim().is_empty() {
+            x.state = blf_state(&m.body);
+        }
+        if terminated {
+            x.call_id.clear();
+            x.next = Some(Instant::now() + Duration::from_secs(5));
+        }
+        self.dirty = true;
     }
 
     fn session_refresh(&mut self, id: u32) {
@@ -3035,6 +3584,7 @@ impl Core {
                     let _ = s.send(Some((code, rtt, summary)));
                 }
             }
+            Purpose::Subscribe(cid) => self.subscribe_result(&cid, &m),
             Purpose::Notify | Purpose::Prack | Purpose::Update => {}
         }
         self.dirty = true;
@@ -3217,6 +3767,7 @@ impl Core {
                 Some(ai),
                 format!("registered for {granted} s{nat}"),
             );
+            self.ensure_subs(ai);
         } else if code == 423 {
             let min = m
                 .header("Min-Expires")
@@ -3463,6 +4014,22 @@ impl Core {
         if ip.is_some() {
             l.remote_media = Some(remote);
         }
+        // SRTP: the answer to our offer carries the far end's key.
+        let mut srtp_missing = false;
+        if !started && !l.srtp_on {
+            if let Some((_, mine_km)) = l.srtp_local.clone() {
+                match offered_crypto(m) {
+                    Some((_, remote_km)) => {
+                        if let Some(rtp) = l.rtp.as_mut() {
+                            rtp.srtp = Some((mine_km, remote_km));
+                        }
+                        l.srtp_on = true;
+                    }
+                    None => srtp_missing = b.srtp == crate::profile::SrtpMode::Mandatory,
+                }
+            }
+        }
+        let srtp_on = l.srtp_on;
         if let Some(rtp) = l.rtp.as_mut() {
             if !started && ip.is_some() {
                 let dtmf_pt = if b.dtmf_mode == DtmfMode::Rfc4733 {
@@ -3485,7 +4052,11 @@ impl Core {
                     "media",
                     Some(id),
                     Some(acc),
-                    format!("RTP {local} <-> {remote} {}", codec.name()),
+                    format!(
+                        "{} {local} <-> {remote} {}",
+                        if srtp_on { "SRTP" } else { "RTP" },
+                        codec.name()
+                    ),
                 );
             } else if changed {
                 *rtp.ctl.remote.lock().unwrap() = Some(remote);
@@ -3497,6 +4068,15 @@ impl Core {
                     format!("media moved to {remote}"),
                 );
             }
+        }
+        if srtp_missing {
+            self.event(
+                "error",
+                Some(id),
+                None,
+                "SRTP is mandatory on this account but the answer has no a=crypto; hanging up",
+            );
+            self.send_bye(id, Some("SRTP not accepted by the far end".into()));
         }
         self.route_audio();
     }
@@ -3652,6 +4232,9 @@ impl Core {
             "NOTIFY" => {
                 self.respond(ai, &m, from, 200, "OK", None, &[], None);
                 let event = m.header("Event").unwrap_or("").to_ascii_lowercase();
+                if event.starts_with("dialog") {
+                    self.blf_notify(&m);
+                }
                 if let (Some(id), true) = (line_id, event.starts_with("refer")) {
                     let frag = m.body.lines().next().unwrap_or("").trim().to_string();
                     let code: u16 = frag

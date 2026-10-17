@@ -13,6 +13,25 @@ export const LANGS = [
 
 // English -> [Portuguese (Brazil), Spanish, German]
 const T = {
+  // transports and SRTP
+  "SIP transport": ["Transporte SIP", "Transporte SIP", "SIP-Transport"],
+  "TCP and TLS keep one connection to the server; with TLS and no port, 5061 and DNS _sips._tcp are used": ["TCP e TLS mantêm uma conexão com o servidor; com TLS e sem porta, usa 5061 e DNS _sips._tcp", "TCP y TLS mantienen una conexión con el servidor; con TLS y sin puerto se usan 5061 y DNS _sips._tcp", "TCP und TLS halten eine Verbindung zum Server; bei TLS ohne Port werden 5061 und DNS _sips._tcp genutzt"],
+  "Check the server's TLS certificate": ["Verificar o certificado TLS do servidor", "Verificar el certificado TLS del servidor", "TLS-Zertifikat des Servers prüfen"],
+  "turn off for labs and PBXs with self-signed certificates": ["desligue para laboratórios e PABX com certificado autoassinado", "desactívalo en laboratorios y centralitas con certificado autofirmado", "für Labore und TK-Anlagen mit selbstsignierten Zertifikaten ausschalten"],
+  "Media encryption (SRTP, SDES keys)": ["Criptografia de mídia (SRTP, chaves SDES)", "Cifrado de medios (SRTP, claves SDES)", "Medienverschlüsselung (SRTP, SDES-Schlüssel)"],
+  "Optional offers SRTP and accepts plain RTP; Required offers only RTP/SAVP. Use it with TLS so the keys are not readable on the wire.": ["Opcional oferece SRTP e aceita RTP simples; Obrigatório oferece só RTP/SAVP. Use com TLS para as chaves não ficarem legíveis na rede.", "Opcional ofrece SRTP y acepta RTP sin cifrar; Obligatorio ofrece solo RTP/SAVP. Úsalo con TLS para que las claves no se lean en la red.", "Optional bietet SRTP an und akzeptiert einfaches RTP; Erforderlich bietet nur RTP/SAVP. Mit TLS nutzen, damit die Schlüssel nicht mitlesbar sind."],
+  "Off (RTP)": ["Desligada (RTP)", "Desactivado (RTP)", "Aus (RTP)"],
+  "Optional": ["Opcional", "Opcional", "Optional"],
+  "Required (RTP/SAVP)": ["Obrigatória (RTP/SAVP)", "Obligatorio (RTP/SAVP)", "Erforderlich (RTP/SAVP)"],
+  "Media encryption": ["Criptografia de mídia", "Cifrado de medios", "Medienverschlüsselung"],
+  "none (RTP)": ["nenhuma (RTP)", "ninguno (RTP)", "keine (RTP)"],
+  "Conference": ["Conferência", "Conferencia", "Konferenz"],
+  "Busy lamp field": ["Painel de ocupação (BLF)", "Panel de ocupación (BLF)", "Besetztlampenfeld (BLF)"],
+  "Free": ["Livre", "Libre", "Frei"],
+  "Busy": ["Ocupado", "Ocupado", "Besetzt"],
+  "Unknown": ["Desconhecido", "Desconocido", "Unbekannt"],
+  "Extensions to watch (busy lamp field)": ["Ramais monitorados (BLF)", "Extensiones a vigilar (BLF)", "Überwachte Nebenstellen (BLF)"],
+  "one per line: an extension, user@host or SIP URI. Sidetone subscribes to the dialog event package (RFC 4235) once the account is registered; the PBX needs hints for them.": ["um por linha: ramal, usuario@host ou SIP URI. O Sidetone assina o pacote de eventos dialog (RFC 4235) quando a conta registra; o PABX precisa de hints para eles.", "uno por línea: extensión, usuario@host o SIP URI. Sidetone se suscribe al paquete de eventos dialog (RFC 4235) cuando la cuenta se registra; la centralita necesita hints para ellos.", "eine pro Zeile: Nebenstelle, benutzer@host oder SIP-URI. Sidetone abonniert das Dialog-Ereignispaket (RFC 4235), sobald das Konto registriert ist; die TK-Anlage braucht Hints dafür."],
   // AI
   "AI": ["IA", "IA", "KI"],
   "AI assistant": ["Assistente de IA", "Asistente de IA", "KI-Assistent"],
@@ -447,6 +466,9 @@ const P = [
   [/^sent (.+) inband$/, ["enviado $1 em banda", "enviado $1 en banda", "$1 im Sprachband gesendet"]],
   [/^received (.+) via SIP INFO$/, ["recebido $1 por SIP INFO", "recibido $1 por SIP INFO", "$1 per SIP INFO empfangen"]],
   [/^no answer, cancelling$/, ["sem resposta, cancelando", "sin respuesta, cancelando", "keine Antwort, breche ab"]],
+  [/^conference: lines (\d+) and (\d+) joined$/, ["conferência: linhas $1 e $2 unidas", "conferencia: líneas $1 y $2 unidas", "Konferenz: Leitungen $1 und $2 verbunden"]],
+  [/^conference split$/, ["conferência separada", "conferencia separada", "Konferenz getrennt"]],
+  [/^Conference L(\d+)$/, ["Conferência L$1", "Conferencia L$1", "Konferenz L$1"]],
   [/^transfer completed$/, ["transferência concluída", "transferencia completada", "Weiterleitung abgeschlossen"]],
 ];
 

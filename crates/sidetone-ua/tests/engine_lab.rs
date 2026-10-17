@@ -1,8 +1,8 @@
 //! Phone engine against the Asterisk lab (lab/run-asterisk.sh).
-//! Run with: cargo test -p sidetone-ua --test engine_lab -- --ignored --nocapture
+//! Run with: cargo test -p sidetone-ua --test engine_lab -- --ignored --nocapture --test-threads=1
 
 use sidetone_ua::engine::{AccountCfg, CallRequest, Cmd, Engine, PhoneSettings};
-use sidetone_ua::{DtmfMode, Profile};
+use sidetone_ua::{DtmfMode, Profile, SrtpMode};
 use std::time::{Duration, Instant};
 
 fn acc(id: &str, user: &str, pass: &str, dtmf: DtmfMode) -> AccountCfg {
@@ -74,7 +74,8 @@ fn engine_against_asterisk() {
         None,
     );
     wait_for(&e, "both accounts registered", 10, |e| {
-        e.state().accounts.iter().all(|a| a.state == "registered")
+        let st = e.state();
+        st.accounts.len() == 2 && st.accounts.iter().all(|a| a.state == "registered")
     });
 
     // Echo test with hold, resume, DTMF and mute.
@@ -266,4 +267,128 @@ fn engine_against_asterisk() {
             ev.kind, ev.line, ev.account, ev.text
         );
     }
+}
+
+fn transport(mut a: AccountCfg, kind: &str, port: u16) -> AccountCfg {
+    a.profile.behavior.transport = kind.into();
+    a.profile.behavior.tls_verify = false;
+    let host = a
+        .profile
+        .account
+        .domain
+        .split(':')
+        .next()
+        .unwrap_or("127.0.0.1")
+        .to_string();
+    a.profile.account.domain = format!("{host}:{port}");
+    a
+}
+
+#[test]
+#[ignore]
+fn transports_srtp_blf_conference() {
+    let settings = PhoneSettings {
+        audio_source: "tone".into(),
+        auto_hold: false,
+        ..Default::default()
+    };
+    let mut a = acc("a", "2001", "secret2001", DtmfMode::Rfc4733);
+    a.blf = vec!["3001".into()];
+    let b = transport(
+        acc("b", "3001", "secret3001", DtmfMode::Rfc4733),
+        "tcp",
+        5070,
+    );
+    let mut s = transport(
+        acc("s", "5001", "secret5001", DtmfMode::Rfc4733),
+        "tls",
+        5071,
+    );
+    s.profile.behavior.srtp = SrtpMode::Mandatory;
+    let e = Engine::start(settings, vec![a, b, s], None);
+    wait_for(&e, "UDP, TCP and TLS accounts registered", 15, |e| {
+        let st = e.state();
+        st.accounts.len() == 3 && st.accounts.iter().all(|a| a.state == "registered")
+    });
+    let st = e.state();
+    let tr = |id: &str| {
+        st.accounts
+            .iter()
+            .find(|a| a.id == id)
+            .unwrap()
+            .transport
+            .clone()
+    };
+    assert_eq!(tr("b").to_lowercase(), "tcp");
+    assert_eq!(tr("s").to_lowercase(), "tls");
+
+    // SRTP over TLS to the echo test.
+    let ls = e.call(CallRequest {
+        account: Some("s".into()),
+        target: "600".into(),
+        ..Default::default()
+    });
+    wait_for(&e, "SRTP echo connected and audio decrypts", 10, |e| {
+        e.state()
+            .calls
+            .iter()
+            .any(|c| c.line == ls && c.state == "connected" && c.srtp && c.rtp_received > 50)
+    });
+    let c = e.state().calls.into_iter().find(|c| c.line == ls).unwrap();
+    assert_eq!(c.srtp_failed, 0, "no SRTP authentication failures");
+    e.cmd(Cmd::Hangup(ls));
+
+    // BLF on 3001 follows idle, ringing and busy while a calls b (over TCP).
+    let blf = |e: &Engine| {
+        e.state()
+            .accounts
+            .iter()
+            .find(|a| a.id == "a")
+            .and_then(|a| a.blf.first().map(|b| b.state.clone()))
+            .unwrap_or_default()
+    };
+    wait_for(&e, "BLF idle", 10, |e| blf(e) == "idle");
+    let l1 = e.call(CallRequest {
+        account: Some("a".into()),
+        target: "700".into(),
+        ..Default::default()
+    });
+    wait_for(&e, "b rings over TCP", 10, |e| {
+        incoming_line(e, "b").is_some()
+    });
+    wait_for(&e, "BLF ringing", 5, |e| blf(e) == "ringing");
+    let ib = incoming_line(&e, "b").unwrap();
+    e.cmd(Cmd::Answer(ib));
+    wait_for(&e, "a-b connected", 10, |e| {
+        line_state(e, l1) == "connected"
+    });
+    wait_for(&e, "BLF busy", 5, |e| blf(e) == "busy");
+
+    // Three-way conference: a joins b and the echo test.
+    let l2 = e.call(CallRequest {
+        account: Some("a".into()),
+        target: "600".into(),
+        ..Default::default()
+    });
+    wait_for(&e, "second line connected", 10, |e| {
+        line_state(e, l2) == "connected"
+    });
+    e.cmd(Cmd::Conference(l1, l2, true));
+    wait_for(&e, "conference joined", 5, |e| {
+        let calls = e.state().calls;
+        let conf = |l| {
+            calls
+                .iter()
+                .find(|c| c.line == l)
+                .and_then(|c| c.conference)
+        };
+        conf(l1) == Some(l2) && conf(l2) == Some(l1)
+    });
+    std::thread::sleep(Duration::from_millis(1000));
+    e.cmd(Cmd::Conference(l1, l2, false));
+    wait_for(&e, "conference split", 5, |e| {
+        e.state().calls.iter().all(|c| c.conference.is_none())
+    });
+    e.cmd(Cmd::HangupAll);
+    wait_for(&e, "BLF idle again", 10, |e| blf(e) == "idle");
 }

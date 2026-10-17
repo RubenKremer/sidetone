@@ -106,11 +106,26 @@ fn srv_lookup(name: &str) -> Vec<(u16, u16, u16, String)> {
 /// Resolves a SIP server for UDP: literal IP, explicit port (A/AAAA), else
 /// SRV _sip._udp, else A/AAAA on 5060. Results are cached for 60 s.
 pub fn resolve_sip(hostport: &str) -> Result<SocketAddr, DnsError> {
+    resolve_sip_for(hostport, crate::transport::Kind::Udp)
+}
+
+/// Same as `resolve_sip` for a transport: SRV _sip._tcp or _sips._tcp and
+/// port 5061 by default for TLS.
+pub fn resolve_sip_for(
+    hostport: &str,
+    kind: crate::transport::Kind,
+) -> Result<SocketAddr, DnsError> {
+    let (srv, dport) = match kind {
+        crate::transport::Kind::Udp => ("_sip._udp", 5060),
+        crate::transport::Kind::Tcp => ("_sip._tcp", 5060),
+        crate::transport::Kind::Tls => ("_sips._tcp", 5061),
+    };
     let h = strip(hostport);
     if h.is_empty() {
         return Err(DnsError("empty server address".into()));
     }
-    if let Some((t, a)) = cache().lock().unwrap().get(h) {
+    let ckey = format!("{srv}|{h}");
+    if let Some((t, a)) = cache().lock().unwrap().get(&ckey) {
         if t.elapsed() < Duration::from_secs(60) {
             return Ok(*a);
         }
@@ -118,7 +133,7 @@ pub fn resolve_sip(hostport: &str) -> Result<SocketAddr, DnsError> {
     let (host, port) = sip::split_host_port(h);
     let res = (|| {
         if let Ok(ip) = host.parse::<IpAddr>() {
-            return Ok(SocketAddr::new(ip, port.unwrap_or(5060)));
+            return Ok(SocketAddr::new(ip, port.unwrap_or(dport)));
         }
         if let Some(p) = port {
             return a_lookup(&host, p)
@@ -127,24 +142,21 @@ pub fn resolve_sip(hostport: &str) -> Result<SocketAddr, DnsError> {
                 .or_else(|| a_lookup(&host, p).into_iter().next())
                 .ok_or_else(|| DnsError(format!("cannot resolve {host}")));
         }
-        let mut srv = srv_lookup(&format!("_sip._udp.{host}."));
-        srv.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
-        for (_, _, p, target) in srv {
+        let mut recs = srv_lookup(&format!("{srv}.{host}."));
+        recs.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+        for (_, _, p, target) in recs {
             if let Some(a) = a_lookup(&target, p).into_iter().find(|a| a.is_ipv4()) {
                 return Ok(a);
             }
         }
-        a_lookup(&host, 5060)
+        a_lookup(&host, dport)
             .into_iter()
             .find(|a| a.is_ipv4())
-            .or_else(|| a_lookup(&host, 5060).into_iter().next())
+            .or_else(|| a_lookup(&host, dport).into_iter().next())
             .ok_or_else(|| DnsError(format!("cannot resolve {host} (no SRV, no A/AAAA)")))
     })();
     if let Ok(a) = &res {
-        cache()
-            .lock()
-            .unwrap()
-            .insert(h.to_string(), (Instant::now(), *a));
+        cache().lock().unwrap().insert(ckey, (Instant::now(), *a));
     }
     res
 }
@@ -247,7 +259,7 @@ pub fn report(domain: &str) -> DnsReport {
             r.addresses.join(", ")
         }
     ));
-    cache().lock().unwrap().remove(h.as_str());
+    cache().lock().unwrap().remove(&format!("_sip._udp|{h}"));
     match resolve_sip(&h) {
         Ok(a) => {
             r.chosen = Some(a.to_string());

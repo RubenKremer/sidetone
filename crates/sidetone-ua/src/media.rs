@@ -195,6 +195,37 @@ pub struct MediaCtl {
     pub speaker: Mutex<Option<Arc<Ring>>>,
     /// Received RFC 4733 digits (for display).
     pub dtmf_rx: Mutex<Vec<char>>,
+    /// Conference mixing: own outgoing source samples are copied here.
+    pub mic_copy: Mutex<Option<Arc<Ring>>>,
+    /// Conference mixing: audio added to what this line sends.
+    pub tx_adds: Mutex<Vec<Arc<Ring>>>,
+    /// Conference mixing: received audio is copied into these.
+    pub rx_copies: Mutex<Vec<Arc<Ring>>>,
+    /// Conference mixing: audio added to what this line plays on the speaker.
+    pub spk_adds: Mutex<Vec<Arc<Ring>>>,
+}
+
+impl MediaCtl {
+    /// Removes every conference mixing link.
+    pub fn clear_mix(&self) {
+        *self.mic_copy.lock().unwrap() = None;
+        self.tx_adds.lock().unwrap().clear();
+        self.rx_copies.lock().unwrap().clear();
+        self.spk_adds.lock().unwrap().clear();
+    }
+}
+
+fn mix_in(pcm: &mut [i16], adds: &[Arc<Ring>]) {
+    if adds.is_empty() {
+        return;
+    }
+    for s in pcm.iter_mut() {
+        let mut v = *s as i32;
+        for r in adds {
+            v += r.pop().unwrap_or(0) as i32;
+        }
+        *s = v.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    }
 }
 
 impl Default for MediaCtl {
@@ -210,6 +241,10 @@ impl Default for MediaCtl {
             mic: Mutex::new(None),
             speaker: Mutex::new(None),
             dtmf_rx: Mutex::new(Vec::new()),
+            mic_copy: Mutex::new(None),
+            tx_adds: Mutex::new(Vec::new()),
+            rx_copies: Mutex::new(Vec::new()),
+            spk_adds: Mutex::new(Vec::new()),
         }
     }
 }
@@ -315,6 +350,8 @@ pub struct MediaStats {
     pub sent_packets: u64,
     pub received_packets: u64,
     pub latched_remote: Option<SocketAddr>,
+    /// SRTP packets that failed authentication (wrong key or not SRTP).
+    pub srtp_failed: u64,
 }
 
 pub struct RtpSession {
@@ -327,6 +364,8 @@ pub struct RtpSession {
     pub stats: Arc<Mutex<MediaStats>>,
     pub ctl: Arc<MediaCtl>,
     dtmf_queue: Arc<Mutex<Vec<char>>>,
+    /// SRTP keys (send, receive); set before `start` to encrypt the media.
+    pub srtp: Option<(crate::srtp::KeyMaterial, crate::srtp::KeyMaterial)>,
 }
 
 impl RtpSession {
@@ -356,6 +395,7 @@ impl RtpSession {
                     received: Arc::new(Mutex::new(Vec::new())),
                     stats: Arc::new(Mutex::new(MediaStats::default())),
                     ctl: Arc::new(MediaCtl::default()),
+                    srtp: None,
                     dtmf_queue: Arc::new(Mutex::new(Vec::new())),
                 });
             }
@@ -396,7 +436,16 @@ impl RtpSession {
         // Recording is capped at one hour per direction.
         const REC_CAP: usize = 8000 * 3600;
 
+        let srtp_rx = self
+            .srtp
+            .as_ref()
+            .map(|(_, rx)| crate::srtp::Context::new(rx));
+        let mut srtp_tx = self
+            .srtp
+            .as_ref()
+            .map(|(tx, _)| crate::srtp::Context::new(tx));
         {
+            let mut srtp_rx = srtp_rx;
             let ctl = ctl.clone();
             let stop = stop.clone();
             let latched = latched.clone();
@@ -413,6 +462,16 @@ impl RtpSession {
                         continue;
                     };
                     tap.record(from, local, &buf[..n]);
+                    let n = match srtp_rx.as_mut() {
+                        Some(c) => match c.unprotect(&mut buf[..n]) {
+                            Some(m) => m,
+                            None => {
+                                stats.lock().unwrap().srtp_failed += 1;
+                                continue;
+                            }
+                        },
+                        None => n,
+                    };
                     let Some(h) = sidetone_core::rtp::parse_rtp(&buf[..n]) else {
                         continue;
                     };
@@ -446,8 +505,13 @@ impl RtpSession {
                             .map(|&b| c.decode(b))
                             .collect();
                         ctl.rx_level.store(peak(&pcm), Ordering::Relaxed);
+                        for r in ctl.rx_copies.lock().unwrap().iter() {
+                            r.push(&pcm);
+                        }
                         if let Some(spk) = ctl.speaker.lock().unwrap().as_ref() {
-                            spk.push(&pcm);
+                            let mut out = pcm.clone();
+                            mix_in(&mut out, &ctl.spk_adds.lock().unwrap());
+                            spk.push(&out);
                         }
                         {
                             let mut eb = echo_buf.lock().unwrap();
@@ -602,6 +666,10 @@ impl RtpSession {
                         };
                         pcm.push(s);
                     }
+                    if let Some(c) = ctl.mic_copy.lock().unwrap().as_ref() {
+                        c.push(&pcm);
+                    }
+                    mix_in(&mut pcm, &ctl.tx_adds.lock().unwrap());
                     ctl.tx_level.store(peak(&pcm), Ordering::Relaxed);
                     pkt.extend_from_slice(&[
                         0x80,
@@ -618,6 +686,9 @@ impl RtpSession {
                         }
                     }
                     first = false;
+                }
+                if let Some(c) = srtp_tx.as_mut() {
+                    c.protect(&mut pkt);
                 }
                 if send_sock.send_to(&pkt, dest).is_ok() {
                     tap.record(local, dest, &pkt);
