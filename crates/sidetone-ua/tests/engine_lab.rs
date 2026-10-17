@@ -392,3 +392,72 @@ fn transports_srtp_blf_conference() {
     e.cmd(Cmd::HangupAll);
     wait_for(&e, "BLF idle again", 10, |e| blf(e) == "idle");
 }
+
+#[test]
+#[ignore]
+fn opus_echo() {
+    let settings = PhoneSettings {
+        audio_source: "tone".into(),
+        auto_hold: false,
+        ..Default::default()
+    };
+    let mut a = acc("a", "2001", "secret2001", DtmfMode::Rfc4733);
+    a.profile.behavior.codecs = vec!["opus".into(), "PCMU".into()];
+    let b = acc("b", "3001", "secret3001", DtmfMode::Rfc4733);
+    let e = Engine::start(settings, vec![a, b], None);
+    wait_for(&e, "registered", 10, |e| {
+        let st = e.state();
+        st.accounts.len() == 2 && st.accounts.iter().all(|a| a.state == "registered")
+    });
+    let l = e.call(CallRequest {
+        account: Some("a".into()),
+        target: "600".into(),
+        ..Default::default()
+    });
+    wait_for(&e, "Opus echo connected", 10, |e| {
+        line_state(e, l) == "connected"
+    });
+    let c = e.state().calls.into_iter().find(|c| c.line == l).unwrap();
+    assert_eq!(c.codec.as_deref(), Some("opus"));
+    wait_for(&e, "Opus audio decodes with level", 5, |e| {
+        e.state()
+            .calls
+            .iter()
+            .any(|c| c.line == l && c.rtp_received > 50 && c.rx_level > 2000)
+    });
+    e.cmd(Cmd::Dtmf(l, "1".into()));
+    std::thread::sleep(Duration::from_millis(500));
+    e.cmd(Cmd::HangupAll);
+    wait_for(&e, "ended", 5, |e| line_state(e, l) != "connected");
+
+    // Opus to a G.711-only phone: Asterisk transcodes both ways.
+    let l2 = e.call(CallRequest {
+        account: Some("a".into()),
+        target: "700".into(),
+        ..Default::default()
+    });
+    wait_for(&e, "3001 rings", 10, |e| incoming_line(e, "b").is_some());
+    let ib = incoming_line(&e, "b").unwrap();
+    e.cmd(Cmd::Answer(ib));
+    wait_for(&e, "audio both ways through the transcoder", 8, |e| {
+        let calls = e.state().calls;
+        let lvl = |l| {
+            calls
+                .iter()
+                .find(|c| c.line == l)
+                .map(|c| c.rx_level)
+                .unwrap_or(0)
+        };
+        lvl(l2) > 2000 && lvl(ib) > 2000
+    });
+    let calls = e.state().calls;
+    let codec = |l| {
+        calls
+            .iter()
+            .find(|c| c.line == l)
+            .and_then(|c| c.codec.clone())
+    };
+    assert_eq!(codec(l2).as_deref(), Some("opus"));
+    assert_eq!(codec(ib).as_deref(), Some("PCMU"));
+    e.cmd(Cmd::HangupAll);
+}

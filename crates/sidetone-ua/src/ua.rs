@@ -612,7 +612,7 @@ impl Ua {
         }
         let mut s = format!("v=0\r\no=sidetone {sess} {sess} IN {fam} {ip}\r\ns=Sidetone\r\nc=IN {fam} {ip}\r\nt=0 0\r\nm=audio {} RTP/AVP {}\r\n", rtp.port(), pts.join(" "));
         for c in codecs {
-            s.push_str(&format!("a=rtpmap:{} {}/8000\r\n", c.pt(), c.name()));
+            s.push_str(&format!("a=rtpmap:{} {}\r\n", c.pt(), c.rtpmap()));
         }
         if let Some(p) = dtmf_pt {
             s.push_str(&format!(
@@ -968,7 +968,7 @@ impl Ua {
         let codec = media
             .formats
             .iter()
-            .find_map(|pt| Codec::from_pt(*pt))
+            .find_map(|pt| Codec::from_media(&media, *pt))
             .unwrap_or(codecs[0]);
         let remote_dtmf = media
             .codecs
@@ -1198,7 +1198,7 @@ impl Ua {
             let codec = media.as_ref().and_then(|md| {
                 md.formats
                     .iter()
-                    .filter_map(|p| Codec::from_pt(*p))
+                    .filter_map(|p| Codec::from_media(md, *p))
                     .find(|c| mine.contains(c))
             });
             let (Some(media), Some(codec)) = (media, codec) else {

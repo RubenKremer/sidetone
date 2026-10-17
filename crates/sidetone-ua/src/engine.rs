@@ -776,6 +776,18 @@ fn media_direction(sdp: &Sdp) -> (Option<String>, bool) {
 }
 
 /// Adds SRTP to an SDP body: RTP/SAVP when asked and an a=crypto line.
+/// The telephone-event payload type of a media line, preferring the one at
+/// the clock rate of the audio codec in use.
+fn telephone_event(m: &sdp::Media, clock: u32) -> Option<u8> {
+    let ev = |c: &&sidetone_core::sdp::Codec| c.name.eq_ignore_ascii_case("telephone-event");
+    m.codecs
+        .iter()
+        .filter(ev)
+        .find(|c| c.rate == clock)
+        .or_else(|| m.codecs.iter().find(ev))
+        .map(|c| c.pt)
+}
+
 fn with_srtp(sdp: String, crypto: &str, savp: bool) -> String {
     let sdp = if savp {
         sdp.replacen(" RTP/AVP ", " RTP/SAVP ", 1)
@@ -2826,15 +2838,11 @@ impl Core {
                 let codec = m.and_then(|m| {
                     m.formats
                         .iter()
-                        .filter_map(|p| Codec::from_pt(*p))
+                        .filter_map(|p| Codec::from_media(m, *p))
                         .find(|c| mine.contains(c))
                 });
-                let dt = m.and_then(|m| {
-                    m.codecs
-                        .iter()
-                        .find(|c| c.name.eq_ignore_ascii_case("telephone-event"))
-                        .map(|c| c.pt)
-                });
+                let clock = codec.map(|c| c.clock()).unwrap_or(8000);
+                let dt = m.and_then(|m| telephone_event(m, clock));
                 let remote = m.map(|m| SocketAddr::new(m.address(o).unwrap_or(from.ip()), m.port));
                 (codec, dt, remote, media_direction(o).1)
             }
@@ -3985,9 +3993,9 @@ impl Core {
         let codec = m
             .formats
             .iter()
-            .filter_map(|p| Codec::from_pt(*p))
+            .filter_map(|p| Codec::from_media(m, *p))
             .find(|c| mine.contains(c))
-            .or_else(|| m.formats.iter().find_map(|p| Codec::from_pt(*p)));
+            .or_else(|| m.formats.iter().find_map(|p| Codec::from_media(m, *p)));
         let Some(codec) = codec else {
             let names = m.codec_names().join(", ");
             let acc = l.acc;
@@ -3999,11 +4007,7 @@ impl Core {
             );
             return;
         };
-        let remote_dtmf = m
-            .codecs
-            .iter()
-            .find(|c| c.name.eq_ignore_ascii_case("telephone-event"))
-            .map(|c| c.pt);
+        let remote_dtmf = telephone_event(m, codec.clock());
         let ip = m.address(sd).filter(|a| !a.is_unspecified());
         let remote = SocketAddr::new(ip.unwrap_or(fallback), m.port);
         let b = l.profile.behavior.clone();
@@ -4458,7 +4462,7 @@ impl Core {
                     && md
                         .formats
                         .iter()
-                        .filter_map(|p| Codec::from_pt(*p))
+                        .filter_map(|p| Codec::from_media(md, *p))
                         .any(|c| mine.contains(&c))
             });
             if !ok {

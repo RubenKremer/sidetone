@@ -70,26 +70,47 @@ pub fn alaw_decode(b: u8) -> i16 {
     (if sign != 0 { s } else { -s }) as i16
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Audio codec of a call. Opus carries the payload type negotiated in SDP;
+/// two Opus values compare equal whatever their payload type, so a codec
+/// from the profile matches the same codec in an offer.
+#[derive(Debug, Clone, Copy, Eq)]
 pub enum Codec {
     Pcmu,
     Pcma,
+    Opus(u8),
 }
+
+impl PartialEq for Codec {
+    fn eq(&self, o: &Codec) -> bool {
+        matches!(
+            (self, o),
+            (Codec::Pcmu, Codec::Pcmu)
+                | (Codec::Pcma, Codec::Pcma)
+                | (Codec::Opus(_), Codec::Opus(_))
+        )
+    }
+}
+
+/// Payload type Sidetone offers for Opus.
+pub const OPUS_PT: u8 = 111;
 
 impl Codec {
     pub fn pt(self) -> u8 {
         match self {
             Codec::Pcmu => 0,
             Codec::Pcma => 8,
+            Codec::Opus(pt) => pt,
         }
     }
     pub fn from_name(n: &str) -> Option<Codec> {
         match n.to_ascii_uppercase().as_str() {
             "PCMU" => Some(Codec::Pcmu),
             "PCMA" => Some(Codec::Pcma),
+            "OPUS" => Some(Codec::Opus(OPUS_PT)),
             _ => None,
         }
     }
+    /// Static payload types only.
     pub fn from_pt(pt: u8) -> Option<Codec> {
         match pt {
             0 => Some(Codec::Pcmu),
@@ -97,23 +118,103 @@ impl Codec {
             _ => None,
         }
     }
+    /// A payload type of an SDP media line, using its rtpmap for dynamic types.
+    pub fn from_media(m: &sidetone_core::sdp::Media, pt: u8) -> Option<Codec> {
+        match m.codecs.iter().find(|c| c.pt == pt) {
+            Some(c) if c.name.eq_ignore_ascii_case("opus") => Some(Codec::Opus(pt)),
+            Some(c) => Codec::from_pt(pt).filter(|x| x.name().eq_ignore_ascii_case(&c.name)),
+            None => Codec::from_pt(pt),
+        }
+    }
     pub fn name(self) -> &'static str {
         match self {
             Codec::Pcmu => "PCMU",
             Codec::Pcma => "PCMA",
+            Codec::Opus(_) => "opus",
         }
     }
-    fn encode(self, s: i16) -> u8 {
+    /// RTP clock rate.
+    pub fn clock(self) -> u32 {
         match self {
-            Codec::Pcmu => ulaw_encode(s),
-            Codec::Pcma => alaw_encode(s),
+            Codec::Opus(_) => 48000,
+            _ => 8000,
         }
     }
-    fn decode(self, b: u8) -> i16 {
+    /// SDP rtpmap encoding, e.g. "PCMU/8000" or "opus/48000/2".
+    pub fn rtpmap(self) -> String {
         match self {
-            Codec::Pcmu => ulaw_decode(b),
-            Codec::Pcma => alaw_decode(b),
+            Codec::Opus(_) => "opus/48000/2".into(),
+            c => format!("{}/8000", c.name()),
         }
+    }
+}
+
+/// Encoder state for one outgoing stream (8 kHz PCM in).
+pub enum Encoder {
+    G711(Codec),
+    Opus(Box<opus::Encoder>),
+}
+
+impl Encoder {
+    pub fn new(c: Codec) -> Encoder {
+        match c {
+            Codec::Opus(_) => {
+                match opus::Encoder::new(8000, opus::Channels::Mono, opus::Application::Voip) {
+                    Ok(mut e) => {
+                        e.set_inband_fec(true).ok();
+                        e.set_packet_loss_perc(5).ok();
+                        Encoder::Opus(Box::new(e))
+                    }
+                    Err(_) => Encoder::G711(Codec::Pcmu),
+                }
+            }
+            c => Encoder::G711(c),
+        }
+    }
+    pub fn encode(&mut self, pcm: &[i16], out: &mut Vec<u8>) {
+        match self {
+            Encoder::G711(Codec::Pcma) => out.extend(pcm.iter().map(|&s| alaw_encode(s))),
+            Encoder::G711(_) => out.extend(pcm.iter().map(|&s| ulaw_encode(s))),
+            Encoder::Opus(e) => {
+                let mut buf = [0u8; 1500];
+                if let Ok(n) = e.encode(pcm, &mut buf) {
+                    out.extend_from_slice(&buf[..n]);
+                }
+            }
+        }
+    }
+}
+
+/// Decoder state for one incoming stream (8 kHz PCM out).
+pub struct Decoder {
+    codec: Codec,
+    opus: Option<opus::Decoder>,
+}
+
+impl Decoder {
+    pub fn new(c: Codec) -> Decoder {
+        let opus = match c {
+            Codec::Opus(_) => opus::Decoder::new(8000, opus::Channels::Mono).ok(),
+            _ => None,
+        };
+        Decoder { codec: c, opus }
+    }
+    /// Decodes one payload of payload type `pt`; None when the type is not audio we know.
+    pub fn decode(&mut self, pt: u8, payload: &[u8]) -> Option<Vec<i16>> {
+        match Codec::from_pt(pt) {
+            Some(Codec::Pcmu) => return Some(payload.iter().map(|&b| ulaw_decode(b)).collect()),
+            Some(Codec::Pcma) => return Some(payload.iter().map(|&b| alaw_decode(b)).collect()),
+            _ => {}
+        }
+        if let (Codec::Opus(p), Some(d)) = (self.codec, self.opus.as_mut()) {
+            if p == pt {
+                let mut out = vec![0i16; 8 * 120];
+                let n = d.decode(payload, &mut out, false).ok()?;
+                out.truncate(n);
+                return Some(out);
+            }
+        }
+        None
     }
 }
 
@@ -422,6 +523,11 @@ impl RtpSession {
         symmetric: bool,
         tap: Tap,
     ) {
+        // Opus frames are 10, 20, 40 or 60 ms.
+        let ptime_ms = match codec {
+            Codec::Opus(_) if ![10, 20, 40, 60].contains(&ptime_ms) => 20,
+            _ => ptime_ms,
+        };
         let recv_sock = self.socket.try_clone().expect("clone rtp socket");
         let send_sock = self.socket.try_clone().expect("clone rtp socket");
         let stop = self.stop.clone();
@@ -446,6 +552,7 @@ impl RtpSession {
             .map(|(tx, _)| crate::srtp::Context::new(tx));
         {
             let mut srtp_rx = srtp_rx;
+            let mut decoder = Decoder::new(codec);
             let ctl = ctl.clone();
             let stop = stop.clone();
             let latched = latched.clone();
@@ -499,11 +606,7 @@ impl RtpSession {
                         }
                         continue;
                     }
-                    if let Some(c) = Codec::from_pt(h.pt) {
-                        let pcm: Vec<i16> = buf[h.payload_offset..n]
-                            .iter()
-                            .map(|&b| c.decode(b))
-                            .collect();
+                    if let Some(pcm) = decoder.decode(h.pt, &buf[h.payload_offset..n]) {
                         ctl.rx_level.store(peak(&pcm), Ordering::Relaxed);
                         for r in ctl.rx_copies.lock().unwrap().iter() {
                             r.push(&pcm);
@@ -535,6 +638,8 @@ impl RtpSession {
         let dtmf_queue = self.dtmf_queue.clone();
         self.handles.push(thread::spawn(move || {
             let spp = (8 * ptime_ms) as usize; // samples per packet at 8 kHz
+            let clk = codec.clock() / 8000; // RTP timestamp units per 8 kHz sample
+            let mut encoder = Encoder::new(codec);
             let ssrc: u32 = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.subsec_nanos() ^ 0x5157_0000)
@@ -562,7 +667,7 @@ impl RtpSession {
                 let dest = latched.lock().unwrap().unwrap_or(remote);
                 if ctl.hold.load(Ordering::Relaxed) {
                     ctl.tx_level.store(0, Ordering::Relaxed);
-                    ts = ts.wrapping_add(spp as u32);
+                    ts = ts.wrapping_add(spp as u32 * clk);
                     n += 1;
                     let next = start + Duration::from_millis(n * ptime_ms as u64);
                     let now = Instant::now();
@@ -586,7 +691,7 @@ impl RtpSession {
                 if let (Some((code, k, ets)), Some(pt)) = (dtmf, dtmf_pt) {
                     // 8 update packets (160 ms), then 3 end packets.
                     let end = k >= 8;
-                    let dur = (spp as u32) * (k.min(8) + 1);
+                    let dur = (spp as u32) * clk * (k.min(8) + 1);
                     pkt.extend_from_slice(&[0x80, if k == 0 { 0x80 | pt } else { pt }]);
                     pkt.extend_from_slice(&seq.to_be_bytes());
                     pkt.extend_from_slice(&ets.to_be_bytes());
@@ -678,7 +783,7 @@ impl RtpSession {
                     pkt.extend_from_slice(&seq.to_be_bytes());
                     pkt.extend_from_slice(&ts.to_be_bytes());
                     pkt.extend_from_slice(&ssrc.to_be_bytes());
-                    pkt.extend(pcm.iter().map(|&s| codec.encode(s)));
+                    encoder.encode(&pcm, &mut pkt);
                     if ctl.record.load(Ordering::Relaxed) {
                         let mut v = sent.lock().unwrap();
                         if v.len() < REC_CAP {
@@ -695,7 +800,7 @@ impl RtpSession {
                     stats.lock().unwrap().sent_packets += 1;
                 }
                 seq = seq.wrapping_add(1);
-                ts = ts.wrapping_add(spp as u32);
+                ts = ts.wrapping_add(spp as u32 * clk);
                 n += 1;
                 let next = start + Duration::from_millis(n * ptime_ms as u64);
                 let now = Instant::now();
@@ -755,6 +860,35 @@ pub fn bind_udp(addr: SocketAddr, dscp: u8) -> std::io::Result<UdpSocket> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opus_roundtrip_keeps_a_tone() {
+        let c = Codec::Opus(107);
+        let mut enc = Encoder::new(c);
+        let mut dec = Decoder::new(c);
+        let mut peak_out = 0i16;
+        for f in 0..20 {
+            let pcm: Vec<i16> = (0..160)
+                .map(|i| {
+                    ((((f * 160 + i) as f32) * 2.0 * std::f32::consts::PI * 440.0 / 8000.0).sin()
+                        * 8000.0) as i16
+                })
+                .collect();
+            let mut pkt = Vec::new();
+            enc.encode(&pcm, &mut pkt);
+            assert!(!pkt.is_empty() && pkt.len() < 160);
+            let out = dec.decode(107, &pkt).expect("decodes");
+            assert_eq!(out.len(), 160);
+            if f > 5 {
+                peak_out = peak_out.max(out.iter().map(|s| s.saturating_abs()).max().unwrap());
+            }
+        }
+        assert!(peak_out > 5000, "tone survives: {peak_out}");
+        assert!(dec.decode(0, &[0xff; 160]).is_some(), "G.711 still decodes");
+        assert!(dec.decode(96, &[0; 10]).is_none(), "unknown payload type");
+        assert_eq!(Codec::Opus(111), Codec::Opus(107));
+        assert_eq!(c.clock(), 48000);
+    }
 
     #[test]
     fn g711_roundtrip_is_close() {

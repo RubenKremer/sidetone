@@ -279,21 +279,43 @@ pub fn sdp_body(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| rtp.ip().to_string());
     let fam = if ip.contains(':') { "IP6" } else { "IP4" };
-    let mut pts: Vec<String> = codecs.iter().map(|c| c.pt().to_string()).collect();
+    // telephone-event uses the clock of the audio codec: offer it at 8000 for
+    // G.711 and at 48000 for Opus, each with its own payload type.
+    let mut events: Vec<(u8, u32)> = Vec::new();
     if let Some(p) = dtmf_pt {
-        pts.push(p.to_string());
+        let narrow = codecs.iter().any(|c| c.clock() == 8000);
+        let wide = codecs.iter().any(|c| c.clock() == 48000);
+        if narrow || !wide {
+            events.push((p, 8000));
+        }
+        if wide {
+            let p2 = if narrow {
+                (96..=127u8)
+                    .rev()
+                    .find(|x| *x != p && !codecs.iter().any(|c| c.pt() == *x))
+                    .unwrap_or(p)
+            } else {
+                p
+            };
+            events.push((p2, 48000));
+        }
     }
+    let mut pts: Vec<String> = codecs.iter().map(|c| c.pt().to_string()).collect();
+    pts.extend(events.iter().map(|(p, _)| p.to_string()));
     let mut s = format!(
         "v=0\r\no=sidetone {sess_id} {version} IN {fam} {ip}\r\ns=Sidetone\r\nc=IN {fam} {ip}\r\nt=0 0\r\nm=audio {} RTP/AVP {}\r\n",
         rtp.port(),
         pts.join(" ")
     );
     for c in codecs {
-        s.push_str(&format!("a=rtpmap:{} {}/8000\r\n", c.pt(), c.name()));
+        s.push_str(&format!("a=rtpmap:{} {}\r\n", c.pt(), c.rtpmap()));
+        if let Codec::Opus(pt) = c {
+            s.push_str(&format!("a=fmtp:{pt} useinbandfec=1\r\n"));
+        }
     }
-    if let Some(p) = dtmf_pt {
+    for (p, rate) in events {
         s.push_str(&format!(
-            "a=rtpmap:{p} telephone-event/8000\r\na=fmtp:{p} 0-16\r\n"
+            "a=rtpmap:{p} telephone-event/{rate}\r\na=fmtp:{p} 0-16\r\n"
         ));
     }
     s.push_str(&format!("a=ptime:{}\r\na={direction}\r\n", b.ptime_ms));
@@ -303,7 +325,7 @@ pub fn sdp_body(
     s
 }
 
-/// Codecs of the profile in preference order (G.711 only for now).
+/// Codecs of the profile in preference order (PCMU, PCMA, Opus).
 pub fn profile_codecs(b: &Behavior) -> Vec<Codec> {
     let v: Vec<Codec> = b
         .codecs

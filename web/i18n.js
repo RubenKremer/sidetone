@@ -366,7 +366,7 @@ const T = {
   "RFC 3261 retransmission base, 500 by default": ["base de retransmissão da RFC 3261, 500 por padrão", "base de retransmisión de RFC 3261, 500 por defecto", "Basis der Wiederholungen nach RFC 3261, Standard 500"],
   "Codecs, in order of preference": ["Codecs, em ordem de preferência", "Códecs, por orden de preferencia", "Codecs in Reihenfolge der Präferenz"],
   "Up": ["Subir", "Subir", "Hoch"],
-  "This build sends and receives G.711. Other codecs in a capture are still analyzed.": ["Esta versão envia e recebe G.711. Outros codecs em uma captura continuam sendo analisados.", "Esta versión envía y recibe G.711. Otros códecs de una captura se siguen analizando.", "Diese Version sendet und empfängt G.711. Andere Codecs im Mitschnitt werden trotzdem analysiert."],
+  "Opus is encoded from the phone's 8 kHz audio (narrowband) on a 48 kHz RTP clock, with in-band FEC.": ["O Opus é codificado a partir do áudio de 8 kHz do telefone (banda estreita) com clock RTP de 48 kHz e FEC in-band.", "Opus se codifica a partir del audio de 8 kHz del teléfono (banda estrecha) con reloj RTP de 48 kHz y FEC en banda.", "Opus wird aus dem 8-kHz-Audio des Telefons (Schmalband) mit 48-kHz-RTP-Takt und In-Band-FEC kodiert."],
   "Packet time (ms)": ["Tempo do pacote (ms)", "Tiempo de paquete (ms)", "Paketzeit (ms)"],
   "Direction offered": ["Direção oferecida", "Dirección ofrecida", "Angebotene Richtung"],
   "Send DTMF as": ["Enviar DTMF como", "Enviar DTMF como", "DTMF senden als"],

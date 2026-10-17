@@ -1760,12 +1760,13 @@ function fieldHtml(f, value, id) {
     case "select":
       return `<label class="fld">${esc(label)} ${h}<select id="${id}">${opts.map(([v, t]) => `<option value="${esc(v)}" ${String(value) === v ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label>`;
     case "codecs": {
-      const all = ["PCMU", "PCMA"];
+      const all = ["PCMU", "PCMA", "opus"];
+      const CODEC_NAMES = { PCMU: "PCMU (G.711 μ-law)", PCMA: "PCMA (G.711 A-law)", opus: "Opus" };
       const cur = (value || []).filter((c) => all.includes(c));
       const order = [...cur, ...all.filter((c) => !cur.includes(c))];
       return `<div class="fld"><span>${esc(label)}</span><ol class="codecs" id="${id}">${order
-        .map((c) => `<li data-codec="${c}"><label class="check"><input type="checkbox" ${cur.includes(c) ? "checked" : ""}> ${c === "PCMU" ? "PCMU (G.711 μ-law)" : "PCMA (G.711 A-law)"}</label><button type="button" class="linklike" data-up>Up</button></li>`)
-        .join("")}</ol><span class="hint">This build sends and receives G.711. Other codecs in a capture are still analyzed.</span></div>`;
+        .map((c) => `<li data-codec="${c}"><label class="check"><input type="checkbox" ${cur.includes(c) ? "checked" : ""}> ${CODEC_NAMES[c]}</label><button type="button" class="linklike" data-up>Up</button></li>`)
+        .join("")}</ol><span class="hint">Opus is encoded from the phone's 8 kHz audio (narrowband) on a 48 kHz RTP clock, with in-band FEC.</span></div>`;
     }
     case "lines":
       return `<label class="fld">${esc(label)} ${h}<textarea id="${id}" rows="6" spellcheck="false">${esc((value || []).join("\n"))}</textarea></label>`;
@@ -1988,12 +1989,13 @@ function invitePreview(acc) {
     `${hn("Content-Type")}: application/sdp`,
   ];
   const ip = b.sdp_ip_override || local.split(":")[0];
-  const pts = (b.codecs || []).map((c) => (c === "PCMA" ? 8 : 0));
+  const cpt = (c) => (c === "PCMA" ? 8 : c === "opus" ? 111 : 0);
+  const pts = (b.codecs || []).map(cpt);
   const dt = b.dtmf_mode === "rfc4733" ? [b.dtmf_payload_type] : [];
   const sdp = [
     "v=0", `o=sidetone 1 1 IN IP4 ${ip}`, "s=Sidetone", `c=IN IP4 ${ip}`, "t=0 0",
     `m=audio ${b.rtp_port_start} RTP/AVP ${[...pts, ...dt].join(" ")}`,
-    ...(b.codecs || []).map((c) => `a=rtpmap:${c === "PCMA" ? 8 : 0} ${c}/8000`),
+    ...(b.codecs || []).flatMap((c) => (c === "opus" ? ["a=rtpmap:111 opus/48000/2", "a=fmtp:111 useinbandfec=1"] : [`a=rtpmap:${cpt(c)} ${c}/8000`])),
     ...(dt.length ? [`a=rtpmap:${dt[0]} telephone-event/8000`, `a=fmtp:${dt[0]} 0-16`] : []),
     `a=ptime:${b.ptime_ms}`, `a=${b.sdp_direction}`,
   ];
