@@ -97,7 +97,9 @@ pub fn build_request(cfg: &AiConfig, system: &str, user: &str, browser: bool) ->
             // (".../v1", Gemini's ".../v1beta/openai") gets "/chat/completions".
             let url = if base.ends_with("/chat/completions") {
                 base.to_string()
-            } else if base.ends_with("/v1") || (base.ends_with("/openai") && base.contains("/v1beta")) {
+            } else if base.ends_with("/v1")
+                || (base.ends_with("/openai") && base.contains("/v1beta"))
+            {
                 format!("{base}/chat/completions")
             } else {
                 format!("{base}/v1/chat/completions")
