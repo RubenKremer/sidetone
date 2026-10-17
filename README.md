@@ -33,9 +33,9 @@
 <br>
 
 <p align="center">
-  <img src="docs/images/sidetone-phone.jpg" alt="Sidetone on the desktop: the phone panel on the left with account Lab 2001 registered, Call and Hang up, a toolbar with Resume, Mute, Transfer, Record, Keypad, DND, Auto answer and Analyze, the transfer box open with Blind and Consult first, the keypad and three lines (one on hold); on the right the Calls page with the current call's media addresses, codec and RTP counters, the phone event log and the call history with 404 and 486 results" width="100%">
+  <img src="docs/images/sidetone-phone.jpg" alt="Sidetone on the desktop: the phone panel on the left with account Lab 2001 registered, the toolbar with Conference active, the keypad, BLF lamps showing 3001 busy and 5001 free, and three connected lines, two of them joined in a conference; on the right the current call with Opus as codec, media addresses and RTP counters, the phone event log ending in conference: lines 4 and 6 joined, and the call history with 404 and 486 results" width="100%">
   <br>
-  <sub>Three lines on one account: a call on hold, a transfer about to happen, every event and result in plain words.</sub>
+  <sub>Three lines, two of them in a local conference, Opus on the wire, BLF lamps, every event and result in plain words.</sub>
 </p>
 
 <p align="center">
@@ -116,11 +116,11 @@ are in the dark theme (the Theme button, or your system setting).
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <img src="docs/images/sidetone-settings.jpg" alt="Account settings on the Advanced SIP tab: User-Agent, Max-Forwards, session timer, user=phone and compact header names ticked, PRACK, GRUU, long Contact, Proxy-Require and skip ACK, with a preview of the INVITE this account sends using compact header names and user=phone" width="100%">
+      <img src="docs/images/sidetone-settings.jpg" alt="Account settings on the Media tab: codecs in order of preference with Opus, PCMU and PCMA ticked, SRTP media encryption set to Optional, packet time and offered direction, and tabs for Account, Server and registration, Network, Media, DTMF, Advanced SIP, Headers and BLF" width="100%">
       <br>
-      <sub>Account settings with a live preview of the INVITE they produce.</sub>
+      <sub>Per-account media: Opus and G.711 in your order, SRTP off, optional or required.</sub>
       <h3>Every knob a desk phone has, and a preview</h3>
-      Per account: outbound proxy, expiry and retry, keepalives, local IP and port, rport, symmetric RTP, RTP ports, DSCP, SDP address override, T1, codec order, ptime, DTMF mode and payload type, session timers, <code>user=phone</code>, compact headers, PRACK, GRUU, long Contact, extra headers. Some exist to reproduce a broken client on purpose, like skipping the ACK.
+      Per account: UDP, TCP or TLS, outbound proxy, expiry and retry, keepalives, local IP and port, rport, symmetric RTP, RTP ports, DSCP, SDP address override, T1, codec order (Opus, PCMU, PCMA), SRTP, ptime, DTMF mode and payload type, session timers, <code>user=phone</code>, compact headers, PRACK, GRUU, long Contact, extra headers, BLF extensions, and a preview of the INVITE they produce. Some exist to reproduce a broken client on purpose, like skipping the ACK.
     </td>
     <td width="50%" valign="top">
       <img src="docs/images/sidetone-diag.jpg" alt="Dark theme: the Diagnostics page with an OPTIONS ping answered 200 OK in 4 ms by Asterisk, a DNS lookup showing where UDP requests go, the NAT card with STUN servers and what the SIP server sees for each account, and the Audio card with microphone and speaker choice, level meters and a loopback test" width="100%">
@@ -132,18 +132,29 @@ are in the dark theme (the Theme button, or your system setting).
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <img src="docs/images/sidetone-ai.jpg" alt="Dark theme: the Ask AI tab with provider, model, base URL, API key, language, a masking checkbox ticked, a question about a remote worker, and the masked prompt preview" width="100%">
+      <img src="docs/images/sidetone-ai.jpg" alt="Dark theme: a capture with one NAT call in Analysis, the ladder with retransmitted 200 OK responses, and the Ask AI tab showing the provider and model from Settings, a masking checkbox ticked, a question about a remote worker, and the masked prompt preview" width="100%">
       <br>
       <sub>Ask AI, with "Show what will be sent" before anything leaves.</sub>
       <h3>An AI second opinion</h3>
       An AI panel docked under any page lets you hold a conversation about the selected call, the live trace or a capture: the model gets the findings, the ladder, the RTP statistics and the relevant raw messages, masked by default. Configure it once in Settings, AI: Anthropic, any OpenAI-compatible service (OpenAI, Gemini, OpenRouter, Groq, Mistral, DeepSeek, LM Studio, vLLM) or a local Ollama, with a connection test.
     </td>
     <td width="50%" valign="top">
-      <img src="docs/images/sidetone-webrtc.jpg" alt="The browser version registered over WebSocket as 4001, a call to 600 connected with Opus, live packet counters and the ICE path, the phone events and DTMF sent as RFC 4733" width="100%">
+      <img src="docs/images/sidetone-webrtc.jpg" alt="The browser version registered over WebSocket as 4001, a call to 600 connected with Opus over DTLS-SRTP, live packet counters and the ICE path, the phone events and DTMF sent as RFC 4733" width="100%">
       <br>
       <sub>No install: the browser version on GitHub Pages, calling over WebRTC.</sub>
       <h3>The same phone in the browser</h3>
       On GitHub Pages Sidetone talks SIP over WebSocket (RFC 7118) with WebRTC audio, so it reaches any PBX or SBC with a WSS listener. One line at a time with hold, mute, blind transfer and DTMF; analysis runs in the page through WebAssembly.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/sidetone-help.jpg" alt="The interface in Portuguese (Brazil): the Help page with sections on getting started, making calls, hold and transfer, and TCP, TLS, SRTP, BLF and conference, and the language selector" width="100%">
+      <br>
+      <sub>The interface and the built-in help in Portuguese.</sub>
+      <h3>Your language, with help built in</h3>
+      English, Portuguese (Brazil), Spanish and German, switched in Settings or on the Help page. SIP messages, traces and findings stay in English, so what you paste into a ticket reads the same for everyone. Help covers accounts, calls, transfers, TCP/TLS, SRTP, BLF, conference, analysis and common problems.
+    </td>
+    <td width="50%" valign="top">
     </td>
   </tr>
 </table>

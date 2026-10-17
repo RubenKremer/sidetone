@@ -5,7 +5,8 @@
 //   CHROME_PATH=/path/to/chrome node scripts/readme-shots.mjs http://127.0.0.1:8640 docs/images
 //
 // Needs `npm i puppeteer-core`. Use an empty config dir: the script replaces
-// the accounts with the lab ones (2001, 3001 over UDP, 4001 over WebSocket).
+// the accounts with the lab ones (2001 over UDP watching 3001 and 5001 on BLF,
+// 3001 over TCP, 4001 over WebSocket).
 // Screenshots are PNG; convert to JPEG for the README.
 import puppeteer from "puppeteer-core";
 import { mkdirSync } from "node:fs";
@@ -48,14 +49,16 @@ const selectCall = (p, pred) =>
 const tab = (p, t) => p.click(`[data-tab="${t}"]`);
 
 // ---- lab accounts on the native engine
-const lab = (id, label, user, pass) => ({
-  id, label, enabled: true, register: true, retry_s: 30,
+const lab = (id, label, user, pass, blf = []) => ({
+  id, label, enabled: true, register: true, retry_s: 30, blf,
   profile: { name: "", account: { user, auth_user: null, password: pass, domain: "127.0.0.1:5070", display_name: label, outbound_proxy: null, expires: 300, q_value: null } },
 });
 const cfg = await api("/api/phone/config");
 const behavior = cfg.accounts[0]?.profile?.behavior;
-const accounts = [lab("1", "Lab 2001", "2001", "secret2001"), lab("2", "Lab 3001", "3001", "secret3001")];
-if (behavior) accounts.forEach((a) => (a.profile.behavior = behavior));
+const accounts = [lab("1", "Lab 2001", "2001", "secret2001", ["3001", "5001"]), lab("2", "Lab 3001", "3001", "secret3001")];
+accounts.forEach((a) => (a.profile.behavior = { ...(behavior || {}) }));
+accounts[0].profile.behavior.codecs = ["opus", "PCMU", "PCMA"];
+accounts[1].profile.behavior.transport = "tcp";
 // No sound card on a CI or headless machine: calls send a test tone.
 await api("/api/phone/config", { accounts, settings: { ...cfg.settings, audio_source: "tone", auto_hold: false, record_calls: false }, audio: { enabled: false } });
 await api("/api/phone/history/clear", {});
@@ -99,7 +102,7 @@ for (const [t, ms] of [["600", 2500], ["602", 1500], ["603", 1500]]) {
 }
 await wait(1000);
 
-// ---- the phone: 2001 talks to 3001 (held) and consults the echo service
+// ---- the phone: 2001 talks to 3001 over TCP, calls the echo service and joins both
 await shot("sidetone-phone", {
   url: "/?page=calls",
   steps: async (p) => {
@@ -110,16 +113,14 @@ await shot("sidetone-phone", {
     if (inc) await api("/api/phone/cmd", { cmd: "answer", line: inc.line });
     await wait(1500);
     await api("/api/phone/cmd", { cmd: "dtmf", line: inc.line, digits: "42" });
-    await api("/api/phone/cmd", { cmd: "hold", line: a.line, on: true });
-    await wait(800);
     await p.evaluate(() => { document.getElementById("dial").value = "600"; });
     await p.click("#btn-call");
-    await wait(3500);
-    await p.click(`#lines li[data-line="${a.line}"]`);
+    await wait(3000);
+    // Lines re-render every tick, so click through the DOM rather than a held handle.
+    await p.evaluate((l) => document.querySelector(`#lines li[data-line="${l}"]`).click(), a.line);
     await wait(300);
-    await p.click('.tool[data-tool="transfer"]');
-    await p.type("#xfer-to", "600");
-    await wait(600);
+    await p.evaluate(() => document.querySelector('.tool[data-tool="conf"]').click());
+    await wait(2500);
   },
 });
 await shot("sidetone-trace-live", {
@@ -141,12 +142,12 @@ await shot("sidetone-settings", {
   url: "/?page=settings",
   steps: async (p) => {
     await wait(500);
-    await p.click('[data-acctab="5"]');
+    await p.click('[data-acctab="3"]'); // Media: codecs and SRTP
     await wait(300);
-    await p.click("#af-3"); // user=phone
-    await p.click("#af-4"); // compact headers
-    await wait(300);
-    await p.evaluate(() => document.querySelector(".ws").scrollTo(0, 160));
+    await p.evaluate(() => {
+      const s = [...document.querySelectorAll("#set-body select")].find((x) => [...x.options].some((o) => o.value === "mandatory"));
+      if (s) s.value = "optional";
+    });
   },
 });
 await shot("sidetone-diag", {
@@ -177,5 +178,16 @@ await shot("sidetone-webrtc", {
     await wait(1200);
   },
 });
+
+// ---- the interface in another language: Help in Portuguese
+{
+  const p = await browser.newPage();
+  await p.evaluateOnNewDocument(() => localStorage.setItem("sidetone.lang", "pt"));
+  await p.goto(base + "/?page=help", { waitUntil: "load" });
+  await wait(1500);
+  await p.screenshot({ path: `${out}/sidetone-help.png` });
+  await p.close();
+  console.log("captured", "sidetone-help");
+}
 
 await browser.close();

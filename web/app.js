@@ -760,7 +760,7 @@ function renderCallDetail() {
       ["Call-ID", m(l.call_id)],
       ["Talk time", l.answered_ms ? dur((l.ended_ms || now) - l.answered_ms) : ""],
       ["Codec", esc(l.codec || "")],
-      ["Media encryption", l.srtp ? `SRTP (AES_CM_128_HMAC_SHA1)${l.srtp_failed ? ` <span class="bad">${l.srtp_failed} packets failed authentication</span>` : ""}` : l.state === "connected" ? "none (RTP)" : ""],
+      ["Media encryption", S.ctl.kind !== "native" && l.state === "connected" ? "DTLS-SRTP (WebRTC)" : l.srtp ? `SRTP (AES_CM_128_HMAC_SHA1)${l.srtp_failed ? ` <span class="bad">${l.srtp_failed} packets failed authentication</span>` : ""}` : l.state === "connected" ? "none (RTP)" : ""],
       ["Local media", l.local_media ? m(l.local_media) : ""],
       ["Remote media", l.remote_media ? m(l.remote_media) : ""],
       ["RTP sent / received", l.rtp_sent || l.rtp_received ? `${l.rtp_sent.toLocaleString()} / ${l.rtp_received.toLocaleString()}${l.state === "connected" && !l.held && l.rtp_sent > 100 && l.rtp_received === 0 ? ` <span class="bad">no audio from the far end</span>` : ""}` : ""],
