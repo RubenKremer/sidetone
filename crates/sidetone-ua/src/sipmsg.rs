@@ -35,28 +35,41 @@ pub fn hn(b: &Behavior, full: &'static str) -> &'static str {
     }
 }
 
+/// Address of record. Without user or domain this is the RFC 3323
+/// anonymous form, used by direct (unregistered) calls.
 pub fn aor(p: &Profile) -> String {
-    format!(
-        "sip:{}@{}",
-        p.account.user,
-        sip::split_host_port(&p.account.domain).0
-    )
+    let user = if p.account.user.trim().is_empty() {
+        "anonymous"
+    } else {
+        p.account.user.trim()
+    };
+    let host = sip::split_host_port(&p.account.domain).0;
+    let host = if host.is_empty() {
+        "anonymous.invalid".to_string()
+    } else {
+        host
+    };
+    format!("sip:{user}@{host}")
 }
 
 pub fn from_header(p: &Profile, tag: &str) -> String {
-    let name = p
-        .account
-        .display_name
-        .clone()
-        .filter(|n| !n.is_empty())
-        .map(|n| format!("\"{n}\" "))
-        .unwrap_or_default();
+    let name = if p.account.user.trim().is_empty() {
+        Some("Anonymous".to_string())
+    } else {
+        p.account.display_name.clone().filter(|n| !n.is_empty())
+    };
+    let name = name.map(|n| format!("\"{n}\" ")).unwrap_or_default();
     format!("{name}<{}>;tag={tag}", aor(p))
 }
 
 pub fn contact(p: &Profile, local: SocketAddr, instance: &str, register: bool) -> String {
     let b = &p.behavior;
-    let mut c = format!("<sip:{}@{}>", p.account.user, host_str(local));
+    let user = if p.account.user.trim().is_empty() {
+        "anonymous"
+    } else {
+        p.account.user.trim()
+    };
+    let mut c = format!("<sip:{user}@{}>", host_str(local));
     if register {
         if let Some(q) = &p.account.q_value {
             c.push_str(&format!(";q={q}"));

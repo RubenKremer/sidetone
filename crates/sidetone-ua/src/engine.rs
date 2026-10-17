@@ -467,6 +467,8 @@ struct Acc {
     reg_expires: u32,
     nc: u32,
     last_keepalive: Instant,
+    /// Direct client: no registrar, socket bound to every interface.
+    direct: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1037,6 +1039,7 @@ impl Core {
             reg_expires: 0,
             nc: 0,
             last_keepalive: Instant::now(),
+            direct: false,
         }
     }
 
@@ -1053,9 +1056,35 @@ impl Core {
             .clone()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| p.account.domain.clone());
-        let res = (|| -> Result<(UdpSocket, SocketAddr, SocketAddr), String> {
+        // No domain, no proxy and no registration: a direct (anonymous) SIP client
+        // that calls SIP URIs straight to their host.
+        let direct = server_str.trim().is_empty() && !a.cfg.register;
+        let res = (|| -> Result<(UdpSocket, SocketAddr, Option<SocketAddr>), String> {
+            if direct {
+                let fixed: Option<std::net::IpAddr> = match &p.behavior.local_ip {
+                    Some(s) if !s.is_empty() => {
+                        Some(s.parse().map_err(|_| format!("bad local IP {s}"))?)
+                    }
+                    _ => None,
+                };
+                let bind_ip =
+                    fixed.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+                let sock = crate::media::bind_udp(
+                    SocketAddr::new(bind_ip, p.behavior.local_port),
+                    p.behavior.dscp_sip,
+                )
+                .map_err(|e| format!("cannot bind {bind_ip}:{}: {e}", p.behavior.local_port))?;
+                sock.set_nonblocking(true).map_err(|e| e.to_string())?;
+                let port = sock.local_addr().map_err(|e| e.to_string())?.port();
+                // Advertised address until a call picks the interface towards its target.
+                let ip = fixed.unwrap_or_else(|| {
+                    local_ip_for("192.0.2.1:5060".parse().unwrap())
+                        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+                });
+                return Ok((sock, SocketAddr::new(ip, port), None));
+            }
             if server_str.trim().is_empty() {
-                return Err("no server or domain configured".into());
+                return Err("no server or domain configured (leave Register off and the domain empty for direct calls)".into());
             }
             let server = crate::dns::resolve_sip(&server_str).map_err(|e| e.to_string())?;
             let ip = match &p.behavior.local_ip {
@@ -1069,7 +1098,7 @@ impl Core {
             .map_err(|e| format!("cannot bind {ip}:{}: {e}", p.behavior.local_port))?;
             sock.set_nonblocking(true).map_err(|e| e.to_string())?;
             let local = sock.local_addr().map_err(|e| e.to_string())?;
-            Ok((sock, local, server))
+            Ok((sock, local, Some(server)))
         })();
         let retry = Duration::from_secs(self.accs[ai].cfg.retry_s.max(5) as u64);
         match res {
@@ -1077,7 +1106,8 @@ impl Core {
                 let a = &mut self.accs[ai];
                 a.sock = Some(sock);
                 a.local = local;
-                a.server = Some(server);
+                a.server = server;
+                a.direct = direct;
                 a.error = None;
                 a.reg_call_id = format!("{}@{}", rand_hex(20), local.ip());
                 a.state = if a.cfg.register { "registering" } else { "off" };
@@ -1086,7 +1116,10 @@ impl Core {
                 } else {
                     None
                 };
-                let text = format!("ready on {local}, server {server}");
+                let text = match server {
+                    Some(server) => format!("ready on {local}, server {server}"),
+                    None => format!("ready for direct calls on port {} (no registrar): dial user@host or a SIP URI", local.port()),
+                };
                 self.event("account", None, Some(ai), text);
             }
             Err(e) => {
@@ -1719,6 +1752,7 @@ impl Core {
                 return;
             }
         };
+        self.direct_local(ai, dest);
         let branch = new_branch();
         let a = &self.accs[ai];
         let text = build_request(
@@ -1742,6 +1776,25 @@ impl Core {
             .unwrap()
             .insert(k, (Instant::now(), reply));
         self.start_tx(ai, "OPTIONS", &branch, text, dest, Purpose::Options(k));
+    }
+
+    /// Direct accounts advertise the interface the OS uses towards `dest`.
+    fn direct_local(&mut self, ai: usize, dest: SocketAddr) {
+        let a = &self.accs[ai];
+        let fixed = a
+            .cfg
+            .profile
+            .behavior
+            .local_ip
+            .as_ref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        if a.direct && !fixed {
+            if let Ok(ip) = local_ip_for(dest) {
+                let port = a.local.port();
+                self.accs[ai].local = SocketAddr::new(ip, port);
+            }
+        }
     }
 
     /// Where to send an out-of-dialog request for `ruri`.
@@ -1975,6 +2028,15 @@ impl Core {
             return;
         }
         let p = self.effective_profile(ai, req.overrides.as_ref());
+        if self.accs[ai].direct && !target.contains('@') {
+            self.failed_line(
+                id,
+                ai,
+                &target,
+                "this account has no domain: dial user@host or a full SIP URI".into(),
+            );
+            return;
+        }
         let ruri = sipmsg::target_uri(&p, &target);
         let dest = match self.dest_for(ai, &ruri) {
             Ok(d) => d,
@@ -1983,6 +2045,7 @@ impl Core {
                 return;
             }
         };
+        self.direct_local(ai, dest);
         let local = self.accs[ai].local;
         let b = &p.behavior;
         let rtp = match RtpSession::bind(local.ip(), b.rtp_port_start, b.rtp_port_end, b.dscp_rtp) {

@@ -237,6 +237,7 @@ function accountStateText(a) {
   if (a.state === "failed") return `Registration failed: ${a.code ?? ""} ${a.reason ?? ""}`.trim();
   if (a.state === "unreachable") return `${a.server || a.domain} is not answering. Check address, port and firewall.`;
   if (a.state === "error") return a.error || "Not ready";
+  if (!a.register && !a.domain) return `Direct calls, no registrar: dial user@host or a SIP URI (port ${(a.local || "").split(":").pop()})`;
   if (a.state === "off" && !a.register) return `Ready to call from ${a.local || "here"} (registration off)`;
   return REG_TEXT[a.state] || a.state;
 }
@@ -1435,10 +1436,10 @@ const NATIVE_ACC_TABS = [
     ["profile.account.display_name", "Display name", "opt"],
     ["profile.account.auth_user", "Authentication user", "opt", "only when it differs from the user"],
     ["profile.account.password", "Password", "password"],
-    ["profile.account.domain", "Domain or registrar", "text", "host or host:port. Without a port, DNS SRV (_sip._udp) is tried first."],
+    ["profile.account.domain", "Domain or registrar", "text", "host or host:port. Without a port, DNS SRV (_sip._udp) is tried first. Leave it empty with Register off for an anonymous client that dials SIP URIs directly."],
   ]],
   ["Server and registration", [
-    ["register", "Register", "bool", "turn off for trunks, peer-to-peer tests or call-only use"],
+    ["register", "Register", "bool", "turn off for trunks, peer-to-peer tests, call-only use or direct SIP URI dialing"],
     ["profile.account.outbound_proxy", "Outbound proxy", "opt", "host:port. Every request goes here, whatever the destination."],
     ["profile.account.expires", "Registration expiry (s)", "number"],
     ["retry_s", "Retry a failed registration after (s)", "number"],

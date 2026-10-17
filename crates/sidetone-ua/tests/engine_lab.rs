@@ -222,6 +222,35 @@ fn engine_against_asterisk() {
     wait_for(&e, "all idle", 10, |e| {
         e.state().calls.iter().all(|c| c.state == "ended")
     });
+    // A direct client (no domain, no registration) dials a SIP URI anonymously.
+    let mut d = AccountCfg {
+        id: "direct".into(),
+        register: false,
+        ..Default::default()
+    };
+    d.profile.account.user = String::new();
+    d.profile.account.domain = String::new();
+    let mut all = vec![
+        acc("a", "2001", "secret2001", DtmfMode::Rfc4733),
+        acc("b", "3001", "secret3001", DtmfMode::Info),
+    ];
+    all.push(d);
+    e.cmd(Cmd::SetAccounts(all));
+    std::thread::sleep(Duration::from_millis(500));
+    let server = std::env::var("SIDETONE_LAB_SERVER").unwrap_or_else(|_| "127.0.0.1:5070".into());
+    let l7 = e.call(CallRequest {
+        account: Some("direct".into()),
+        target: format!("sip:600@{server}"),
+        ..Default::default()
+    });
+    wait_for(&e, "anonymous call to a SIP URI connects", 10, |e| {
+        line_state(e, l7) == "connected"
+    });
+    e.cmd(Cmd::HangupAll);
+    wait_for(&e, "idle again", 10, |e| {
+        e.state().calls.iter().all(|c| c.state == "ended")
+    });
+
     let pcap = e.capture();
     assert!(pcap.len() > 10_000, "capture has data");
     let trace = e.trace_since(0, 100000);
