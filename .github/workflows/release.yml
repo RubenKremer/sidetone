@@ -13,6 +13,11 @@ on:
 permissions:
   contents: write
 
+# One release build at a time: overlapping runs replace each other's files.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
