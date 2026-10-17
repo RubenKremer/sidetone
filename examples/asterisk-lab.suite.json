@@ -1,0 +1,142 @@
+{
+  "name": "Lab PBX smoke tests",
+  "description": "Registration, echo test with DTMF, busy and unknown numbers. Run against the local Asterisk from docs/asterisk-lab.",
+  "profile": {
+    "account": {
+      "user": "2001",
+      "password": "${SIP_PASSWORD}",
+      "domain": "127.0.0.1:5070"
+    }
+  },
+  "cases": [
+    {
+      "name": "register",
+      "steps": [
+        {
+          "register": {
+            "expect_status": 200
+          }
+        },
+        {
+          "unregister": {
+            "expect_status": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "echo test with DTMF",
+      "steps": [
+        {
+          "call": {
+            "target": "600",
+            "duration": 4,
+            "dtmf": "123#",
+            "expect": {
+              "status": 200,
+              "min_mos": 4.0,
+              "max_loss_pct": 1,
+              "rtp_received": true,
+              "codec": "PCMU",
+              "rules_present": [
+                "rtp.dtmf"
+              ],
+              "rules_absent": [
+                "rtp.one_way"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "PCMA only",
+      "profile": {
+        "behavior": {
+          "codecs": [
+            "PCMA"
+          ]
+        }
+      },
+      "steps": [
+        {
+          "call": {
+            "target": "600",
+            "duration": 2,
+            "expect": {
+              "status": 200,
+              "codec": "PCMA"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "DTMF via SIP INFO",
+      "profile": {
+        "behavior": {
+          "dtmf_mode": "info"
+        }
+      },
+      "steps": [
+        {
+          "call": {
+            "target": "600",
+            "duration": 3,
+            "dtmf": "5",
+            "expect": {
+              "status": 200,
+              "rules_absent": [
+                "rtp.one_way"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "busy extension returns 486",
+      "steps": [
+        {
+          "call": {
+            "target": "602",
+            "expect": {
+              "status": 486
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "wrong password is rejected",
+      "profile": {
+        "account": {
+          "password": "wrong"
+        }
+      },
+      "steps": [
+        {
+          "register": {
+            "expect_status": 401
+          }
+        }
+      ]
+    },
+    {
+      "name": "unallocated number returns 404",
+      "steps": [
+        {
+          "call": {
+            "target": "603",
+            "expect": {
+              "status": 404,
+              "rules_present": [
+                "sip.call_failed"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

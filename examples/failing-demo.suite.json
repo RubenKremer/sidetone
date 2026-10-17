@@ -1,0 +1,27 @@
+{
+  "name": "Failing on purpose",
+  "description": "Shows how failures look and how --ai-explain annotates them.",
+  "profile": {
+    "account": {
+      "user": "2001",
+      "password": "${SIP_PASSWORD}",
+      "domain": "127.0.0.1:5070"
+    }
+  },
+  "cases": [
+    {
+      "name": "deliberately failing: expects G.729",
+      "steps": [
+        {
+          "call": {
+            "target": "600",
+            "duration": 2,
+            "expect": {
+              "codec": "G729"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+/target
+/web/pkg
+/sidetone-results
+*.pcap
+*.pcapng
+*.wav
+!/samples/*.pcapng
+node_modules
+app/src-tauri/gen

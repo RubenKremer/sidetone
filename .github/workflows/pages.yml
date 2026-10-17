@@ -1,0 +1,51 @@
+name: Web app (GitHub Pages)
+
+# Builds the analyzer to WebAssembly and publishes web/ to GitHub Pages,
+# e.g. https://igtoth.github.io/sidetone/
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Build WASM
+        run: cargo build -p sidetone-wasm --target wasm32-unknown-unknown --release
+      - name: Generate JS bindings
+        run: |
+          version=$(cargo metadata --format-version 1 --locked | jq -r '.packages[] | select(.name=="wasm-bindgen") | .version')
+          cargo install wasm-bindgen-cli --version "$version" --locked
+          wasm-bindgen --target web --no-typescript --out-dir web/pkg target/wasm32-unknown-unknown/release/sidetone_wasm.wasm
+      - name: Optimize size
+        run: |
+          npx --yes -p binaryen wasm-opt web/pkg/sidetone_wasm_bg.wasm -Os -o web/pkg/sidetone_wasm_bg.wasm || echo "wasm-opt not available, keeping unoptimized build"
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

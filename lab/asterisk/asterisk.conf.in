@@ -1,0 +1,10 @@
+[directories]
+astetcdir => @DIR@
+astrundir => @DIR@/run
+astlogdir => @DIR@/log
+astspooldir => @DIR@/spool
+astdbdir => @DIR@/db
+astmoddir => /usr/lib/x86_64-linux-gnu/asterisk/modules
+astvarlibdir => /var/lib/asterisk
+astdatadir => /usr/share/asterisk
+[options]

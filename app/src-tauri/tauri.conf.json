@@ -1,0 +1,29 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Sidetone",
+  "version": "0.1.0",
+  "identifier": "io.github.igtoth.sidetone",
+  "build": {
+    "frontendDist": "../../web"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "SIP softphone and call analyzer",
+    "longDescription": "Sidetone places and answers SIP test calls, analyzes pcap/pcapng captures, draws ladder diagrams, measures RTP quality and asks an AI model to interpret problems.",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    },
+    "linux": {
+      "deb": { "depends": [] }
+    }
+  }
+}

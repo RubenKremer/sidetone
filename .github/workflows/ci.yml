@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --exclude sidetone-desktop
+      - name: Unit tests
+        run: cargo test --workspace --exclude sidetone-desktop
+      - name: CLI smoke test
+        shell: bash
+        run: |
+          cargo run -q -p sidetone-cli -- samples samples-out
+          cargo run -q -p sidetone-cli -- analyze samples-out/demo.pcapng > /dev/null
+          cargo run -q -p sidetone-cli -- export samples-out/nat-one-way.pcapng -o annotated.pcapng --redact
+
+  wasm:
+    name: WASM build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build -p sidetone-wasm --target wasm32-unknown-unknown --release
+
+  lab:
+    name: Integration tests against Asterisk
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Asterisk and tshark
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y asterisk tshark
+          sudo systemctl stop asterisk || true
+      - name: Start lab PBX
+        run: ./lab/run-asterisk.sh "$RUNNER_TEMP/asterisk"
+      - name: Run test suite
+        env:
+          SIP_PASSWORD: secret2001
+        run: cargo run -q -p sidetone-cli -- test examples/asterisk-lab.suite.json --out lab-results --junit lab-results/junit.xml
+      - name: Exported captures open in Wireshark
+        run: |
+          for f in lab-results/*.pcapng; do tshark -r "$f" -q -z sip,stat > /dev/null; done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lab-results
+          path: lab-results

@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sidetone-core",
+    "crates/sidetone-ua",
+    "crates/sidetone-cli",
+    "crates/sidetone-wasm",
+    "app/src-tauri",
+]
+# The desktop shell needs system WebView libraries; build it explicitly with `cargo tauri build`.
+default-members = [
+    "crates/sidetone-core",
+    "crates/sidetone-ua",
+    "crates/sidetone-cli",
+    "crates/sidetone-wasm",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/igtoth/sidetone"
+authors = ["Ighor Toth"]
+rust-version = "1.80"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sidetone-core = { path = "crates/sidetone-core" }
+sidetone-ua = { path = "crates/sidetone-ua" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true
+
+[profile.release.package.sidetone-wasm]
+opt-level = "s"

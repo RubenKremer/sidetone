@@ -1,0 +1,17 @@
+[package]
+name = "sidetone-desktop"
+description = "Sidetone desktop app (Linux, Windows, macOS)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+sidetone-cli = { path = "../../crates/sidetone-cli" }
+anyhow = "1"
+rfd = "0.15"
