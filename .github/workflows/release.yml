@@ -35,7 +35,7 @@ jobs:
           tag_name: ${{ steps.t.outputs.tag }}
           target_commitish: ${{ github.sha }}
           name: Sidetone ${{ steps.t.outputs.tag }}
-          prerelease: true
+          prerelease: false
           body: |
             Alpha build of Sidetone. Desktop app: the installer for your system (.msi or -setup.exe on Windows, .dmg on macOS, .AppImage, .deb or .rpm on Linux). Command line: the sidetone-* archive for your platform.
 
@@ -80,7 +80,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.meta.outputs.tag }}
-          prerelease: true
+          prerelease: false
           files: |
             dist/*.tar.gz
             dist/*.zip
@@ -134,4 +134,4 @@ jobs:
           tagName: ${{ needs.meta.outputs.tag }}
           releaseName: Sidetone ${{ needs.meta.outputs.tag }}
           releaseDraft: false
-          prerelease: true
+          prerelease: false
