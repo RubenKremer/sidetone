@@ -1,10 +1,13 @@
 name: Release
 
-# Push a tag like v0.1.0 to build the CLI and the desktop app for Linux,
-# Windows and macOS and attach everything to a GitHub release.
+# Builds the CLI and the desktop app for Linux, Windows and macOS and
+# attaches everything to one GitHub pre-release. Triggered by a tag like
+# v0.1.0, or by pushing the `release` branch (the tag is then v + the
+# workspace version, created by this workflow).
 on:
   push:
     tags: ["v*"]
+    branches: [release]
   workflow_dispatch:
 
 permissions:
@@ -14,8 +17,33 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  meta:
+    name: Create the release
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.t.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: t
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then tag="${GITHUB_REF_NAME}"; else
+            tag="v$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"; fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.t.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Sidetone ${{ steps.t.outputs.tag }}
+          prerelease: true
+          body: |
+            Alpha build of Sidetone. Desktop app: the installer for your system (.msi or -setup.exe on Windows, .dmg on macOS, .AppImage, .deb or .rpm on Linux). Command line: the sidetone-* archive for your platform.
+
+            The installers are not signed yet: on Windows choose "More info, Run anyway"; on macOS right-click the app and choose Open the first time.
+
   cli:
     name: CLI ${{ matrix.target }}
+    needs: meta
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -42,7 +70,7 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          name="sidetone-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          name="sidetone-${{ needs.meta.outputs.tag }}-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/sidetone${{ matrix.ext }}" "dist/$name/"
           cp README.md LICENSE "dist/$name/"
@@ -50,9 +78,8 @@ jobs:
           cd dist
           if [ "${{ runner.os }}" = "Windows" ]; then 7z a "$name.zip" "$name" > /dev/null; else tar czf "$name.tar.gz" "$name"; fi
       - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
         with:
-          name: Sidetone ${{ github.ref_name }}
+          tag_name: ${{ needs.meta.outputs.tag }}
           prerelease: true
           files: |
             dist/*.tar.gz
@@ -64,6 +91,7 @@ jobs:
 
   desktop:
     name: Desktop ${{ matrix.label }}
+    needs: meta
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -103,7 +131,7 @@ jobs:
           projectPath: app
           tauriScript: npx --yes @tauri-apps/cli@2
           args: ${{ matrix.args }}
-          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
-          releaseName: Sidetone ${{ github.ref_name }}
+          tagName: ${{ needs.meta.outputs.tag }}
+          releaseName: Sidetone ${{ needs.meta.outputs.tag }}
           releaseDraft: false
           prerelease: true
