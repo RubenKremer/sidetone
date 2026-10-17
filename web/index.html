@@ -46,6 +46,7 @@
     <button type="button" role="tab" data-ws="analysis">Analysis</button>
     <button type="button" role="tab" data-ws="diag">Diagnostics</button>
     <button type="button" role="tab" data-ws="settings">Settings</button>
+    <button type="button" role="tab" data-ws="help">Help</button>
   </nav>
   <div class="bar-right">
     <label class="btn small" for="file">Open capture<input id="file" type="file" accept=".pcap,.pcapng,.cap" hidden></label>
@@ -307,6 +308,9 @@
       </div>
     </section>
 
+    <!-- Help and About -->
+    <section class="ws-page" data-page="help" hidden id="help-page"></section>
+
     <!-- Settings -->
     <section class="ws-page" data-page="settings" hidden>
       <div class="settings">
@@ -319,6 +323,7 @@
             <li><button type="button" data-set="audio">Audio</button></li>
             <li><button type="button" data-set="capture">Capture and recording</button></li>
             <li><button type="button" data-set="keys">Keyboard</button></li>
+            <li><button type="button" data-set="lang">Language</button></li>
           </ol>
         </nav>
         <div class="set-body" id="set-body"></div>

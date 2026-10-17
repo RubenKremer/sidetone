@@ -166,7 +166,7 @@ are in the dark theme (the Theme button, or your system setting).
     </td>
     <td width="33%" valign="top">
       <h4>The phone</h4>
-      Several accounts with re-registration at 90% of the expiry and retry on failure &middot; digest auth (MD5, qop auth) &middot; several lines with automatic hold &middot; hold and resume by re-INVITE &middot; mute &middot; blind transfer (REFER) and attended transfer (REFER with Replaces), and being transferred &middot; DTMF as RFC 4733, SIP INFO or inband tones, and received digits shown &middot; DND and auto answer with the reject code you choose &middot; intercom answer (Call-Info, Alert-Info) &middot; PRACK, UPDATE, session timers, late offer &middot; ringback and ring tones &middot; per-call WAV recording &middot; DNS SRV and outbound proxy &middot; direct, unregistered calls to any SIP URI (anonymous From, for testing URI dialing) &middot; dial strings with headers and post-answer DTMF (<code>600?Subject=x,,123#</code>) &middot; G.711 &mu;-law and A-law &middot; WebRTC with Opus, ICE and DTLS-SRTP in the browser
+      Several accounts with re-registration at 90% of the expiry and retry on failure &middot; digest auth (MD5, qop auth) &middot; several lines with automatic hold &middot; hold and resume by re-INVITE &middot; mute &middot; blind transfer (REFER) and attended transfer (REFER with Replaces), and being transferred &middot; DTMF as RFC 4733, SIP INFO or inband tones, and received digits shown &middot; DND and auto answer with the reject code you choose &middot; intercom answer (Call-Info, Alert-Info) &middot; PRACK, UPDATE, session timers, late offer &middot; ringback and ring tones &middot; per-call WAV recording &middot; DNS SRV and outbound proxy &middot; direct, unregistered calls to any SIP URI (anonymous From, for testing URI dialing) &middot; dial strings with headers and post-answer DTMF (<code>600?Subject=x,,123#</code>) &middot; G.711 &mu;-law and A-law &middot; interface in English, Portuguese (Brazil), Spanish and German, with built-in help &middot; WebRTC with Opus, ICE and DTLS-SRTP in the browser
     </td>
   </tr>
   <tr>
@@ -317,15 +317,15 @@ WebSocket and WebRTC endpoints, echo, busy and unallocated numbers).
 
 Each version gets a release with installers for every platform: take the
 [latest release](https://github.com/igtoth/sidetone/releases/latest), or
-pick a file below (version 0.1.0).
+pick a file below (version 0.1.1).
 
 | Platform | Desktop app | Command line |
 |---|---|---|
-| Windows 10/11 (x64) | [Installer (.exe)](https://github.com/igtoth/sidetone/releases/download/v0.1.0/Sidetone_0.1.0_x64-setup.exe) &middot; [MSI](https://github.com/igtoth/sidetone/releases/download/v0.1.0/Sidetone_0.1.0_x64_en-US.msi) | [sidetone-v0.1.0-x86_64-pc-windows-msvc.zip](https://github.com/igtoth/sidetone/releases/download/v0.1.0/sidetone-v0.1.0-x86_64-pc-windows-msvc.zip) |
-| macOS 11+ (Apple silicon) | [Sidetone_0.1.0_aarch64.dmg](https://github.com/igtoth/sidetone/releases/download/v0.1.0/Sidetone_0.1.0_aarch64.dmg) | [sidetone-v0.1.0-aarch64-apple-darwin.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.0/sidetone-v0.1.0-aarch64-apple-darwin.tar.gz) |
-| macOS 11+ (Intel) | [Sidetone_0.1.0_x64.dmg](https://github.com/igtoth/sidetone/releases/download/v0.1.0/Sidetone_0.1.0_x64.dmg) | [sidetone-v0.1.0-x86_64-apple-darwin.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.0/sidetone-v0.1.0-x86_64-apple-darwin.tar.gz) |
-| Linux (x86_64) | [AppImage](https://github.com/igtoth/sidetone/releases/download/v0.1.0/Sidetone_0.1.0_amd64.AppImage) &middot; [.deb](https://github.com/igtoth/sidetone/releases/download/v0.1.0/Sidetone_0.1.0_amd64.deb) &middot; [.rpm](https://github.com/igtoth/sidetone/releases/download/v0.1.0/Sidetone-0.1.0-1.x86_64.rpm) | [sidetone-v0.1.0-x86_64-unknown-linux-gnu.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.0/sidetone-v0.1.0-x86_64-unknown-linux-gnu.tar.gz) |
-| Linux (arm64) | | [sidetone-v0.1.0-aarch64-unknown-linux-gnu.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.0/sidetone-v0.1.0-aarch64-unknown-linux-gnu.tar.gz) |
+| Windows 10/11 (x64) | [Installer (.exe)](https://github.com/igtoth/sidetone/releases/download/v0.1.1/Sidetone_0.1.1_x64-setup.exe) &middot; [MSI](https://github.com/igtoth/sidetone/releases/download/v0.1.1/Sidetone_0.1.1_x64_en-US.msi) | [sidetone-v0.1.1-x86_64-pc-windows-msvc.zip](https://github.com/igtoth/sidetone/releases/download/v0.1.1/sidetone-v0.1.1-x86_64-pc-windows-msvc.zip) |
+| macOS 11+ (Apple silicon) | [Sidetone_0.1.1_aarch64.dmg](https://github.com/igtoth/sidetone/releases/download/v0.1.1/Sidetone_0.1.1_aarch64.dmg) | [sidetone-v0.1.1-aarch64-apple-darwin.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.1/sidetone-v0.1.1-aarch64-apple-darwin.tar.gz) |
+| macOS 11+ (Intel) | [Sidetone_0.1.1_x64.dmg](https://github.com/igtoth/sidetone/releases/download/v0.1.1/Sidetone_0.1.1_x64.dmg) | [sidetone-v0.1.1-x86_64-apple-darwin.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.1/sidetone-v0.1.1-x86_64-apple-darwin.tar.gz) |
+| Linux (x86_64) | [AppImage](https://github.com/igtoth/sidetone/releases/download/v0.1.1/Sidetone_0.1.1_amd64.AppImage) &middot; [.deb](https://github.com/igtoth/sidetone/releases/download/v0.1.1/Sidetone_0.1.1_amd64.deb) &middot; [.rpm](https://github.com/igtoth/sidetone/releases/download/v0.1.1/Sidetone-0.1.1-1.x86_64.rpm) | [sidetone-v0.1.1-x86_64-unknown-linux-gnu.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.1/sidetone-v0.1.1-x86_64-unknown-linux-gnu.tar.gz) |
+| Linux (arm64) | | [sidetone-v0.1.1-aarch64-unknown-linux-gnu.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.1/sidetone-v0.1.1-aarch64-unknown-linux-gnu.tar.gz) |
 | Web | no download: [open it in the browser](https://igtoth.github.io/sidetone/) | |
 
 ### Install
@@ -340,16 +340,16 @@ not signed yet, so the first time right-click it and choose Open (or run
 `xattr -dr com.apple.quarantine /Applications/Sidetone.app`). macOS asks
 for microphone access on the first call.
 
-**Linux.** Debian and Ubuntu: `sudo apt install ./Sidetone_0.1.0_amd64.deb`.
-Fedora and openSUSE: `sudo dnf install ./Sidetone-0.1.0-1.x86_64.rpm`.
-Anywhere else: `chmod +x Sidetone_0.1.0_amd64.AppImage` and run it. The
+**Linux.** Debian and Ubuntu: `sudo apt install ./Sidetone_0.1.1_amd64.deb`.
+Fedora and openSUSE: `sudo dnf install ./Sidetone-0.1.1-1.x86_64.rpm`.
+Anywhere else: `chmod +x Sidetone_0.1.1_amd64.AppImage` and run it. The
 desktop app needs WebKitGTK 4.1 (present on current distributions).
 
 **Command line.** Unpack the archive and put `sidetone` on your `PATH`:
 
 ```sh
-tar xzf sidetone-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
-sudo install sidetone-v0.1.0-x86_64-unknown-linux-gnu/sidetone /usr/local/bin/
+tar xzf sidetone-v0.1.1-x86_64-unknown-linux-gnu.tar.gz
+sudo install sidetone-v0.1.1-x86_64-unknown-linux-gnu/sidetone /usr/local/bin/
 sidetone serve        # the full app in your browser at http://127.0.0.1:8640
 ```
 

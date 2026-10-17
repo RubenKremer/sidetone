@@ -4,6 +4,8 @@
 //  - GitHub Pages: WASM analysis and a WebRTC phone (SIP over WebSocket)
 
 import { NativeController, WebController, webAccountDefaults } from "./controllers.js";
+import { initI18n, currentLang, setLang, LANGS, t } from "./i18n.js";
+import { renderHelp } from "./help.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -174,6 +176,15 @@ function showWs(name) {
   if (name === "diag") diagOpen();
   if (name === "settings") settingsOpen();
   if (name === "calls") renderHistory();
+  if (name === "help") {
+    renderHelp($("#help-page"), {
+      lang: currentLang(),
+      version: S.version,
+      mode: t(S.ctl.kind === "web" ? "Browser phone (WebRTC)" : "Desktop engine (UDP)"),
+      langs: LANGS,
+      onLang: setLang,
+    });
+  }
 }
 
 // ============================================================================
@@ -389,6 +400,7 @@ function onState(st) {
   renderMeters();
   renderStatus();
   if (S.page === "calls") renderCallDetail();
+  if (S.page === "calls" && !prev) renderHistory();
   if (S.page === "settings" && SET.cfg) renderSetNav();
 }
 
@@ -1833,6 +1845,13 @@ async function renderGlobal(section) {
       S.trace = [];
       toast("Capture cleared");
     });
+  } else if (section === "lang") {
+    body.innerHTML = `<div class="set-head"><h1>Language</h1></div>
+      <div class="set-form"><div class="fields">
+        <label class="fld">Language<select id="lang-sel">${LANGS.map(([c, n]) => `<option value="${c}" ${c === currentLang() ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></label>
+      </div>
+      <p class="hint">SIP messages, traces and analyzer findings stay in English, as they appear on the wire and in RFCs.</p></div>`;
+    $("#lang-sel").addEventListener("change", (e) => setLang(e.target.value));
   } else if (section === "keys") {
     const rows = [
       ["Enter", "Call the number in the dial field, or answer the selected incoming call"],
@@ -1901,6 +1920,7 @@ function bindChrome() {
 }
 
 async function main() {
+  initI18n();
   S.be = await pickBackend();
   if (S.be.kind === "http") {
     try { S.version = (await (await S.be.get("api/info")).json()).version; } catch { /* ignore */ }
