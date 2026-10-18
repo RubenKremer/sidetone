@@ -203,6 +203,27 @@ pub fn analyze_capture(cap: Capture) -> Report {
                         });
                 }
             }
+            Transport::Tls => {
+                // Exported PDUs hold whole, decrypted SIP messages.
+                let (msgs, _) = sip::parse_stream(d.payload);
+                let msgs = if msgs.is_empty() {
+                    sip::parse_datagram(d.payload).into_iter().collect()
+                } else {
+                    msgs
+                };
+                for m in msgs {
+                    push_message(
+                        &mut messages,
+                        m,
+                        frame,
+                        p,
+                        d.src,
+                        d.dst,
+                        Transport::Tls,
+                        start_ns,
+                    );
+                }
+            }
             Transport::Tcp => {
                 if d.payload.is_empty() {
                     continue;

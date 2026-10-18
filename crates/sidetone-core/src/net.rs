@@ -8,6 +8,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 pub enum Transport {
     Udp,
     Tcp,
+    /// SIP over TLS, captured already decrypted (Wireshark exported PDUs).
+    Tls,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +54,7 @@ pub fn decode(linktype: u32, data: &[u8]) -> Option<Decoded<'_>> {
             }
             (u16::from_be_bytes([data[0], data[1]]), &data[20..])
         }
+        LINKTYPE_WIRESHARK_UPPER_PDU => return decode_exported_pdu(data),
         LINKTYPE_NULL | LINKTYPE_LOOP => {
             if data.len() < 4 {
                 return None;
@@ -68,6 +71,122 @@ pub fn decode(linktype: u32, data: &[u8]) -> Option<Decoded<'_>> {
         0x86dd => decode_ipv6(ip),
         _ => None,
     }
+}
+
+// Wireshark exported PDU tags (epan/exported_pdu.h).
+const EXP_PDU_TAG_END: u16 = 0;
+const EXP_PDU_TAG_DISSECTOR_NAME: u16 = 12;
+const EXP_PDU_TAG_IPV4_SRC: u16 = 20;
+const EXP_PDU_TAG_IPV4_DST: u16 = 21;
+const EXP_PDU_TAG_IPV6_SRC: u16 = 22;
+const EXP_PDU_TAG_IPV6_DST: u16 = 23;
+const EXP_PDU_TAG_PORT_TYPE: u16 = 24;
+const EXP_PDU_TAG_SRC_PORT: u16 = 25;
+const EXP_PDU_TAG_DST_PORT: u16 = 26;
+const EXP_PDU_PT_TCP: u32 = 2;
+
+/// Decodes a Wireshark exported PDU carrying SIP (how Wireshark and Sidetone
+/// store SIP that travelled over TLS, already decrypted).
+fn decode_exported_pdu(data: &[u8]) -> Option<Decoded<'_>> {
+    let mut off = 0;
+    let mut name: Option<&[u8]> = None;
+    let mut src_ip: Option<IpAddr> = None;
+    let mut dst_ip: Option<IpAddr> = None;
+    let (mut sp, mut dp) = (0u16, 0u16);
+    loop {
+        if off + 4 > data.len() {
+            return None;
+        }
+        let tag = u16::from_be_bytes([data[off], data[off + 1]]);
+        let len = u16::from_be_bytes([data[off + 2], data[off + 3]]) as usize;
+        off += 4;
+        if tag == EXP_PDU_TAG_END {
+            break;
+        }
+        let v = data.get(off..off + len)?;
+        let u32v = || {
+            v.get(..4)
+                .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+        };
+        match tag {
+            EXP_PDU_TAG_DISSECTOR_NAME => {
+                let end = v.iter().position(|b| *b == 0).unwrap_or(v.len());
+                name = Some(&v[..end]);
+            }
+            EXP_PDU_TAG_IPV4_SRC if len >= 4 => {
+                src_ip = Some(IpAddr::V4(Ipv4Addr::new(v[0], v[1], v[2], v[3])))
+            }
+            EXP_PDU_TAG_IPV4_DST if len >= 4 => {
+                dst_ip = Some(IpAddr::V4(Ipv4Addr::new(v[0], v[1], v[2], v[3])))
+            }
+            EXP_PDU_TAG_IPV6_SRC if len >= 16 => {
+                src_ip = Some(IpAddr::V6(Ipv6Addr::from(
+                    <[u8; 16]>::try_from(&v[..16]).ok()?,
+                )))
+            }
+            EXP_PDU_TAG_IPV6_DST if len >= 16 => {
+                dst_ip = Some(IpAddr::V6(Ipv6Addr::from(
+                    <[u8; 16]>::try_from(&v[..16]).ok()?,
+                )))
+            }
+            EXP_PDU_TAG_SRC_PORT => sp = u32v()? as u16,
+            EXP_PDU_TAG_DST_PORT => dp = u32v()? as u16,
+            _ => {}
+        }
+        off += len;
+    }
+    if !name.is_some_and(|n| n.eq_ignore_ascii_case(b"sip")) {
+        return None;
+    }
+    Some(Decoded {
+        src: SocketAddr::new(src_ip?, sp),
+        dst: SocketAddr::new(dst_ip?, dp),
+        transport: Transport::Tls,
+        payload: &data[off..],
+        tcp_seq: 0,
+    })
+}
+
+/// Builds a Wireshark exported PDU (LINKTYPE_WIRESHARK_UPPER_PDU) for one
+/// decrypted SIP message received or sent over TLS.
+pub fn build_sip_pdu(src: SocketAddr, dst: SocketAddr, payload: &[u8]) -> Vec<u8> {
+    fn tag(out: &mut Vec<u8>, t: u16, v: &[u8]) {
+        let padded = (v.len() + 3) & !3;
+        out.extend_from_slice(&t.to_be_bytes());
+        out.extend_from_slice(&(padded as u16).to_be_bytes());
+        out.extend_from_slice(v);
+        out.extend(std::iter::repeat_n(0u8, padded - v.len()));
+    }
+    let mut out = Vec::with_capacity(64 + payload.len());
+    tag(&mut out, EXP_PDU_TAG_DISSECTOR_NAME, b"sip");
+    match (src.ip(), dst.ip()) {
+        (IpAddr::V4(s), IpAddr::V4(d)) => {
+            tag(&mut out, EXP_PDU_TAG_IPV4_SRC, &s.octets());
+            tag(&mut out, EXP_PDU_TAG_IPV4_DST, &d.octets());
+        }
+        (s, d) => {
+            tag(&mut out, EXP_PDU_TAG_IPV6_SRC, &to_v6(s).octets());
+            tag(&mut out, EXP_PDU_TAG_IPV6_DST, &to_v6(d).octets());
+        }
+    }
+    tag(
+        &mut out,
+        EXP_PDU_TAG_PORT_TYPE,
+        &EXP_PDU_PT_TCP.to_be_bytes(),
+    );
+    tag(
+        &mut out,
+        EXP_PDU_TAG_SRC_PORT,
+        &(src.port() as u32).to_be_bytes(),
+    );
+    tag(
+        &mut out,
+        EXP_PDU_TAG_DST_PORT,
+        &(dst.port() as u32).to_be_bytes(),
+    );
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    out.extend_from_slice(payload);
+    out
 }
 
 fn decode_ipv4(ip: &[u8]) -> Option<Decoded<'_>> {
@@ -199,6 +318,73 @@ fn checksum_fold(mut sum: u32) -> u16 {
     !(sum as u16)
 }
 
+/// Builds a raw IP (LINKTYPE_RAW) TCP segment with PSH and ACK set.
+pub fn build_tcp_packet(
+    src: SocketAddr,
+    dst: SocketAddr,
+    seq: u32,
+    ack: u32,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut tcp = Vec::with_capacity(20 + payload.len());
+    tcp.extend_from_slice(&src.port().to_be_bytes());
+    tcp.extend_from_slice(&dst.port().to_be_bytes());
+    tcp.extend_from_slice(&seq.to_be_bytes());
+    tcp.extend_from_slice(&ack.to_be_bytes());
+    tcp.extend_from_slice(&[0x50, 0x18, 0xff, 0xff, 0, 0, 0, 0]);
+    tcp.extend_from_slice(payload);
+    wrap_ip(6, src, dst, tcp, 16)
+}
+
+/// Puts a transport segment into an IPv4 or IPv6 header, filling in the
+/// transport checksum at `csum_at`.
+fn wrap_ip(
+    proto: u8,
+    src: SocketAddr,
+    dst: SocketAddr,
+    mut l4: Vec<u8>,
+    csum_at: usize,
+) -> Vec<u8> {
+    let l4_len = l4.len();
+    match (src.ip(), dst.ip()) {
+        (IpAddr::V4(s), IpAddr::V4(d)) => {
+            let total = 20 + l4_len;
+            let mut ip = Vec::with_capacity(total);
+            ip.extend_from_slice(&[0x45, 0x00]);
+            ip.extend_from_slice(&(total.min(0xffff) as u16).to_be_bytes());
+            ip.extend_from_slice(&[0, 0, 0x40, 0x00, 64, proto, 0, 0]);
+            ip.extend_from_slice(&s.octets());
+            ip.extend_from_slice(&d.octets());
+            let c = checksum_fold(checksum_add(0, &ip[..20]));
+            ip[10..12].copy_from_slice(&c.to_be_bytes());
+            let mut sum = checksum_add(0, &s.octets());
+            sum = checksum_add(sum, &d.octets());
+            sum += proto as u32 + l4_len as u32;
+            let c = checksum_fold(checksum_add(sum, &l4));
+            l4[csum_at..csum_at + 2].copy_from_slice(&c.to_be_bytes());
+            ip.extend_from_slice(&l4);
+            ip
+        }
+        (s, d) => {
+            let s6 = to_v6(s);
+            let d6 = to_v6(d);
+            let mut ip = Vec::with_capacity(40 + l4_len);
+            ip.extend_from_slice(&[0x60, 0, 0, 0]);
+            ip.extend_from_slice(&(l4_len.min(0xffff) as u16).to_be_bytes());
+            ip.extend_from_slice(&[proto, 64]);
+            ip.extend_from_slice(&s6.octets());
+            ip.extend_from_slice(&d6.octets());
+            let mut sum = checksum_add(0, &s6.octets());
+            sum = checksum_add(sum, &d6.octets());
+            sum += l4_len as u32 + proto as u32;
+            let c = checksum_fold(checksum_add(sum, &l4));
+            l4[csum_at..csum_at + 2].copy_from_slice(&c.to_be_bytes());
+            ip.extend_from_slice(&l4);
+            ip
+        }
+    }
+}
+
 /// Builds a raw IP (LINKTYPE_RAW) UDP packet. IPv4 and IPv6 are supported;
 /// mixed families fall back to mapping the IPv4 side into IPv6.
 pub fn build_udp_packet(src: SocketAddr, dst: SocketAddr, payload: &[u8]) -> Vec<u8> {
@@ -281,6 +467,33 @@ pub fn is_private(ip: &IpAddr) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn exported_pdu_and_tcp_roundtrip() {
+        let a: std::net::SocketAddr = "10.0.0.1:40000".parse().unwrap();
+        let b: std::net::SocketAddr = "10.0.0.2:5061".parse().unwrap();
+        let msg = b"OPTIONS sip:b SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        let pdu = super::build_sip_pdu(a, b, msg);
+        let d = super::decode(crate::pcap::LINKTYPE_WIRESHARK_UPPER_PDU, &pdu).unwrap();
+        assert_eq!(
+            (d.src, d.dst, d.transport, d.payload),
+            (a, b, super::Transport::Tls, &msg[..])
+        );
+        let six: std::net::SocketAddr = "[2001:db8::1]:5061".parse().unwrap();
+        let d6 = super::build_sip_pdu(six, six, msg);
+        assert_eq!(
+            super::decode(crate::pcap::LINKTYPE_WIRESHARK_UPPER_PDU, &d6)
+                .unwrap()
+                .src,
+            six
+        );
+        let t = super::build_tcp_packet(a, b, 1000, 2000, msg);
+        let d = super::decode(crate::pcap::LINKTYPE_RAW, &t).unwrap();
+        assert_eq!(
+            (d.transport, d.tcp_seq, d.payload),
+            (super::Transport::Tcp, 1000, &msg[..])
+        );
+    }
+
     use super::*;
 
     #[test]

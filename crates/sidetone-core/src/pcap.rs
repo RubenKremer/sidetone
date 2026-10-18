@@ -15,6 +15,8 @@ pub const LINKTYPE_LOOP: u32 = 108;
 pub const LINKTYPE_IPV4: u32 = 228;
 pub const LINKTYPE_IPV6: u32 = 229;
 pub const LINKTYPE_LINUX_SLL2: u32 = 276;
+/// Wireshark exported PDUs (dissector name, addresses, ports, then the PDU).
+pub const LINKTYPE_WIRESHARK_UPPER_PDU: u32 = 252;
 
 /// pcapng secrets type for a TLS key log (SSLKEYLOGFILE format).
 pub const SECRETS_TYPE_TLS: u32 = 0x544c_534b;

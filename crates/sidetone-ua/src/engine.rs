@@ -904,8 +904,10 @@ impl Core {
         self.dirty = true;
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn trace(
         &mut self,
+        kind: Kind,
         out: bool,
         src: SocketAddr,
         dst: SocketAddr,
@@ -928,7 +930,7 @@ impl Core {
             seq,
             ts_ms: now_ms(),
             dir: if out { "out" } else { "in" }.into(),
-            transport: "UDP".into(),
+            transport: kind.via().into(),
             src: src.to_string(),
             dst: dst.to_string(),
             first_line: item_first,
@@ -1113,7 +1115,8 @@ impl Core {
                         a.reg_cseq + 1,
                     );
                     let _ = sock.send_to(text.as_bytes(), server);
-                    self.tap.record(a.local, server, text.as_bytes());
+                    self.tap
+                        .record_sip(sock.kind, a.local, server, text.as_bytes());
                 }
             }
         }
@@ -1399,10 +1402,11 @@ impl Core {
         let Some(a) = self.accs.get(ai) else { return };
         let Some(sock) = &a.sock else { return };
         let local = a.local;
+        let kind = sock.kind;
         match sock.send_to(text.as_bytes(), dest) {
             Ok(dest) => {
-                self.tap.record(local, dest, text.as_bytes());
-                self.trace(true, local, dest, text.as_bytes(), None);
+                self.tap.record_sip(kind, local, dest, text.as_bytes());
+                self.trace(kind, true, local, dest, text.as_bytes(), None);
             }
             Err(e) => {
                 let msg = format!("send to {dest} failed: {e}");
@@ -1476,11 +1480,16 @@ impl Core {
         if data.iter().all(|b| *b == b'\r' || *b == b'\n') {
             return;
         }
-        self.tap.record(from, local, data);
+        let kind = self.accs[ai]
+            .sock
+            .as_ref()
+            .map(|s| s.kind)
+            .unwrap_or(Kind::Udp);
+        self.tap.record_sip(kind, from, local, data);
         let Some(m) = sip::parse_datagram(data) else {
             return;
         };
-        self.trace(false, from, local, data, Some(&m));
+        self.trace(kind, false, from, local, data, Some(&m));
         let a = &self.accs[ai];
         if a.cfg.profile.behavior.filter_registrar && m.is_request() {
             if let Some(server) = a.server {
@@ -1607,7 +1616,9 @@ impl Core {
             {
                 if let (Some(sock), Some(server)) = (&a.sock, a.server) {
                     let _ = sock.send_to(b"\r\n\r\n", server);
-                    self.tap.record(a.local, server, b"\r\n\r\n");
+                    if sock.kind != Kind::Tls {
+                        self.tap.record_sip(sock.kind, a.local, server, b"\r\n\r\n");
+                    }
                 }
                 self.accs[ai].last_keepalive = Instant::now();
             }

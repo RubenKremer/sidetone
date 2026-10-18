@@ -130,6 +130,18 @@ pub fn export_pcapng(r: &Report, opts: &ExportOptions) -> Vec<u8> {
                     // Rebuild every SIP message carried by this frame as UDP datagrams.
                     for m in r.messages.iter().filter(|m| m.frame == frame) {
                         let text = red.sip_message(&m.raw);
+                        if m.transport == Transport::Tls {
+                            let pkt = net::build_sip_pdu(src, dst, text.as_bytes());
+                            let len = pkt.len() as u32;
+                            owned.push((
+                                p.ts_ns,
+                                crate::pcap::LINKTYPE_WIRESHARK_UPPER_PDU,
+                                pkt,
+                                len,
+                                comment.as_ref().map(|x| red.text(x)),
+                            ));
+                            continue;
+                        }
                         let pkt = net::build_udp_packet(src, dst, text.as_bytes());
                         let len = pkt.len() as u32;
                         let note = if m.transport == Transport::Tcp {

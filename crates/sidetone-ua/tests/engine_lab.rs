@@ -391,6 +391,30 @@ fn transports_srtp_blf_conference() {
     });
     e.cmd(Cmd::HangupAll);
     wait_for(&e, "BLF idle again", 10, |e| blf(e) == "idle");
+
+    // The capture keeps SIP over TCP as TCP and SIP over TLS as decrypted PDUs.
+    let pcap = e.capture();
+    std::fs::write(std::env::temp_dir().join("engine_lab_tls.pcapng"), &pcap).unwrap();
+    let r = sidetone_core::analysis::analyze_bytes(&pcap).expect("capture parses");
+    use sidetone_core::net::Transport;
+    let count = |t: Transport| r.messages.iter().filter(|m| m.transport == t).count();
+    println!(
+        "capture: {} UDP, {} TCP, {} TLS messages",
+        count(Transport::Udp),
+        count(Transport::Tcp),
+        count(Transport::Tls)
+    );
+    assert!(count(Transport::Tcp) > 5, "SIP over TCP in the capture");
+    assert!(count(Transport::Tls) > 5, "SIP over TLS in the capture");
+    assert!(
+        r.messages
+            .iter()
+            .any(|m| m.transport == Transport::Tls && m.method.as_deref() == Some("INVITE")),
+        "the INVITE sent over TLS is readable"
+    );
+    let trace = e.trace_since(0, 100000);
+    assert!(trace.iter().any(|t| t.transport == "TLS"));
+    assert!(trace.iter().any(|t| t.transport == "TCP"));
 }
 
 #[test]
