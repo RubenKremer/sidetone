@@ -26,10 +26,11 @@ const r1 = await ctl({ cmd: "call", target: "600" });
 await until("L1 600 connected", (ls) => ls.find((l) => l.line === r1.line)?.state === "connected");
 const r2 = await ctl({ cmd: "call", target: "600" });
 await until("L2 connected and L1 auto-held", (ls) => ls.find((l) => l.line === r2.line)?.state === "connected" && ls.find((l) => l.line === r1.line)?.held);
+await wait(1500);
 const c = await ctl({ cmd: "conference", line: r2.line, to_line: r1.line, on: true });
 if (c && c.error) console.log("conference error:", c.error);
 await until("conference joined, both resumed", (ls) => { const a = ls.find((l) => l.line === r1.line), bb = ls.find((l) => l.line === r2.line); return a.conf === r2.line && bb.conf === r1.line && !a.held && !bb.held; });
-await p.screenshot({ path: "/tmp/claude-0/shots/out/web-conf.png" });
+
 await ctl({ cmd: "conference", line: r2.line, to_line: r1.line, on: false });
 await ctl({ cmd: "hangup_all" });
 await until("all ended", (ls) => ls.every((l) => l.state === "ended"));
@@ -43,6 +44,7 @@ await ctl({ cmd: "answer", line: li });
 await until("answered, 600 held", (ls) => ls.find((l) => l.line === li)?.state === "connected" && ls.find((l) => l.line === r3.line)?.held);
 // Attended transfer: join 2001 with the echo service.
 await ctl({ cmd: "attended_transfer", line: r3.line, to_line: li });
+await wait(1500);
 await until("browser lines released after the transfer", (ls) => ls.every((l) => l.state === "ended"), 12000);
 const st = await api("/api/phone/state");
 const nat = st.state.calls.find((x) => x.line === n.line);
