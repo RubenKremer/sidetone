@@ -114,24 +114,40 @@ mod imp {
         }
     }
 
-    /// Converts between the device rate and 8 kHz with linear interpolation.
+    /// Converts the device rate to AUDIO_RATE: one-pole low-pass, then linear interpolation.
     struct Resampler {
         step: f64,
         pos: f64,
         prev: f32,
+        /// Two one-pole low-pass stages against aliasing when downsampling.
+        a: f32,
+        lp1: f32,
+        lp2: f32,
     }
 
     impl Resampler {
         fn new(from: u32, to: u32) -> Self {
+            let a = if from > to {
+                let fc = 0.45 * to as f32;
+                1.0 - (-2.0 * std::f32::consts::PI * fc / from as f32).exp()
+            } else {
+                1.0
+            };
             Resampler {
                 step: from as f64 / to as f64,
                 pos: 0.0,
                 prev: 0.0,
+                a,
+                lp1: 0.0,
+                lp2: 0.0,
             }
         }
         /// Feeds input samples, emitting output samples.
         fn process(&mut self, input: &[f32], out: &mut Vec<i16>) {
             for &x in input {
+                self.lp1 += self.a * (x - self.lp1);
+                self.lp2 += self.a * (self.lp1 - self.lp2);
+                let x = self.lp2;
                 // Emit every output point that falls between prev and x.
                 while self.pos <= 1.0 {
                     let v = self.prev + (x - self.prev) * self.pos as f32;
@@ -155,7 +171,7 @@ mod imp {
         let rate = cfg.sample_rate().0;
         let ch = cfg.channels() as usize;
         let fmt = cfg.sample_format();
-        let mut rs = Resampler::new(rate, 8000);
+        let mut rs = Resampler::new(rate, crate::media::AUDIO_RATE);
         let mut mono: Vec<f32> = Vec::new();
         let mut out: Vec<i16> = Vec::new();
         let mut handle = move |samples: &mut dyn Iterator<Item = f32>| {
@@ -229,8 +245,8 @@ mod imp {
         let rate = cfg.sample_rate().0;
         let ch = cfg.channels() as usize;
         let fmt = cfg.sample_format();
-        // Upsample 8 kHz to the device rate by interpolating between queued samples.
-        let step = 8000.0 / rate as f64;
+        // Upsample AUDIO_RATE to the device rate by interpolating between queued samples.
+        let step = crate::media::AUDIO_RATE as f64 / rate as f64;
         let mut pos = 0.0f64;
         let mut cur = 0i16;
         let mut next = 0i16;
@@ -286,8 +302,8 @@ mod imp {
     }
 
     pub fn start(input: Option<&str>, output: Option<&str>) -> Result<Audio, String> {
-        let mic = Ring::new(4000);
-        let spk = Ring::new(4000);
+        let mic = Ring::new(crate::media::SPMS * 500);
+        let spk = Ring::new(crate::media::SPMS * 500);
         let stop = Arc::new(AtomicBool::new(false));
         let loopback = Arc::new(AtomicBool::new(false));
         let mic_level = Arc::new(AtomicU32::new(0));
@@ -379,14 +395,16 @@ mod imp {
 
         #[test]
         fn resampler_ratio() {
-            let mut r = Resampler::new(48000, 8000);
+            let mut r = Resampler::new(48000, 16000);
             let mut out = Vec::new();
             r.process(&vec![0.5f32; 4800], &mut out);
-            assert!((799..=801).contains(&out.len()), "{}", out.len());
-            let mut r = Resampler::new(44100, 8000);
+            assert!((1599..=1601).contains(&out.len()), "{}", out.len());
+            // DC passes the low-pass once it settles.
+            assert!((out[1500] as f32 / 32767.0 - 0.5).abs() < 0.01);
+            let mut r = Resampler::new(44100, 16000);
             let mut out = Vec::new();
             r.process(&vec![0.0f32; 44100], &mut out);
-            assert!((7999..=8001).contains(&out.len()), "{}", out.len());
+            assert!((15999..=16001).contains(&out.len()), "{}", out.len());
         }
     }
 }

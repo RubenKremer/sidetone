@@ -497,6 +497,49 @@ fn opus_echo() {
     e.cmd(Cmd::HangupAll);
     wait_for(&e, "ended", 5, |e| line_state(e, l) != "connected");
 
+    // Wideband: a 6 kHz tone survives the Opus echo and vanishes through G.711.
+    let tone = |hz: f32| PhoneSettings {
+        audio_source: "tone".into(),
+        tone_hz: hz,
+        auto_hold: false,
+        ..Default::default()
+    };
+    e.cmd(Cmd::SetSettings(tone(6000.0)));
+    let level_of = |e: &Engine, l: u32| {
+        e.state()
+            .calls
+            .iter()
+            .find(|c| c.line == l)
+            .map(|c| c.rx_level)
+            .unwrap_or(0)
+    };
+    let w = e.call(CallRequest {
+        account: Some("a".into()),
+        target: "600".into(),
+        ..Default::default()
+    });
+    wait_for(&e, "6 kHz over Opus comes back", 8, |e| {
+        level_of(e, w) > 3000
+    });
+    e.cmd(Cmd::HangupAll);
+    wait_for(&e, "ended", 5, |e| line_state(e, w) != "connected");
+    let n = e.call(CallRequest {
+        account: Some("a".into()),
+        target: "600".into(),
+        overrides: Some(serde_json::json!({"codecs": ["PCMU"]})),
+        ..Default::default()
+    });
+    wait_for(&e, "G.711 echo connected", 8, |e| {
+        line_state(e, n) == "connected"
+    });
+    std::thread::sleep(Duration::from_millis(2000));
+    let narrow = level_of(&e, n);
+    println!("6 kHz tone: G.711 echo level {narrow}");
+    assert!(narrow < 1500, "G.711 cannot carry 6 kHz ({narrow})");
+    e.cmd(Cmd::HangupAll);
+    wait_for(&e, "ended", 5, |e| line_state(e, n) != "connected");
+    e.cmd(Cmd::SetSettings(tone(440.0)));
+
     // Opus to a G.711-only phone: Asterisk transcodes both ways.
     let l2 = e.call(CallRequest {
         account: Some("a".into()),

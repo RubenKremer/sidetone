@@ -94,6 +94,13 @@ impl PartialEq for Codec {
 /// Payload type Sidetone offers for Opus.
 pub const OPUS_PT: u8 = 111;
 
+/// Sample rate of the phone's audio path: microphone, speaker, mixing, tones
+/// and recordings. Wideband, so Opus calls carry 7 kHz audio; G.711 calls are
+/// converted to and from 8 kHz at the codec.
+pub const AUDIO_RATE: u32 = 16000;
+/// Samples per millisecond at AUDIO_RATE.
+pub const SPMS: usize = (AUDIO_RATE / 1000) as usize;
+
 impl Codec {
     pub fn pt(self) -> u8 {
         match self {
@@ -149,32 +156,119 @@ impl Codec {
     }
 }
 
-/// Encoder state for one outgoing stream (8 kHz PCM in).
+/// Encoder state for one outgoing stream (PCM at AUDIO_RATE in).
 pub enum Encoder {
-    G711(Codec),
+    G711(Codec, Box<Halfband>),
     Opus(Box<opus::Encoder>),
+}
+
+const HB_TAPS: usize = 47;
+
+/// Windowed-sinc low-pass at 3.6 kHz for a 16 kHz signal, used to go between
+/// AUDIO_RATE and 8 kHz without aliasing (down) or images (up).
+pub struct Halfband {
+    taps: [f32; HB_TAPS],
+    hist: [f32; HB_TAPS],
+    pos: usize,
+}
+
+impl Halfband {
+    pub fn new() -> Halfband {
+        let mut taps = [0f32; HB_TAPS];
+        let fc = 3600.0 / AUDIO_RATE as f32;
+        let m = (HB_TAPS - 1) as f32;
+        let mut sum = 0.0;
+        for (i, t) in taps.iter_mut().enumerate() {
+            let n = i as f32 - m / 2.0;
+            let sinc = if n == 0.0 {
+                2.0 * fc
+            } else {
+                (2.0 * std::f32::consts::PI * fc * n).sin() / (std::f32::consts::PI * n)
+            };
+            // Blackman window: about 74 dB stop band.
+            let w = 0.42 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / m).cos()
+                + 0.08 * (4.0 * std::f32::consts::PI * i as f32 / m).cos();
+            *t = sinc * w;
+            sum += *t;
+        }
+        for t in taps.iter_mut() {
+            *t /= sum;
+        }
+        Halfband {
+            taps,
+            hist: [0.0; HB_TAPS],
+            pos: 0,
+        }
+    }
+
+    fn push(&mut self, x: f32) {
+        self.hist[self.pos] = x;
+        self.pos = (self.pos + 1) % HB_TAPS;
+    }
+
+    fn output(&self) -> f32 {
+        let mut acc = 0.0;
+        for (k, t) in self.taps.iter().enumerate() {
+            acc += t * self.hist[(self.pos + k) % HB_TAPS];
+        }
+        acc
+    }
+
+    /// AUDIO_RATE in, 8 kHz out.
+    pub fn down(&mut self, pcm: &[i16], out: &mut Vec<i16>) {
+        for (i, &x) in pcm.iter().enumerate() {
+            self.push(x as f32);
+            if i % 2 == 1 {
+                out.push(self.output().round().clamp(-32768.0, 32767.0) as i16);
+            }
+        }
+    }
+
+    /// 8 kHz in, AUDIO_RATE out.
+    pub fn up(&mut self, pcm: &[i16], out: &mut Vec<i16>) {
+        for &x in pcm {
+            for v in [x as f32 * 2.0, 0.0] {
+                self.push(v);
+                out.push(self.output().round().clamp(-32768.0, 32767.0) as i16);
+            }
+        }
+    }
+}
+
+impl Default for Halfband {
+    fn default() -> Self {
+        Halfband::new()
+    }
 }
 
 impl Encoder {
     pub fn new(c: Codec) -> Encoder {
         match c {
             Codec::Opus(_) => {
-                match opus::Encoder::new(8000, opus::Channels::Mono, opus::Application::Voip) {
+                match opus::Encoder::new(AUDIO_RATE, opus::Channels::Mono, opus::Application::Voip)
+                {
                     Ok(mut e) => {
                         e.set_inband_fec(true).ok();
                         e.set_packet_loss_perc(5).ok();
                         Encoder::Opus(Box::new(e))
                     }
-                    Err(_) => Encoder::G711(Codec::Pcmu),
+                    Err(_) => Encoder::G711(Codec::Pcmu, Box::default()),
                 }
             }
-            c => Encoder::G711(c),
+            c => Encoder::G711(c, Box::default()),
         }
     }
     pub fn encode(&mut self, pcm: &[i16], out: &mut Vec<u8>) {
         match self {
-            Encoder::G711(Codec::Pcma) => out.extend(pcm.iter().map(|&s| alaw_encode(s))),
-            Encoder::G711(_) => out.extend(pcm.iter().map(|&s| ulaw_encode(s))),
+            Encoder::G711(c, hb) => {
+                let mut n = Vec::with_capacity(pcm.len() / 2);
+                hb.down(pcm, &mut n);
+                if *c == Codec::Pcma {
+                    out.extend(n.iter().map(|&s| alaw_encode(s)));
+                } else {
+                    out.extend(n.iter().map(|&s| ulaw_encode(s)));
+                }
+            }
             Encoder::Opus(e) => {
                 let mut buf = [0u8; 1500];
                 if let Ok(n) = e.encode(pcm, &mut buf) {
@@ -185,30 +279,41 @@ impl Encoder {
     }
 }
 
-/// Decoder state for one incoming stream (8 kHz PCM out).
+/// Decoder state for one incoming stream (PCM at AUDIO_RATE out).
 pub struct Decoder {
     codec: Codec,
     opus: Option<opus::Decoder>,
+    /// Interpolates G.711 up to AUDIO_RATE.
+    up: Box<Halfband>,
 }
 
 impl Decoder {
     pub fn new(c: Codec) -> Decoder {
         let opus = match c {
-            Codec::Opus(_) => opus::Decoder::new(8000, opus::Channels::Mono).ok(),
+            Codec::Opus(_) => opus::Decoder::new(AUDIO_RATE, opus::Channels::Mono).ok(),
             _ => None,
         };
-        Decoder { codec: c, opus }
+        Decoder {
+            codec: c,
+            opus,
+            up: Box::default(),
+        }
     }
     /// Decodes one payload of payload type `pt`; None when the type is not audio we know.
     pub fn decode(&mut self, pt: u8, payload: &[u8]) -> Option<Vec<i16>> {
-        match Codec::from_pt(pt) {
-            Some(Codec::Pcmu) => return Some(payload.iter().map(|&b| ulaw_decode(b)).collect()),
-            Some(Codec::Pcma) => return Some(payload.iter().map(|&b| alaw_decode(b)).collect()),
-            _ => {}
+        let narrow: Option<Vec<i16>> = match Codec::from_pt(pt) {
+            Some(Codec::Pcmu) => Some(payload.iter().map(|&b| ulaw_decode(b)).collect()),
+            Some(Codec::Pcma) => Some(payload.iter().map(|&b| alaw_decode(b)).collect()),
+            _ => None,
+        };
+        if let Some(n) = narrow {
+            let mut out = Vec::with_capacity(n.len() * 2);
+            self.up.up(&n, &mut out);
+            return Some(out);
         }
         if let (Codec::Opus(p), Some(d)) = (self.codec, self.opus.as_mut()) {
             if p == pt {
-                let mut out = vec![0i16; 8 * 120];
+                let mut out = vec![0i16; SPMS * 120];
                 let n = d.decode(payload, &mut out, false).ok()?;
                 out.truncate(n);
                 return Some(out);
@@ -384,6 +489,7 @@ fn peak(pcm: &[i16]) -> u32 {
 }
 
 /// Writes 8 kHz 16-bit stereo WAV: left = sent, right = received.
+/// Stereo 16-bit WAV at AUDIO_RATE: left is what was sent, right what was received.
 pub fn write_wav_stereo(left: &[i16], right: &[i16]) -> Vec<u8> {
     let n = left.len().max(right.len());
     let data_len = (n * 4) as u32;
@@ -394,8 +500,8 @@ pub fn write_wav_stereo(left: &[i16], right: &[i16]) -> Vec<u8> {
     v.extend_from_slice(&16u32.to_le_bytes());
     v.extend_from_slice(&1u16.to_le_bytes());
     v.extend_from_slice(&2u16.to_le_bytes());
-    v.extend_from_slice(&8000u32.to_le_bytes());
-    v.extend_from_slice(&(8000u32 * 4).to_le_bytes());
+    v.extend_from_slice(&AUDIO_RATE.to_le_bytes());
+    v.extend_from_slice(&(AUDIO_RATE * 4).to_le_bytes());
     v.extend_from_slice(&4u16.to_le_bytes());
     v.extend_from_slice(&16u16.to_le_bytes());
     v.extend_from_slice(b"data");
@@ -540,7 +646,7 @@ impl RtpSession {
         let local = self.local;
         let ctl = self.ctl.clone();
         // Recording is capped at one hour per direction.
-        const REC_CAP: usize = 8000 * 3600;
+        const REC_CAP: usize = AUDIO_RATE as usize * 3600;
 
         let srtp_rx = self
             .srtp
@@ -619,7 +725,7 @@ impl RtpSession {
                         {
                             let mut eb = echo_buf.lock().unwrap();
                             eb.extend(pcm.iter().copied());
-                            while eb.len() > 8000 {
+                            while eb.len() > AUDIO_RATE as usize {
                                 eb.pop_front();
                             }
                         }
@@ -637,8 +743,8 @@ impl RtpSession {
         let sent = self.sent.clone();
         let dtmf_queue = self.dtmf_queue.clone();
         self.handles.push(thread::spawn(move || {
-            let spp = (8 * ptime_ms) as usize; // samples per packet at 8 kHz
-            let clk = codec.clock() / 8000; // RTP timestamp units per 8 kHz sample
+            let spp = SPMS * ptime_ms as usize; // samples per packet at AUDIO_RATE
+            let ts_step = codec.clock() / 1000 * ptime_ms; // RTP timestamp units per packet
             let mut encoder = Encoder::new(codec);
             let ssrc: u32 = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -667,7 +773,7 @@ impl RtpSession {
                 let dest = latched.lock().unwrap().unwrap_or(remote);
                 if ctl.hold.load(Ordering::Relaxed) {
                     ctl.tx_level.store(0, Ordering::Relaxed);
-                    ts = ts.wrapping_add(spp as u32 * clk);
+                    ts = ts.wrapping_add(ts_step);
                     n += 1;
                     let next = start + Duration::from_millis(n * ptime_ms as u64);
                     let now = Instant::now();
@@ -691,7 +797,7 @@ impl RtpSession {
                 if let (Some((code, k, ets)), Some(pt)) = (dtmf, dtmf_pt) {
                     // 8 update packets (160 ms), then 3 end packets.
                     let end = k >= 8;
-                    let dur = (spp as u32) * clk * (k.min(8) + 1);
+                    let dur = ts_step * (k.min(8) + 1);
                     pkt.extend_from_slice(&[0x80, if k == 0 { 0x80 | pt } else { pt }]);
                     pkt.extend_from_slice(&seq.to_be_bytes());
                     pkt.extend_from_slice(&ets.to_be_bytes());
@@ -715,7 +821,7 @@ impl RtpSession {
                     if tone.is_none() {
                         if let Some(d) = ctl.inband.lock().unwrap().pop_front() {
                             if let Some((lo, hi)) = dtmf_freqs(d) {
-                                tone = Some((lo, hi, 8 * 120, 8 * 80));
+                                tone = Some((lo, hi, SPMS * 120, SPMS * 80));
                                 tone_t = 0;
                             }
                         }
@@ -725,7 +831,7 @@ impl RtpSession {
                         let s = match &source {
                             AudioSource::Silence => 0,
                             AudioSource::Tone(f) => {
-                                phase += 2.0 * std::f32::consts::PI * f / 8000.0;
+                                phase += 2.0 * std::f32::consts::PI * f / AUDIO_RATE as f32;
                                 if phase > 2.0 * std::f32::consts::PI {
                                     phase -= 2.0 * std::f32::consts::PI;
                                 }
@@ -735,7 +841,8 @@ impl RtpSession {
                                 let s = if v.is_empty() {
                                     0
                                 } else {
-                                    v[sample_idx % v.len()]
+                                    // Samples are 8 kHz: each one lasts two output samples.
+                                    v[(sample_idx / 2) % v.len()]
                                 };
                                 sample_idx += 1;
                                 s
@@ -754,7 +861,7 @@ impl RtpSession {
                             Some((lo, hi, on, gap)) => {
                                 let v = if *on > 0 {
                                     *on -= 1;
-                                    let t = tone_t as f32 / 8000.0;
+                                    let t = tone_t as f32 / AUDIO_RATE as f32;
                                     tone_t += 1;
                                     let w = 2.0 * std::f32::consts::PI;
                                     (((w * *lo * t).sin() + (w * *hi * t).sin()) * 6000.0) as i16
@@ -800,7 +907,7 @@ impl RtpSession {
                     stats.lock().unwrap().sent_packets += 1;
                 }
                 seq = seq.wrapping_add(1);
-                ts = ts.wrapping_add(spp as u32 * clk);
+                ts = ts.wrapping_add(ts_step);
                 n += 1;
                 let next = start + Duration::from_millis(n * ptime_ms as u64);
                 let now = Instant::now();
@@ -860,6 +967,53 @@ pub fn bind_udp(addr: SocketAddr, dscp: u8) -> std::io::Result<UdpSocket> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tone(hz: f32, n: usize) -> Vec<i16> {
+        (0..n)
+            .map(|i| {
+                ((i as f32 * 2.0 * std::f32::consts::PI * hz / AUDIO_RATE as f32).sin() * 10000.0)
+                    as i16
+            })
+            .collect()
+    }
+
+    #[test]
+    fn halfband_passes_voice_and_blocks_aliases() {
+        let peak = |v: &[i16]| {
+            v.iter()
+                .skip(200)
+                .map(|s| s.unsigned_abs())
+                .max()
+                .unwrap_or(0)
+        };
+        let mut hb = Halfband::new();
+        let mut out = Vec::new();
+        hb.down(&tone(1000.0, 3200), &mut out);
+        assert!(peak(&out) > 9000, "1 kHz passes: {}", peak(&out));
+        let mut hb = Halfband::new();
+        let mut out = Vec::new();
+        hb.down(&tone(6000.0, 3200), &mut out);
+        assert!(
+            peak(&out) < 200,
+            "6 kHz is removed, not folded to 2 kHz: {}",
+            peak(&out)
+        );
+        // Up: 1 kHz at 8 kHz becomes 1 kHz at 16 kHz with no image at 7 kHz.
+        let n: Vec<i16> = (0..1600)
+            .map(|i| {
+                ((i as f32 * 2.0 * std::f32::consts::PI * 1000.0 / 8000.0).sin() * 10000.0) as i16
+            })
+            .collect();
+        let mut hb = Halfband::new();
+        let mut up = Vec::new();
+        hb.up(&n, &mut up);
+        assert_eq!(up.len(), 3200);
+        assert!(
+            (peak(&up) as i32 - 10000).abs() < 600,
+            "unity gain: {}",
+            peak(&up)
+        );
+    }
 
     #[test]
     fn opus_roundtrip_keeps_a_tone() {

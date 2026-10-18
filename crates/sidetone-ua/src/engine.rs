@@ -4,7 +4,7 @@
 //! callers talk to it through commands and read snapshots, events and a
 //! live SIP trace.
 
-use crate::media::{AudioSource, Codec, Ring, RtpSession};
+use crate::media::{AudioSource, Codec, Ring, RtpSession, AUDIO_RATE, SPMS};
 use crate::profile::{DtmfMode, Profile};
 use crate::sipmsg::{self, build_request, build_response};
 use crate::tap::Tap;
@@ -1932,26 +1932,31 @@ impl Core {
             self.tone_t = 0;
             return;
         }
-        let w = 2.0 * std::f32::consts::PI / 8000.0;
-        while io.speaker.len() < 1600 {
-            let mut buf = [0i16; 160];
+        let w = 2.0 * std::f32::consts::PI / AUDIO_RATE as f32;
+        while io.speaker.len() < SPMS * 200 {
+            let mut buf = [0i16; SPMS * 20];
             for b in buf.iter_mut() {
                 let t = self.tone_t;
                 self.tone_t += 1;
                 let ts = t as f32;
                 *b = if ringing_in {
                     // Two short bursts every 3 s, warbling between 1300 and 1600 Hz.
-                    let ph = t % 24000;
-                    let on = ph < 3200 || (4800..8000).contains(&ph);
+                    let ph = t % (SPMS as u64 * 3000);
+                    let ms = SPMS as u64;
+                    let on = ph < ms * 400 || (ms * 600..ms * 1000).contains(&ph);
                     if on {
-                        let f = if (t / 400) % 2 == 0 { 1300.0 } else { 1600.0 };
+                        let f = if (t / (SPMS as u64 * 50)) % 2 == 0 {
+                            1300.0
+                        } else {
+                            1600.0
+                        };
                         ((w * f * ts).sin() * 7000.0) as i16
                     } else {
                         0
                     }
                 } else {
                     // Ringback: 440 + 480 Hz, 2 s on, 4 s off.
-                    if t % 48000 < 16000 {
+                    if t % (SPMS as u64 * 6000) < SPMS as u64 * 2000 {
                         (((w * 440.0 * ts).sin() + (w * 480.0 * ts).sin()) * 3500.0) as i16
                     } else {
                         0
@@ -2398,7 +2403,7 @@ impl Core {
             );
             return;
         }
-        let ring = || Ring::new(1600);
+        let ring = || Ring::new(SPMS * 200);
         self.conf = Some(Conf {
             a,
             b,

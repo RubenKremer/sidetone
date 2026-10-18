@@ -1807,7 +1807,7 @@ function fieldHtml(f, value, id) {
       const order = [...cur, ...all.filter((c) => !cur.includes(c))];
       return `<div class="fld"><span>${esc(label)}</span><ol class="codecs" id="${id}">${order
         .map((c) => `<li data-codec="${c}"><label class="check"><input type="checkbox" ${cur.includes(c) ? "checked" : ""}> ${CODEC_NAMES[c]}</label><button type="button" class="linklike" data-up>Up</button></li>`)
-        .join("")}</ol><span class="hint">Opus is encoded from the phone's 8 kHz audio (narrowband) on a 48 kHz RTP clock, with in-band FEC.</span></div>`;
+        .join("")}</ol><span class="hint">Opus carries wideband audio (16 kHz, up to 7 kHz of voice) on a 48 kHz RTP clock, with in-band FEC. G.711 is converted to and from 8 kHz.</span></div>`;
     }
     case "lines":
       return `<label class="fld">${esc(label)} ${h}<textarea id="${id}" rows="6" spellcheck="false">${esc((value || []).join("\n"))}</textarea></label>`;
