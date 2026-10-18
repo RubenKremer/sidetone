@@ -25,7 +25,7 @@ const H = {
       ]],
       ["TCP, TLS, SRTP, BLF, presence and conference", [
         "Account, Network: Transport chooses UDP, TCP or TLS. TLS uses port 5061 by default; turn Check the server's TLS certificate off for a PBX with a self-signed certificate.",
-        "Account, Media: SRTP Optional offers keys (a=crypto, SDES) and falls back to RTP; Required rejects calls without SRTP with 488. The Current call card shows whether media is encrypted.",
+        "Account, Media: SRTP Optional offers encryption and falls back to RTP; Required rejects or ends calls without it. SRTP keys: SDES (a=crypto, use with TLS) or DTLS-SRTP (handshake on the media path, certificate checked against a=fingerprint). The Current call card shows the suite and whether the fingerprint matched.",
         "Account, BLF: one extension per line. Each appears under the keypad as Free, Ringing or Busy (SUBSCRIBE to the dialog event); click one to call it.",
         "Presence: when the server offers it, each lamp also shows Away, Do not disturb or Offline and the note (SUBSCRIBE to presence, PIDF). The selector under the account publishes your own presence with PUBLISH; Asterisk does not accept PUBLISH from phones and answers 489.",
         "Conference: with two calls up, select one and press Conference to join the other. Sidetone mixes the audio locally; holding or hanging up either call ends the conference.",
@@ -84,7 +84,7 @@ const H = {
       ]],
       ["TCP, TLS, SRTP, BLF, presença e conferência", [
         "Conta, Rede: Transporte escolhe UDP, TCP ou TLS. TLS usa a porta 5061 por padrão; desligue Verificar o certificado TLS do servidor para um PABX com certificado autoassinado.",
-        "Conta, Mídia: SRTP Opcional oferece chaves (a=crypto, SDES) e cai para RTP; Obrigatória rejeita chamadas sem SRTP com 488. O cartão Chamada atual mostra se a mídia está criptografada.",
+        "Conta, Mídia: SRTP Opcional oferece criptografia e cai para RTP; Obrigatória rejeita ou encerra chamadas sem ela. Chaves SRTP: SDES (a=crypto, use com TLS) ou DTLS-SRTP (handshake no caminho de mídia, certificado conferido com o a=fingerprint). O cartão Chamada atual mostra a suíte e se o fingerprint conferiu.",
         "Conta, BLF: um ramal por linha. Cada um aparece abaixo do teclado como Livre, Tocando ou Ocupado (SUBSCRIBE ao evento dialog); clique para ligar.",
         "Presença: quando o servidor oferece, cada lâmpada também mostra Ausente, Não perturbe ou Offline e a nota (SUBSCRIBE a presence, PIDF). O seletor abaixo da conta publica a sua presença com PUBLISH; o Asterisk não aceita PUBLISH de telefones e responde 489.",
         "Conferência: com duas chamadas ativas, selecione uma e clique Conferência para juntar a outra. O Sidetone mixa o áudio localmente; colocar em espera ou desligar qualquer uma encerra a conferência.",
@@ -143,7 +143,7 @@ const H = {
       ]],
       ["TCP, TLS, SRTP, BLF, presencia y conferencia", [
         "Cuenta, Red: Transporte elige UDP, TCP o TLS. TLS usa el puerto 5061 por defecto; desactiva Verificar el certificado TLS del servidor para una PBX con certificado autofirmado.",
-        "Cuenta, Medios: SRTP Opcional ofrece claves (a=crypto, SDES) y vuelve a RTP; Obligatorio rechaza llamadas sin SRTP con 488. La tarjeta Llamada actual indica si el audio va cifrado.",
+        "Cuenta, Medios: SRTP Opcional ofrece cifrado y vuelve a RTP; Obligatorio rechaza o termina las llamadas sin él. Claves SRTP: SDES (a=crypto, úsalo con TLS) o DTLS-SRTP (handshake en la ruta de medios, certificado comprobado con a=fingerprint). La tarjeta Llamada actual muestra la suite y si el fingerprint coincidió.",
         "Cuenta, BLF: una extensión por línea. Cada una aparece bajo el teclado como Libre, Sonando u Ocupado (SUBSCRIBE al evento dialog); haz clic para llamar.",
         "Presencia: cuando el servidor la ofrece, cada lámpara muestra también Ausente, No molestar o Desconectado y la nota (SUBSCRIBE a presence, PIDF). El selector bajo la cuenta publica tu presencia con PUBLISH; Asterisk no acepta PUBLISH de teléfonos y responde 489.",
         "Conferencia: con dos llamadas activas, selecciona una y pulsa Conferencia para unir la otra. Sidetone mezcla el audio localmente; poner en espera o colgar cualquiera termina la conferencia.",
@@ -202,7 +202,7 @@ const H = {
       ]],
       ["TCP, TLS, SRTP, BLF, Presence und Konferenz", [
         "Konto, Netzwerk: Transport wählt UDP, TCP oder TLS. TLS nutzt standardmäßig Port 5061; schalte TLS-Zertifikat des Servers prüfen bei einer TK-Anlage mit selbstsigniertem Zertifikat aus.",
-        "Konto, Medien: SRTP Optional bietet Schlüssel an (a=crypto, SDES) und fällt auf RTP zurück; Erforderlich lehnt Anrufe ohne SRTP mit 488 ab. Die Karte Aktueller Anruf zeigt, ob die Medien verschlüsselt sind.",
+        "Konto, Medien: SRTP Optional bietet Verschlüsselung an und fällt auf RTP zurück; Erforderlich lehnt Anrufe ohne sie ab oder beendet sie. SRTP-Schlüssel: SDES (a=crypto, mit TLS verwenden) oder DTLS-SRTP (Handshake auf dem Medienpfad, Zertifikat gegen a=fingerprint geprüft). Die Karte Aktueller Anruf zeigt die Suite und ob der Fingerprint passte.",
         "Konto, BLF: eine Nebenstelle pro Zeile. Jede erscheint unter der Wähltastatur als Frei, Klingelt oder Besetzt (SUBSCRIBE auf das Dialog-Event); Klick ruft sie an.",
         "Presence: wenn der Server sie anbietet, zeigt jede Lampe auch Abwesend, Nicht stören oder Offline und die Notiz (SUBSCRIBE auf presence, PIDF). Die Auswahl unter dem Konto veröffentlicht die eigene Presence per PUBLISH; Asterisk nimmt PUBLISH von Telefonen nicht an und antwortet 489.",
         "Konferenz: bei zwei aktiven Anrufen einen auswählen und Konferenz drücken, um den anderen dazuzuholen. Sidetone mischt das Audio lokal; Halten oder Auflegen eines Anrufs beendet die Konferenz.",

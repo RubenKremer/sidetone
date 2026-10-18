@@ -109,6 +109,7 @@ pub fn parse(body: &str) -> Option<Sdp> {
     let mut sdp = Sdp::default();
     let mut session_dir: Option<String> = None;
     let mut session_fp: Option<String> = None;
+    let mut session_setup: Option<String> = None;
     let mut cur: Option<Media> = None;
     let mut seen_v = false;
     for line in body.lines() {
@@ -204,6 +205,7 @@ pub fn parse(body: &str) -> Option<Sdp> {
                     ("fingerprint", Some(m)) => m.fingerprint = val.map(|v| v.to_string()),
                     ("fingerprint", None) => session_fp = val.map(|v| v.to_string()),
                     ("setup", Some(m)) => m.setup = val.map(|v| v.to_string()),
+                    ("setup", None) => session_setup = val.map(|v| v.to_string()),
                     ("ice-ufrag", Some(m)) => m.ice_ufrag = val.map(|v| v.to_string()),
                     ("candidate", Some(m)) => m.candidates.push(val.unwrap_or("").to_string()),
                     _ => {}
@@ -225,6 +227,9 @@ pub fn parse(body: &str) -> Option<Sdp> {
         }
         if m.fingerprint.is_none() {
             m.fingerprint = session_fp.clone();
+        }
+        if m.setup.is_none() {
+            m.setup = session_setup.clone();
         }
     }
     sdp.direction = session_dir;

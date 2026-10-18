@@ -3,6 +3,7 @@
 
 pub mod audio;
 pub mod dns;
+pub mod dtls;
 pub mod engine;
 pub mod media;
 pub mod profile;

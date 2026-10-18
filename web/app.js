@@ -801,7 +801,7 @@ function renderCallDetail() {
       ["Call-ID", m(l.call_id)],
       ["Talk time", l.answered_ms ? dur((l.ended_ms || now) - l.answered_ms) : ""],
       ["Codec", esc(l.codec || "")],
-      ["Media encryption", S.ctl.kind !== "native" && l.state === "connected" ? "DTLS-SRTP (WebRTC)" : l.srtp ? `SRTP (AES_CM_128_HMAC_SHA1)${l.srtp_failed ? ` <span class="bad">${l.srtp_failed} packets failed authentication</span>` : ""}` : l.state === "connected" ? "none (RTP)" : ""],
+      ["Media encryption", S.ctl.kind !== "native" && l.state === "connected" ? "DTLS-SRTP (WebRTC)" : l.srtp ? `${esc(l.security || "SRTP")}${l.srtp_failed ? ` <span class="bad">${l.srtp_failed} packets failed authentication</span>` : ""}` : l.state === "connected" ? "none (RTP)" : ""],
       ["Local media", l.local_media ? m(l.local_media) : ""],
       ["Remote media", l.remote_media ? m(l.remote_media) : ""],
       ["RTP sent / received", l.rtp_sent || l.rtp_received ? `${l.rtp_sent.toLocaleString()} / ${l.rtp_received.toLocaleString()}${l.state === "connected" && !l.held && l.rtp_sent > 100 && l.rtp_received === 0 ? ` <span class="bad">no audio from the far end</span>` : ""}` : ""],
@@ -1829,7 +1829,8 @@ const NATIVE_ACC_TABS = [
   ]],
   ["Media", [
     ["profile.behavior.codecs", "Codecs, in order of preference", "codecs"],
-    ["profile.behavior.srtp", "Media encryption (SRTP, SDES keys)", "select", "Optional offers SRTP and accepts plain RTP; Required offers only RTP/SAVP. Use it with TLS so the keys are not readable on the wire.", [["off", "Off (RTP)"], ["optional", "Optional"], ["mandatory", "Required (RTP/SAVP)"]]],
+    ["profile.behavior.srtp", "Media encryption (SRTP)", "select", "Optional offers SRTP and accepts plain RTP; Required hangs up or rejects calls without it.", [["off", "Off (RTP)"], ["optional", "Optional"], ["mandatory", "Required"]]],
+    ["profile.behavior.srtp_keys", "SRTP keys", "select", "SDES puts the keys in the SDP (a=crypto): use it with TLS. DTLS-SRTP negotiates them on the media path and checks the far end's certificate against a=fingerprint.", [["sdes", "SDES (a=crypto)"], ["dtls", "DTLS-SRTP (a=fingerprint)"]]],
     ["profile.behavior.ptime_ms", "Packet time (ms)", "select", "", [["10", "10"], ["20", "20"], ["30", "30"], ["40", "40"], ["60", "60"]]],
     ["profile.behavior.sdp_direction", "Direction offered", "select", "", [["sendrecv", "sendrecv"], ["sendonly", "sendonly"], ["recvonly", "recvonly"], ["inactive", "inactive"]]],
   ]],
@@ -2066,7 +2067,7 @@ async function defaultBehavior() {
   // The engine fills defaults for a missing behavior; save then read back gives them.
   behaviorDefaults = {
     transport: "udp", tls_verify: true, local_port: 0, local_ip: null, t1_ms: 500, max_forwards: 70, session_timer: 0, user_phone: false, compact_headers: false, require_prack: false,
-    offer_gruu: false, long_contact: false, rport: true, codecs: ["PCMU", "PCMA"], ptime_ms: 20, dtmf_mode: "rfc4733", dtmf_payload_type: 101, srtp: "off",
+    offer_gruu: false, long_contact: false, rport: true, codecs: ["PCMU", "PCMA"], ptime_ms: 20, dtmf_mode: "rfc4733", dtmf_payload_type: 101, srtp: "off", srtp_keys: "sdes",
     symmetric_rtp: true, rtcp: false, rtp_port_start: 40000, rtp_port_end: 49999, dscp_sip: 0, dscp_rtp: 0, keepalive_interval: 0, user_agent: `Sidetone/${S.version || ""}`,
     proxy_require: null, filter_registrar: false, extra_headers: [], sdp_direction: "sendrecv", skip_ack: false, sdp_ip_override: null,
   };

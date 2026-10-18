@@ -559,6 +559,12 @@ pub struct MediaStats {
     pub latched_remote: Option<SocketAddr>,
     /// SRTP packets that failed authentication (wrong key or not SRTP).
     pub srtp_failed: u64,
+    /// DTLS-SRTP progress or outcome, when the call uses it.
+    pub dtls: Option<String>,
+    /// True once DTLS-SRTP keys are in place.
+    pub dtls_ready: bool,
+    /// The DTLS handshake failed.
+    pub dtls_failed: bool,
 }
 
 pub struct RtpSession {
@@ -573,6 +579,8 @@ pub struct RtpSession {
     dtmf_queue: Arc<Mutex<Vec<char>>>,
     /// SRTP keys (send, receive); set before `start` to encrypt the media.
     pub srtp: Option<(crate::srtp::KeyMaterial, crate::srtp::KeyMaterial)>,
+    /// DTLS-SRTP: run a handshake on this socket and take the keys from it.
+    pub dtls: Option<crate::dtls::DtlsParams>,
 }
 
 impl RtpSession {
@@ -603,6 +611,7 @@ impl RtpSession {
                     stats: Arc::new(Mutex::new(MediaStats::default())),
                     ctl: Arc::new(MediaCtl::default()),
                     srtp: None,
+                    dtls: None,
                     dtmf_queue: Arc::new(Mutex::new(Vec::new())),
                 });
             }
@@ -648,16 +657,48 @@ impl RtpSession {
         // Recording is capped at one hour per direction.
         const REC_CAP: usize = AUDIO_RATE as usize * 3600;
 
-        let srtp_rx = self
-            .srtp
-            .as_ref()
-            .map(|(_, rx)| crate::srtp::Context::new(rx));
-        let mut srtp_tx = self
-            .srtp
-            .as_ref()
-            .map(|(tx, _)| crate::srtp::Context::new(tx));
+        // SRTP contexts: from SDES keys now, or from DTLS once it completes.
+        let srtp_rx: Arc<Mutex<Option<crate::srtp::Context>>> = Arc::new(Mutex::new(
+            self.srtp
+                .as_ref()
+                .map(|(_, rx)| crate::srtp::Context::new(rx)),
+        ));
+        let srtp_tx: Arc<Mutex<Option<crate::srtp::Context>>> = Arc::new(Mutex::new(
+            self.srtp
+                .as_ref()
+                .map(|(tx, _)| crate::srtp::Context::new(tx)),
+        ));
+        let dtls: Option<Arc<Mutex<crate::dtls::DtlsSrtp>>> = self
+            .dtls
+            .clone()
+            .map(|p| Arc::new(Mutex::new(crate::dtls::DtlsSrtp::new(p))));
+        let outbox: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+        if dtls.is_some() {
+            stats.lock().unwrap().dtls = Some("DTLS handshake".into());
+        }
+        let on_dtls_event = {
+            let (srtp_rx, srtp_tx, stats) = (srtp_rx.clone(), srtp_tx.clone(), stats.clone());
+            move |ev: Option<crate::dtls::Event>| match ev {
+                Some(crate::dtls::Event::Keys(tx, rx, state)) => {
+                    *srtp_tx.lock().unwrap() = Some(crate::srtp::Context::new(&tx));
+                    *srtp_rx.lock().unwrap() = Some(crate::srtp::Context::new(&rx));
+                    let mut st = stats.lock().unwrap();
+                    st.dtls = Some(state);
+                    st.dtls_ready = true;
+                }
+                Some(crate::dtls::Event::Failed(why)) => {
+                    let mut st = stats.lock().unwrap();
+                    st.dtls = Some(why);
+                    st.dtls_failed = true;
+                }
+                None => {}
+            }
+        };
         {
-            let mut srtp_rx = srtp_rx;
+            let srtp_rx = srtp_rx.clone();
+            let dtls = dtls.clone();
+            let outbox = outbox.clone();
+            let on_dtls_event = on_dtls_event.clone();
             let mut decoder = Decoder::new(codec);
             let ctl = ctl.clone();
             let stop = stop.clone();
@@ -675,7 +716,16 @@ impl RtpSession {
                         continue;
                     };
                     tap.record(from, local, &buf[..n]);
-                    let n = match srtp_rx.as_mut() {
+                    if let Some(d) = &dtls {
+                        if crate::dtls::DtlsSrtp::is_dtls(&buf[..n]) {
+                            let mut out = Vec::new();
+                            let ev = d.lock().unwrap().handle(&buf[..n], &mut out);
+                            outbox.lock().unwrap().extend(out);
+                            on_dtls_event(ev);
+                            continue;
+                        }
+                    }
+                    let n = match srtp_rx.lock().unwrap().as_mut() {
                         Some(c) => match c.unprotect(&mut buf[..n]) {
                             Some(m) => m,
                             None => {
@@ -683,6 +733,8 @@ impl RtpSession {
                                 continue;
                             }
                         },
+                        // DTLS-SRTP without keys yet: nothing can be read.
+                        None if dtls.is_some() => continue,
                         None => n,
                     };
                     let Some(h) = sidetone_core::rtp::parse_rtp(&buf[..n]) else {
@@ -771,7 +823,20 @@ impl RtpSession {
                     stats.lock().unwrap().latched_remote = None;
                 }
                 let dest = latched.lock().unwrap().unwrap_or(remote);
-                if ctl.hold.load(Ordering::Relaxed) {
+                // DTLS: retransmission timers, then whatever the handshake wants sent.
+                if let Some(d) = &dtls {
+                    let mut out = Vec::new();
+                    let ev = d.lock().unwrap().tick(&mut out);
+                    outbox.lock().unwrap().extend(out);
+                    on_dtls_event(ev);
+                }
+                for p in std::mem::take(&mut *outbox.lock().unwrap()) {
+                    if send_sock.send_to(&p, dest).is_ok() {
+                        tap.record(local, dest, &p);
+                    }
+                }
+                let waiting_keys = dtls.is_some() && srtp_tx.lock().unwrap().is_none();
+                if ctl.hold.load(Ordering::Relaxed) || waiting_keys {
                     ctl.tx_level.store(0, Ordering::Relaxed);
                     ts = ts.wrapping_add(ts_step);
                     n += 1;
@@ -899,7 +964,7 @@ impl RtpSession {
                     }
                     first = false;
                 }
-                if let Some(c) = srtp_tx.as_mut() {
+                if let Some(c) = srtp_tx.lock().unwrap().as_mut() {
                     c.protect(&mut pkt);
                 }
                 if send_sock.send_to(&pkt, dest).is_ok() {

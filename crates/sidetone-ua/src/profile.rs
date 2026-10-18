@@ -92,6 +92,9 @@ pub struct Behavior {
     pub dtmf_mode: DtmfMode,
     pub dtmf_payload_type: u8,
     pub srtp: SrtpMode,
+    /// How SRTP keys are exchanged: "sdes" (a=crypto in SDP) or "dtls"
+    /// (DTLS-SRTP handshake on the media path, a=fingerprint in SDP).
+    pub srtp_keys: String,
     /// Send RTP from the receive port and latch to the source of incoming RTP.
     pub symmetric_rtp: bool,
     pub rtcp: bool,
@@ -138,6 +141,7 @@ impl Default for Behavior {
             dtmf_mode: DtmfMode::Rfc4733,
             dtmf_payload_type: 101,
             srtp: SrtpMode::Off,
+            srtp_keys: "sdes".into(),
             symmetric_rtp: true,
             rtcp: false,
             rtp_port_start: 40000,

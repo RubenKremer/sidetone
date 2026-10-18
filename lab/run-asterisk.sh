@@ -2,8 +2,10 @@
 # Starts a throwaway Asterisk on 127.0.0.1 for Sidetone tests:
 #   UDP and TCP 127.0.0.1:5070, TLS 127.0.0.1:5071, WebSocket ws://127.0.0.1:8088/ws
 #   2001/secret2001 (G.711 and Opus) and 3001/secret3001, 4001/secret4001 (WebRTC),
-#   5001/secret5001 (SRTP with SDES keys), anonymous calls into context anon
-#   600 echo, 601 read 4 digits, 602 busy, 603 unallocated, 700 rings 3001, 800 rings 4001
+#   5001/secret5001 (SRTP with SDES keys), 6001/secret6001 (DTLS-SRTP),
+#   anonymous calls into context anon
+#   600 echo, 601 read 4 digits, 602 busy, 603 unallocated, 700 rings 3001, 800 rings 4001,
+#   900 rings 6001
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 dir="${1:-$(mktemp -d)}"

@@ -571,3 +571,77 @@ fn opus_echo() {
     assert_eq!(codec(ib).as_deref(), Some("PCMU"));
     e.cmd(Cmd::HangupAll);
 }
+
+#[test]
+#[ignore]
+fn dtls_srtp() {
+    let settings = PhoneSettings {
+        audio_source: "tone".into(),
+        auto_hold: false,
+        ..Default::default()
+    };
+    let mut d = acc("d", "6001", "secret6001", DtmfMode::Rfc4733);
+    d.profile.behavior.srtp = SrtpMode::Mandatory;
+    d.profile.behavior.srtp_keys = "dtls".into();
+    let a = acc("a", "2001", "secret2001", DtmfMode::Rfc4733);
+    let e = Engine::start(settings, vec![d, a], None);
+    wait_for(&e, "registered", 10, |e| {
+        let st = e.state();
+        st.accounts.len() == 2 && st.accounts.iter().all(|a| a.state == "registered")
+    });
+    let call = |e: &Engine, l: u32| e.state().calls.into_iter().find(|c| c.line == l);
+    // Outgoing: we offer actpass, Asterisk answers and picks its role.
+    let l = e.call(CallRequest {
+        account: Some("d".into()),
+        target: "600".into(),
+        ..Default::default()
+    });
+    wait_for(&e, "DTLS-SRTP echo: handshake, keys and audio", 10, |e| {
+        call(e, l)
+            .map(|c| {
+                c.state == "connected"
+                    && c.security
+                        .as_deref()
+                        .unwrap_or("")
+                        .contains("fingerprint verified")
+                    && c.rtp_received > 50
+                    && c.rx_level > 2000
+            })
+            .unwrap_or(false)
+    });
+    let c = call(&e, l).unwrap();
+    println!("outgoing: {:?}", c.security);
+    assert_eq!(c.srtp_failed, 0);
+    e.cmd(Cmd::Hangup(l));
+    wait_for(&e, "ended", 5, |e| line_state(e, l) != "connected");
+
+    // Incoming: Asterisk offers DTLS to 6001; we answer and take the role left to us.
+    let lo = e.call(CallRequest {
+        account: Some("a".into()),
+        target: "900".into(),
+        ..Default::default()
+    });
+    wait_for(&e, "6001 rings", 10, |e| incoming_line(e, "d").is_some());
+    let li = incoming_line(&e, "d").unwrap();
+    e.cmd(Cmd::Answer(li));
+    wait_for(
+        &e,
+        "incoming DTLS-SRTP call carries audio both ways",
+        10,
+        |e| {
+            let ok = |l| {
+                call(e, l)
+                    .map(|c| c.state == "connected" && c.rx_level > 2000)
+                    .unwrap_or(false)
+            };
+            ok(lo)
+                && ok(li)
+                && call(e, li)
+                    .and_then(|c| c.security)
+                    .unwrap_or_default()
+                    .contains("fingerprint verified")
+        },
+    );
+    println!("incoming: {:?}", call(&e, li).unwrap().security);
+    e.cmd(Cmd::HangupAll);
+}

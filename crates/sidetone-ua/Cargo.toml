@@ -22,8 +22,12 @@ ctr = "0.9"
 hmac = "0.12"
 sha1 = "0.10"
 base64 = "0.22"
+aes-gcm = "0.10"
 opus = "0.4"
 libloading = "0.8"
+rcgen = { version = "0.13", default-features = false, features = ["ring"] }
+sha2 = "0.10"
+dimpl = { version = "0.7", default-features = false, features = ["rust-crypto"] }
 
 [features]
 default = ["audio"]

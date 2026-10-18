@@ -190,6 +190,9 @@ pub struct CallView {
     pub transfer: Option<String>,
     /// Media encrypted with SRTP.
     pub srtp: bool,
+    /// How the media is protected, e.g. "SDES AES_CM_128_HMAC_SHA1_80" or
+    /// "DTLS-SRTP SRTP_AES128_CM_SHA1_80, fingerprint verified".
+    pub security: Option<String>,
     /// Line number of the other party when in a three-way conference.
     pub conference: Option<u32>,
     pub srtp_failed: u64,
@@ -612,6 +615,12 @@ struct Line {
     srtp_savp: bool,
     /// SRTP is running (both keys known).
     srtp_on: bool,
+    /// We offered DTLS-SRTP (UDP/TLS/RTP/SAVP with a=fingerprint).
+    dtls_offer: bool,
+    /// DTLS-SRTP agreed: true when we are the DTLS client (a=setup:active).
+    dtls_client: Option<bool>,
+    /// The DTLS outcome was already reported.
+    dtls_reported: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -916,6 +925,21 @@ fn with_srtp(sdp: String, crypto: &str, savp: bool) -> String {
     format!("{sdp}a=crypto:{crypto}\r\n")
 }
 
+/// DTLS-SRTP media line: UDP/TLS/RTP/SAVP, our certificate fingerprint and
+/// the DTLS role (RFC 5763).
+fn with_dtls(sdp: String, setup: &str) -> String {
+    let sdp = sdp.replacen(" RTP/AVP ", " UDP/TLS/RTP/SAVP ", 1);
+    format!(
+        "{sdp}a=fingerprint:{}\r\na=setup:{setup}\r\n",
+        crate::dtls::local_fingerprint()
+    )
+}
+
+/// The offer or answer asks for DTLS-SRTP.
+fn wants_dtls(m: &sdp::Media) -> bool {
+    m.fingerprint.is_some() && m.proto.to_ascii_uppercase().contains("TLS")
+}
+
 /// First a=crypto of an audio stream with a suite Sidetone supports.
 fn offered_crypto(m: &sdp::Media) -> Option<(u32, crate::srtp::KeyMaterial)> {
     m.crypto
@@ -1193,6 +1217,18 @@ impl Core {
             dtmf_rx: l.dtmf_rx.clone(),
             transfer: l.transfer.clone(),
             srtp: l.srtp_on,
+            security: if l.dtls_client.is_some() {
+                l.rtp
+                    .as_ref()
+                    .and_then(|r| r.stats.lock().unwrap().dtls.clone())
+                    .or_else(|| Some("DTLS-SRTP".into()))
+            } else if l.srtp_on {
+                l.srtp_local
+                    .as_ref()
+                    .map(|(_, k)| format!("SDES {}", k.suite.name()))
+            } else {
+                None
+            },
             conference: self.conf.as_ref().and_then(|c| {
                 if c.a == l.id {
                     Some(c.b)
@@ -1906,6 +1942,7 @@ impl Core {
         }
 
         self.local_tones();
+        self.dtls_outcomes();
 
         // OPTIONS waiters that timed out are answered by on_timeout; clean stale ones.
         let mut w = options_waiters().lock().unwrap();
@@ -2500,6 +2537,9 @@ impl Core {
             srtp_local: None,
             srtp_savp: false,
             srtp_on: false,
+            dtls_offer: false,
+            dtls_client: None,
+            dtls_reported: false,
         }
     }
 
@@ -2588,7 +2628,11 @@ impl Core {
         }
         l.extra_headers = extra;
         l.post_dtmf = post.map(|d| (d, Instant::now()));
-        if p.behavior.srtp != crate::profile::SrtpMode::Off {
+        if p.behavior.srtp != crate::profile::SrtpMode::Off
+            && p.behavior.srtp_keys.eq_ignore_ascii_case("dtls")
+        {
+            l.dtls_offer = true;
+        } else if p.behavior.srtp != crate::profile::SrtpMode::Off {
             l.srtp_local = Some((
                 1,
                 crate::srtp::KeyMaterial::random(crate::srtp::Suite::Sha80),
@@ -2624,6 +2668,14 @@ impl Core {
             .unwrap_or_else(|| b.sdp_direction.clone());
         let rtp_local = l.rtp.as_ref().map(|r| r.local).unwrap_or(l.dest);
         let body = sipmsg::sdp_body(b, rtp_local, &codecs, dtmf, &dir, l.sess_id, l.sdp_ver);
+        if l.dtls_offer || l.dtls_client.is_some() {
+            let setup = match l.dtls_client {
+                None => "actpass",
+                Some(true) => "active",
+                Some(false) => "passive",
+            };
+            return with_dtls(body, setup);
+        }
         match &l.srtp_local {
             Some((tag, km)) => with_srtp(body, &km.sdp(*tag), l.srtp_savp),
             None => body,
@@ -2839,6 +2891,38 @@ impl Core {
                 }
             }
             LState::Ended => {}
+        }
+    }
+
+    /// Reports DTLS-SRTP results and hangs up calls whose handshake failed.
+    fn dtls_outcomes(&mut self) {
+        let mut done = Vec::new();
+        for l in self.lines.values() {
+            if l.dtls_client.is_none() || l.dtls_reported || l.state == LState::Ended {
+                continue;
+            }
+            let Some(r) = &l.rtp else { continue };
+            let st = r.stats.lock().unwrap();
+            if st.dtls_ready || st.dtls_failed {
+                done.push((
+                    l.id,
+                    l.acc,
+                    st.dtls_failed,
+                    st.dtls.clone().unwrap_or_default(),
+                ));
+            }
+        }
+        for (id, acc, failed, text) in done {
+            if let Some(l) = self.lines.get_mut(&id) {
+                l.dtls_reported = true;
+            }
+            if failed {
+                self.event("error", Some(id), Some(acc), format!("{text}; hanging up"));
+                self.send_bye(id, Some(text));
+            } else {
+                self.event("media", Some(id), Some(acc), text);
+            }
+            self.dirty = true;
         }
     }
 
@@ -3061,7 +3145,28 @@ impl Core {
         let offer_savp = offer_m.as_ref().map(|m| m.is_secure()).unwrap_or(false);
         let offer_crypto = offer_m.as_ref().and_then(offered_crypto);
         let mode = b.srtp;
-        let use_srtp = match (offer_crypto.is_some(), mode) {
+        // DTLS-SRTP offer: we take the role the offer leaves us.
+        let offer_dtls = offer_m.as_ref().filter(|m| wants_dtls(m)).map(|m| {
+            let remote_setup = m.setup.clone().unwrap_or_default().to_ascii_lowercase();
+            crate::dtls::DtlsParams {
+                client: remote_setup != "active",
+                remote_fingerprint: m.fingerprint.clone().unwrap_or_default(),
+            }
+        });
+        if offer_dtls.is_some() {
+            if mode == crate::profile::SrtpMode::Off {
+                self.event(
+                    "error",
+                    Some(id),
+                    Some(ai),
+                    "the call requires DTLS-SRTP; enable SRTP in the account's Media settings",
+                );
+                self.reject(id, 488);
+                return;
+            }
+        }
+        let use_srtp = match (offer_crypto.is_some() && offer_dtls.is_none(), mode) {
+            (false, crate::profile::SrtpMode::Mandatory) if offer_dtls.is_some() => false,
             (true, crate::profile::SrtpMode::Off) => {
                 if offer_savp {
                     self.event("error", Some(id), Some(ai), "the call requires SRTP (RTP/SAVP); enable SRTP in the account's Media settings");
@@ -3091,7 +3196,12 @@ impl Core {
             mine.clone()
         };
         let mut body = sipmsg::sdp_body(&b, rtp.local, &codecs, dtmf_pt, dir, l.sess_id, l.sdp_ver);
-        if use_srtp {
+        if let Some(dp) = &offer_dtls {
+            body = with_dtls(body, if dp.client { "active" } else { "passive" });
+            rtp.dtls = Some(dp.clone());
+            l.dtls_client = Some(dp.client);
+            l.srtp_on = true;
+        } else if use_srtp {
             let (tag, remote_km) = offer_crypto.clone().unwrap();
             let mine_km = crate::srtp::KeyMaterial::random(remote_km.suite);
             body = with_srtp(body, &mine_km.sdp(tag), offer_savp);
@@ -4336,7 +4446,29 @@ impl Core {
         }
         // SRTP: the answer to our offer carries the far end's key.
         let mut srtp_missing = false;
-        if !started && !l.srtp_on {
+        if !started && l.dtls_offer && l.dtls_client.is_none() {
+            if wants_dtls(m) {
+                // An answer must pick a role; actpass there is read as passive.
+                let client = !m
+                    .setup
+                    .clone()
+                    .unwrap_or_default()
+                    .eq_ignore_ascii_case("active");
+                if let Some(rtp) = l.rtp.as_mut() {
+                    rtp.dtls = Some(crate::dtls::DtlsParams {
+                        client,
+                        remote_fingerprint: m.fingerprint.clone().unwrap_or_default(),
+                    });
+                }
+                l.dtls_client = Some(client);
+                l.srtp_on = true;
+            } else {
+                // The far end answered plain RTP: only acceptable when SRTP is optional.
+                l.dtls_offer = false;
+                srtp_missing = b.srtp == crate::profile::SrtpMode::Mandatory;
+            }
+        }
+        if !started && !l.srtp_on && l.dtls_client.is_none() {
             if let Some((_, mine_km)) = l.srtp_local.clone() {
                 match offered_crypto(m) {
                     Some((_, remote_km)) => {
@@ -4350,6 +4482,7 @@ impl Core {
             }
         }
         let srtp_on = l.srtp_on;
+        let dtls_on = l.dtls_client.is_some();
         if let Some(rtp) = l.rtp.as_mut() {
             if !started && ip.is_some() {
                 let dtmf_pt = if b.dtmf_mode == DtmfMode::Rfc4733 {
@@ -4374,7 +4507,13 @@ impl Core {
                     Some(acc),
                     format!(
                         "{} {local} <-> {remote} {}",
-                        if srtp_on { "SRTP" } else { "RTP" },
+                        if dtls_on {
+                            "DTLS-SRTP"
+                        } else if srtp_on {
+                            "SRTP"
+                        } else {
+                            "RTP"
+                        },
                         codec.name()
                     ),
                 );
@@ -4394,7 +4533,7 @@ impl Core {
                 "error",
                 Some(id),
                 None,
-                "SRTP is mandatory on this account but the answer has no a=crypto; hanging up",
+                "SRTP is mandatory on this account but the answer has no SRTP keys (a=crypto or a=fingerprint); hanging up",
             );
             self.send_bye(id, Some("SRTP not accepted by the far end".into()));
         }
