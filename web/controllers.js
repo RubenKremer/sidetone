@@ -102,7 +102,7 @@ export class NativeController extends Emitter {
 
 // ---------------------------------------------------------------------------
 
-const WEB_DEFAULT_SETTINGS = { dnd: false, dnd_code: 486, auto_answer: false, auto_answer_delay_ms: 1000, max_lines: 1, ring_timeout_s: 120 };
+const WEB_DEFAULT_SETTINGS = { dnd: false, dnd_code: 486, auto_answer: false, auto_answer_delay_ms: 1000, max_lines: 4, auto_hold: true, ring_timeout_s: 120 };
 
 export function webAccountDefaults() {
   return { id: `w${Date.now().toString(36)}`, label: "", enabled: true, register: true, user: "", authUser: "", password: "", displayName: "", domain: "", ws: "", ice: "stun:stun.l.google.com:19302", expires: 300, rememberPassword: false };
@@ -112,7 +112,7 @@ export class WebController extends Emitter {
   constructor() {
     super();
     this.kind = "web";
-    this.features = { multiLine: false, attended: false, record: false, dns: false, stun: true, audioDevices: false, overrides: false, intercom: false };
+    this.features = { multiLine: true, attended: true, conference: true, record: false, dns: false, stun: true, audioDevices: false, overrides: false, intercom: false };
     this.cfg = this.loadConfig();
     this.seq = 0;
     this.phone = null;
@@ -134,6 +134,11 @@ export class WebController extends Emitter {
       if (old && old.ws && old.domain) c.accounts.push({ ...webAccountDefaults(), id: "w1", label: old.user, user: old.user || "", authUser: old.authUser || "", domain: old.domain, ws: old.ws, ice: old.stun || "" });
     }
     c.settings = { ...WEB_DEFAULT_SETTINGS, ...(c.settings || {}) };
+    // Versions before multi-line kept max_lines at 1.
+    if (!c.settings.multiline_migrated) {
+      c.settings.max_lines = Math.max(c.settings.max_lines || 1, 4);
+      c.settings.multiline_migrated = true;
+    }
     c.active = c.active || (c.accounts[0] && c.accounts[0].id) || null;
     return c;
   }
@@ -153,12 +158,6 @@ export class WebController extends Emitter {
   snapshot() {
     const now = Date.now();
     this.lines = this.lines.filter((l) => l.state !== "ended" || now - l.ended_ms < 8000);
-    for (const l of this.lines) {
-      if (l === this.cur && l.state !== "ended") {
-        l.tx_level = this.levels.tx;
-        l.rx_level = this.levels.rx;
-      }
-    }
     return {
       seq: this.next(),
       accounts: this.cfg.accounts.map((a) => (this.acc && this.acc.id === a.id ? this.acc : this.accView(a, a.enabled ? "off" : "off"))),
@@ -240,6 +239,18 @@ export class WebController extends Emitter {
     this.publish();
   }
 
+  /// The line that belongs to a WebPhone call.
+  lineOf(c) {
+    return c && this.lines.find((l) => l.call_id === c.callId && l.state !== "ended");
+  }
+
+  /// The WebPhone call behind a line number.
+  callOf(lineNo) {
+    const p = this.phone;
+    const l = this.lines.find((x) => x.line === lineNo);
+    return p && l ? p.calls.get(l.call_id) || null : null;
+  }
+
   hooks() {
     return {
       trace: (e) => {
@@ -263,10 +274,13 @@ export class WebController extends Emitter {
         this.regTimer = setTimeout(() => this.activate(id), 10000);
         this.publish();
       },
-      progress: (r) => {
-        const l = this.cur;
+      progress: (c, r) => {
+        const l = this.lineOf(c);
         if (!l) return;
-        if (r.status >= 200 && r.status < 300) {
+        if (r.remoteHold !== undefined) {
+          if (l.remote_held !== r.remoteHold) this.event("call", r.remoteHold ? "put on hold by the far end" : "resumed by the far end", l.line);
+          l.remote_held = r.remoteHold;
+        } else if (r.status >= 200 && r.status < 300) {
           l.state = "connected";
           l.answered_ms = Date.now();
           l.final_code = r.status;
@@ -277,48 +291,63 @@ export class WebController extends Emitter {
         }
         this.publish();
       },
-      ice: (s) => this.cur && this.event("media", `ICE ${s}`, this.cur.line),
-      stats: (s) => {
-        const l = this.cur;
-        if (!l) return;
-        Object.assign(l, { codec: (s.codec || "").replace(/^audio\//, "") || l.codec, rtp_sent: s.sent ?? l.rtp_sent, rtp_received: s.recv ?? l.rtp_received, remote_media: s.path || l.remote_media });
+      ice: (c, s) => {
+        const l = this.lineOf(c);
+        if (l) this.event("media", `ICE ${s}`, l.line);
       },
-      onIncoming: (from, m) => {
+      stats: (c, s) => {
+        const l = this.lineOf(c);
+        if (!l) return;
+        Object.assign(l, {
+          codec: (s.codec || "").replace(/^audio\//, "") || l.codec,
+          rtp_sent: s.sent ?? l.rtp_sent,
+          rtp_received: s.recv ?? l.rtp_received,
+          remote_media: s.path || l.remote_media,
+          rx_level: s.rx_level != null && !l.held ? Math.round(s.rx_level * 32767) : 0,
+          tx_level: s.tx_level != null && !l.muted && !l.held ? Math.round(s.tx_level * 32767) : 0,
+        });
+      },
+      onIncoming: (c, from, m) => {
         const uri = (from.match(/<([^>]+)>/) || [, from])[1];
         const name = (from.match(/^\s*"?([^"<]+?)"?\s*</) || [])[1] || null;
         const l = this.newLine("in", uri.replace(/^sips?:/, "").replace(/;.*$/, ""), name, m.h("call-id"));
         l.state = "incoming";
-        this.cur = l;
         const st = this.cfg.settings;
         if (st.dnd) {
           this.event("incoming", `call from ${l.remote} rejected (DND)`, l.line);
-          this.phone.reject(st.dnd_code || 486, st.dnd_code === 603 ? "Decline" : "Busy Here");
+          this.phone.reject(c, st.dnd_code || 486, st.dnd_code === 603 ? "Decline" : "Busy Here");
           return;
         }
-        this.event("incoming", `incoming call from ${name ? name + " " : ""}<${l.remote}>${st.auto_answer ? " (auto answer)" : ""}`, l.line);
-        if (st.auto_answer) setTimeout(() => this.cmd({ cmd: "answer", line: l.line }), st.auto_answer_delay_ms || 0);
+        const busy = this.lines.some((x) => x !== l && x.state !== "ended");
+        this.event("incoming", `incoming call from ${name ? name + " " : ""}<${l.remote}>${busy ? " (call waiting)" : ""}${st.auto_answer && !busy ? " (auto answer)" : ""}`, l.line);
+        if (st.auto_answer && !busy) setTimeout(() => this.cmd({ cmd: "answer", line: l.line }), st.auto_answer_delay_ms || 0);
         this.publish();
       },
-      onNotify: (frag) => {
-        const l = this.cur;
+      onNotify: (c, frag) => {
+        const l = this.lineOf(c);
         if (!l) return;
         l.transfer = /^SIP\/2\.0 2\d\d/.test(frag) ? "transfer completed" : `transfer progress: ${frag}`;
         this.event("transfer", `transfer progress: ${frag}`, l.line);
-        if (/^SIP\/2\.0 2\d\d/.test(frag)) this.phone.hangup();
+        if (/^SIP\/2\.0 2\d\d/.test(frag)) this.phone.hangup(c);
       },
-      onDtmf: (d) => {
-        if (this.cur) this.cur.dtmf_rx += d;
-        this.event("dtmf", `received ${d} via SIP INFO`, this.cur && this.cur.line);
+      onDtmf: (c, d) => {
+        const l = this.lineOf(c);
+        if (l) l.dtmf_rx += d;
+        this.event("dtmf", `received ${d} via SIP INFO`, l && l.line);
       },
       onCallEnded: (_p, why, c) => {
-        const l = this.cur;
+        const l = this.lineOf(c);
         if (!l) return;
         l.state = "ended";
         l.ended_ms = Date.now();
         l.reason = why;
         l.final_code = c && c.final ? c.final : l.final_code;
         l.ended_by = /remote/.test(why) ? "remote" : "local";
-        this.lastSummary = this.phone && this.phone.summary();
+        l.rx_level = 0;
+        l.tx_level = 0;
+        for (const o of this.lines) if (o.conference === l.line) o.conference = null;
+        l.conference = null;
+        this.lastSummary = this.phone && this.phone.summary(c);
         this.event("call", `call ended: ${why}`, l.line);
         this.histList.unshift({
           call_id: l.call_id, account: l.account, direction: l.direction, remote: l.remote, remote_name: l.remote_name,
@@ -327,8 +356,6 @@ export class WebController extends Emitter {
         });
         this.histList = this.histList.slice(0, 300);
         store.set("sidetone.web.history", this.histList);
-        this.stopLevels();
-        this.cur = null;
         this.publish();
       },
     };
@@ -339,82 +366,72 @@ export class WebController extends Emitter {
       line: this.lineSeq++, account: this.acc ? this.acc.id : "", call_id: callId || "", direction, remote, remote_name: name,
       state: "calling", started_ms: Date.now(), answered_ms: null, ended_ms: null, codec: null, local_media: "WebRTC", remote_media: null,
       muted: false, held: false, remote_held: false, recording: false, rtp_sent: 0, rtp_received: 0, tx_level: 0, rx_level: 0,
-      final_code: null, reason: null, ended_by: null, dtmf_rx: "", transfer: null,
+      final_code: null, reason: null, ended_by: null, dtmf_rx: "", transfer: null, conference: null,
     };
     this.lines.push(l);
     return l;
   }
 
-  remoteAudio() { return document.getElementById("remote-audio"); }
-
-  startLevels() {
-    const c = this.phone && this.phone.call;
-    if (!c || !c.pc) return;
-    clearInterval(this.levelTimer);
-    this.levelTimer = setInterval(async () => {
-      if (!c.pc || c.pc.connectionState === "closed") return;
-      const rep = await c.pc.getStats();
-      rep.forEach((r) => {
-        if (r.type === "inbound-rtp" && r.kind === "audio" && r.audioLevel != null) this.levels.rx = Math.round(r.audioLevel * 32767);
-        if (r.type === "media-source" && r.kind === "audio" && r.audioLevel != null) this.levels.tx = Math.round(r.audioLevel * 32767);
-      });
-    }, 250);
+  liveLines() {
+    return this.lines.filter((l) => l.state !== "ended");
   }
 
-  stopLevels() {
-    clearInterval(this.levelTimer);
-    this.levels = { tx: 0, rx: 0 };
+  /// Puts every other connected call on hold, except a conference partner.
+  async holdOthers(keep) {
+    if (!this.cfg.settings.auto_hold) return;
+    const k = this.lines.find((x) => x.line === keep);
+    for (const o of this.liveLines()) {
+      if (o.line === keep || o.held || o.state !== "connected" || (k && k.conference === o.line)) continue;
+      await this.cmd({ cmd: "hold", line: o.line, on: true });
+    }
   }
 
   async cmd(o) {
     const p = this.phone;
-    const l = this.cur;
+    const l = o.line != null ? this.lines.find((x) => x.line === o.line) : [...this.lines].reverse().find((x) => x.state !== "ended");
+    const c = l ? this.callOf(l.line) : null;
     switch (o.cmd) {
       case "call": {
         if (!p) throw new Error("No connected account. Check Settings.");
-        if (l && l.state !== "ended") throw new Error("The browser phone handles one call at a time; hang up first.");
+        const max = this.cfg.settings.max_lines || 4;
+        if (this.liveLines().length >= max) throw new Error(`All ${max} lines are in use; hang up one first.`);
         const t = o.target.split(/[?,]/)[0].trim();
         const nl = this.newLine("out", t, null, "");
-        this.cur = nl;
         this.event("call", `calling ${t}`, nl.line);
         this.publish();
-        p.dial(t, this.remoteAudio())
-          .then(() => {
-            if (p.call) {
-              nl.call_id = p.call.callId;
-              this.startLevels();
-            }
-          })
-          .catch((e) => {
-            this.event("error", `call failed: ${e.message || e}`, nl.line);
-            if (this.cur === nl) {
-              nl.state = "ended";
-              nl.ended_ms = Date.now();
-              nl.reason = e.message || String(e);
-              this.cur = null;
-            }
-            this.publish();
-          });
-        // Call-ID is known as soon as the INVITE is built.
-        setTimeout(() => { if (p.call && !nl.call_id) nl.call_id = p.call.callId; }, 50);
+        await this.holdOthers(nl.line);
+        p.maxLines = max;
+        p.dial(t, (call) => { nl.call_id = call.callId; }).catch((e) => {
+          this.event("error", `call failed: ${e.message || e}`, nl.line);
+          if (nl.state !== "ended") {
+            nl.state = "ended";
+            nl.ended_ms = Date.now();
+            nl.reason = e.message || String(e);
+          }
+          this.publish();
+        });
         return { ok: true, line: nl.line };
       }
       case "answer":
-        if (p && l && l.state === "incoming") {
-          await p.answer(this.remoteAudio());
-          this.startLevels();
+        if (p && c && l.state === "incoming") {
+          await this.holdOthers(l.line);
+          await p.answer(c);
         }
         break;
       case "reject":
-        if (p) p.reject(o.code || 486, o.code === 603 ? "Decline" : o.code === 480 ? "Temporarily Unavailable" : "Busy Here");
+        if (p && c) p.reject(c, o.code || 486, o.code === 603 ? "Decline" : o.code === 480 ? "Temporarily Unavailable" : "Busy Here");
         break;
       case "hangup":
+        if (p && c) await p.hangup(c);
+        break;
       case "hangup_all":
-        if (p) await p.hangup();
+        if (p) await Promise.all([...p.calls.values()].map((x) => p.hangup(x)));
         break;
       case "hold":
-        if (p && l) {
-          const st = await p.hold(!!o.on);
+        if (p && c) {
+          if (!o.on) await this.holdOthers(l.line);
+          if (o.on && l.conference) await this.cmd({ cmd: "conference", line: l.line, to_line: l.conference, on: false });
+          const st = await p.hold(c, !!o.on);
           if (st >= 200 && st < 300) {
             l.held = !!o.on;
             this.event("call", o.on ? "hold confirmed" : "resume confirmed", l.line);
@@ -422,25 +439,57 @@ export class WebController extends Emitter {
         }
         break;
       case "mute":
-        if (p && l) {
-          p.mute(!!o.on);
+        if (p && c) {
+          p.mute(c, !!o.on);
           l.muted = !!o.on;
         }
         break;
       case "dtmf":
-        if (p && l) {
-          p.dtmf(o.digits);
+        if (p && c) {
+          p.dtmf(c, o.digits);
           this.event("dtmf", `sent ${o.digits} as RFC 4733 (WebRTC)`, l.line);
         }
         break;
       case "transfer":
-        if (p && l) {
+        if (p && c) {
           l.transfer = `blind transfer to ${o.target}: REFER sent`;
-          const st = await p.refer(o.target);
+          const st = await p.refer(c, o.target);
           l.transfer = st >= 200 && st < 300 ? `REFER accepted (${st}), waiting for NOTIFY` : `transfer failed: REFER answered ${st ?? "nothing"}`;
           this.event("transfer", l.transfer, l.line);
         }
         break;
+      case "attended_transfer": {
+        const l2 = this.lines.find((x) => x.line === o.to_line);
+        const c2 = l2 ? this.callOf(l2.line) : null;
+        if (p && c && c2) {
+          l.transfer = `attended transfer to ${l2.remote}: REFER with Replaces sent`;
+          const st = await p.refer(c, l2.remote, c2);
+          l.transfer = st >= 200 && st < 300 ? `REFER accepted (${st}), waiting for NOTIFY` : `transfer failed: REFER answered ${st ?? "nothing"}`;
+          this.event("transfer", l.transfer, l.line);
+        }
+        break;
+      }
+      case "conference": {
+        const l2 = this.lines.find((x) => x.line === o.to_line);
+        const c2 = l2 ? this.callOf(l2.line) : null;
+        if (p && c && c2) {
+          if (o.on) {
+            l.conference = l2.line;
+            l2.conference = l.line;
+            for (const x of [l, l2]) if (x.held) await this.cmd({ cmd: "hold", line: x.line, on: false });
+          }
+          const ok = p.conference(c, c2, !!o.on);
+          if (o.on && !ok) {
+            l.conference = null;
+            l2.conference = null;
+            throw new Error("Both calls need audio before they can be joined");
+          }
+          l.conference = o.on ? l2.line : null;
+          l2.conference = o.on ? l.line : null;
+          this.event("call", o.on ? `conference: lines ${l.line} and ${l2.line} joined` : "conference split", l.line);
+        }
+        break;
+      }
       case "register": {
         const a = this.cfg.accounts.find((x) => x.id === (o.account || this.cfg.active));
         if (a && a.id !== this.cfg.active) await this.activate(a.id);

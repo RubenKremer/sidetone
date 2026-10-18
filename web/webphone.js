@@ -71,16 +71,17 @@ const param = (v, name) => ((v || "").match(new RegExp(`${name}="?([^";,]+)"?`, 
 export class WebPhone {
   constructor(cfg, ui) {
     this.cfg = cfg; // {ws, domain, user, authUser, password, displayName, iceServers}
-    this.ui = ui; // {log(text), state(text), onCallEnded(phone), onIncoming(from)}
+    // ui hooks get the call they are about: progress(c, r), ice(c, s), stats(c, s),
+    // onIncoming(c, from, m), onNotify(c, frag), onDtmf(c, d), onCallEnded(phone, why, c)
+    this.ui = ui;
     this.log = [];
-    this.pending = new Map(); // branch -> resolve
+    this.pending = new Map(); // branch -> {resolve, onProvisional}
     this.host = `${rnd(12)}.invalid`;
     this.regCallId = rnd(20);
     this.regTag = rnd(8);
     this.cseq = 1;
     this.nc = 0;
-    this.call = null;
-    this.stats = [];
+    this.calls = new Map(); // Call-ID -> call
   }
 
   connect() {
@@ -124,7 +125,7 @@ export class WebPhone {
       `From: ${from}`,
       `To: ${to}`,
       `Call-ID: ${callId}`,
-      `CSeq: ${cseq} ${method === "CANCEL" || method === "ACK" ? method : method}`,
+      `CSeq: ${cseq} ${method}`,
       `Contact: ${this.contact()}`,
       "User-Agent: Sidetone Web Phone",
       ...extra,
@@ -167,6 +168,23 @@ export class WebPhone {
     });
   }
 
+  /// Sends an in-dialog request and repeats it once with credentials when challenged.
+  async requestAuth(c, method, extra = [], body = "") {
+    let auth = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const text = this.inDialog(c, method, this.cseq++, auth ? [...extra, auth] : extra, body);
+      const branch = text.match(/branch=([^;\r\n]+)/)[1];
+      const r = await this.request(text, branch);
+      if (r && (r.status === 401 || r.status === 407) && !auth && this.cfg.password) {
+        const ch = r.status === 401 ? r.h("www-authenticate") : r.h("proxy-authenticate");
+        auth = `${r.status === 401 ? "Authorization" : "Proxy-Authorization"}: ${this.digest(ch, method, c.remoteTarget)}`;
+        continue;
+      }
+      return { r, text, branch };
+    }
+    return { r: null };
+  }
+
   onMessage(text) {
     if (!text.trim()) return; // keepalive
     const e = { t_ms: performance.timeOrigin + performance.now(), out: false, text };
@@ -176,7 +194,8 @@ export class WebPhone {
     if (m.status) {
       const p = this.pending.get(m.branch);
       if (!p) {
-        if (m.status >= 200 && m.cseq.endsWith("INVITE") && this.call && this.call.ack) this.send(this.call.ack); // 2xx retransmission
+        const c = this.calls.get(m.h("call-id"));
+        if (m.status >= 200 && m.cseq.endsWith("INVITE") && c && c.ack) this.send(c.ack); // 2xx retransmission
         return;
       }
       if (m.status < 200) {
@@ -204,47 +223,49 @@ export class WebPhone {
   }
 
   onRequest(m) {
-    const c = this.call;
+    const c = this.calls.get(m.h("call-id"));
     switch (m.method) {
       case "OPTIONS":
         this.reply(m, 200, "OK");
         break;
       case "BYE":
-        this.reply(m, 200, "OK");
-        if (c && m.h("call-id") === c.callId) this.end("remote");
+        this.reply(m, c ? 200 : 481, c ? "OK" : "Call/Transaction Does Not Exist");
+        if (c) this.end(c, "remote");
         break;
       case "CANCEL":
         this.reply(m, 200, "OK");
-        if (c && c.incoming && m.h("call-id") === c.callId) {
+        if (c && c.incoming && !c.answered) {
           this.reply(c.invite, 487, "Request Terminated", { toTag: c.localTag });
-          this.end("remote cancel");
+          this.end(c, "remote cancel");
         }
         break;
       case "INVITE":
-        if (c && m.h("call-id") === c.callId) {
-          // re-INVITE: keep media, answer with current description.
-          this.reply(m, 200, "OK", { toTag: c.localTag, body: c.pc.localDescription.sdp });
+        if (c) {
+          this.reinvited(c, m);
           return;
         }
-        if (c) {
+        if (this.calls.size >= (this.maxLines || 4)) {
           this.reply(m, 486, "Busy Here", { toTag: rnd(8) });
           return;
         }
-        this.call = { incoming: true, invite: m, callId: m.h("call-id"), localTag: rnd(8), started: Date.now() };
-        this.reply(m, 180, "Ringing", { toTag: this.call.localTag });
-        this.ui.onIncoming(m.h("from"), m);
+        {
+          const nc = { incoming: true, invite: m, callId: m.h("call-id"), localTag: rnd(8), started: Date.now() };
+          this.calls.set(nc.callId, nc);
+          this.reply(m, 180, "Ringing", { toTag: nc.localTag });
+          this.ui.onIncoming(nc, m.h("from"), m);
+        }
         break;
       case "ACK":
         if (c) c.acked = true;
         break;
       case "NOTIFY":
         this.reply(m, 200, "OK");
-        if (/refer/i.test(m.h("event") || "") && this.ui.onNotify) this.ui.onNotify(m.body.split("\r\n")[0] || m.body);
+        if (c && /refer/i.test(m.h("event") || "") && this.ui.onNotify) this.ui.onNotify(c, m.body.split("\r\n")[0] || m.body);
         break;
       case "INFO": {
         this.reply(m, 200, "OK");
         const d = (m.body.match(/Signal\s*=\s*(\S)/) || [])[1];
-        if (d && this.ui.onDtmf) this.ui.onDtmf(d);
+        if (c && d && this.ui.onDtmf) this.ui.onDtmf(c, d);
         break;
       }
       case "UPDATE":
@@ -253,6 +274,25 @@ export class WebPhone {
         break;
       default:
         this.reply(m, 405, "Method Not Allowed");
+    }
+  }
+
+  /// re-INVITE from the far end (hold, codec change, session refresh).
+  async reinvited(c, m) {
+    if (!c.pc) {
+      this.reply(m, 491, "Request Pending", { toTag: c.localTag });
+      return;
+    }
+    try {
+      if (m.body) {
+        await c.pc.setRemoteDescription({ type: "offer", sdp: m.body });
+        await c.pc.setLocalDescription(await c.pc.createAnswer());
+        c.remoteHeld = /a=(sendonly|inactive)/.test(m.body);
+        this.ui.progress && this.ui.progress(c, { status: 0, remoteHold: c.remoteHeld });
+      }
+      this.reply(m, 200, "OK", { toTag: c.localTag, body: c.pc.localDescription.sdp });
+    } catch {
+      this.reply(m, 488, "Not Acceptable Here", { toTag: c.localTag });
     }
   }
 
@@ -294,64 +334,118 @@ export class WebPhone {
     return r ? { code: r.status, rtt_ms: Math.round(performance.now() - t), summary: `${r.status} ${r.reason} in ${Math.round(performance.now() - t)} ms${r.h("user-agent") || r.h("server") ? ", " + (r.h("user-agent") || r.h("server")) : ""}` } : null;
   }
 
-  async reinvite(direction) {
-    const c = this.call;
+  async reinvite(c, direction) {
     if (!c || !c.answered || !c.pc) return null;
     c.pc.getTransceivers().forEach((t) => {
       if (t.receiver.track && t.receiver.track.kind === "audio") t.direction = direction;
     });
     await c.pc.setLocalDescription(await c.pc.createOffer());
     await this.gathered(c.pc);
-    const cseq = this.cseq++;
-    const text = this.inDialog("INVITE", cseq, [], c.pc.localDescription.sdp);
-    const branch = text.match(/branch=([^;\r\n]+)/)[1];
-    const r = await this.request(text, branch);
+    const { r, text, branch } = await this.requestAuth(c, "INVITE", [], c.pc.localDescription.sdp);
+    const cseq = text ? +text.match(/\r\nCSeq: (\d+)/)[1] : 0;
     if (r && r.status >= 200 && r.status < 300) {
       await c.pc.setRemoteDescription({ type: "answer", sdp: r.body });
-      this.send(this.inDialog("ACK", cseq));
+      c.ack = this.inDialog(c, "ACK", cseq);
+      this.send(c.ack);
       return r.status;
     }
-    if (r && r.status >= 300) this.send(this.inDialog("ACK", cseq).replace(/branch=[^;\r\n]+/, `branch=${branch}`));
+    if (r && r.status >= 300) this.send(this.inDialog(c, "ACK", cseq).replace(/branch=[^;\r\n]+/, `branch=${branch}`));
     await c.pc.setLocalDescription({ type: "rollback" }).catch(() => {});
     return r ? r.status : null;
   }
 
-  hold(on) {
-    return this.reinvite(on ? "sendonly" : "sendrecv");
+  async hold(c, on) {
+    const st = await this.reinvite(c, on ? "sendonly" : "sendrecv");
+    if (st >= 200 && st < 300) {
+      c.held = on;
+      // A held call is not heard locally either.
+      if (c.audio) c.audio.muted = on;
+    }
+    return st;
   }
 
-  mute(on) {
-    const c = this.call;
-    if (c && c.stream) c.stream.getAudioTracks().forEach((t) => (t.enabled = !on));
+  mute(c, on) {
+    if (!c) return;
+    c.muted = on;
+    if (c.micGain) c.micGain.gain.value = on ? 0 : 1;
   }
 
-  async refer(target) {
-    const c = this.call;
+  async refer(c, target, replaces) {
     if (!c || !c.answered) return null;
-    const uri = this.targetUri(target);
-    const text = this.inDialog("REFER", this.cseq++, [`Refer-To: <${uri}>`, `Referred-By: <${this.aor()}>`]);
-    const branch = text.match(/branch=([^;\r\n]+)/)[1];
-    const r = await this.request(text, branch);
+    let uri = this.targetUri(target);
+    if (replaces) {
+      // Attended transfer (RFC 3891): the target replaces our call with it.
+      // to-tag is the far end's tag of that dialog, from-tag ours, whoever called whom.
+      const r = replaces;
+      const toTag = r.remoteTag || (r.incoming ? param(r.invite.h("from"), "tag") : param(r.to, "tag"));
+      const rep = encodeURIComponent(`${r.callId};to-tag=${toTag};from-tag=${r.localTag}`);
+      const party = r.incoming ? (r.invite.h("from").match(/<([^>]+)>/) || [, r.invite.h("from")])[1] : r.uri;
+      uri = `${party.replace(/;.*$/, "")}?Replaces=${rep}`;
+    }
+    const { r } = await this.requestAuth(c, "REFER", [`Refer-To: <${uri}>`, `Referred-By: <${this.aor()}>`]);
     return r ? r.status : null;
   }
 
-  reject(code = 486, reason = "Busy Here") {
-    const c = this.call;
+  reject(c, code = 486, reason = "Busy Here") {
     if (!c || !c.incoming || c.answered) return;
     this.reply(c.invite, code, reason, { toTag: c.localTag });
-    this.end(`rejected with ${code}`);
+    this.end(c, `rejected with ${code}`);
   }
 
-  async media(remoteAudio) {
+  audioCtx() {
+    if (!this.ctx) this.ctx = new AudioContext();
+    if (this.ctx.state === "suspended") this.ctx.resume().catch(() => {});
+    return this.ctx;
+  }
+
+  /// One microphone for every call; each call sends mic + whatever is
+  /// mixed into it (the other party during a conference).
+  async media(c) {
     const pc = new RTCPeerConnection({ iceServers: this.cfg.iceServers || [] });
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+    if (!this.mic) this.mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = this.audioCtx();
+    const out = ctx.createMediaStreamDestination();
+    const micGain = ctx.createGain();
+    if (!this.micSrc) this.micSrc = ctx.createMediaStreamSource(this.mic);
+    this.micSrc.connect(micGain);
+    micGain.connect(out);
+    const track = out.stream.getAudioTracks()[0];
+    pc.addTrack(track, out.stream);
+    const audio = new Audio();
+    audio.autoplay = true;
     pc.ontrack = (e) => {
-      remoteAudio.srcObject = e.streams[0];
-      remoteAudio.play().catch(() => {});
+      c.remoteStream = e.streams[0];
+      audio.srcObject = e.streams[0];
+      audio.play().catch(() => {});
     };
-    pc.oniceconnectionstatechange = () => this.ui.ice && this.ui.ice(pc.iceConnectionState);
-    return { pc, stream };
+    pc.oniceconnectionstatechange = () => this.ui.ice && this.ui.ice(c, pc.iceConnectionState);
+    Object.assign(c, { pc, out, micGain, audio });
+    return pc;
+  }
+
+  /// Three-way conference in the browser: each side also hears the other.
+  conference(a, b, on) {
+    const ctx = this.audioCtx();
+    const link = (from, to) => {
+      if (!from.remoteStream) return null;
+      const src = ctx.createMediaStreamSource(from.remoteStream);
+      src.connect(to.out);
+      return src;
+    };
+    for (const c of [a, b]) {
+      (c.confLinks || []).forEach((n) => n.disconnect());
+      c.confLinks = [];
+      c.conference = null;
+    }
+    if (!on) return true;
+    const ab = link(a, b);
+    const ba = link(b, a);
+    if (!ab || !ba) return false;
+    b.confLinks.push(ab);
+    a.confLinks.push(ba);
+    a.conference = b.callId;
+    b.conference = a.callId;
+    return true;
   }
 
   gathered(pc) {
@@ -368,29 +462,39 @@ export class WebPhone {
     return target.includes("@") ? `sip:${target}` : `sip:${target}@${this.cfg.domain}`;
   }
 
-  async dial(target, remoteAudio) {
+  /// Starts a call; `created(c)` runs as soon as the call (and its Call-ID) exists.
+  async dial(target, created) {
     const uri = this.targetUri(target);
-    const { pc, stream } = await this.media(remoteAudio);
-    const c = (this.call = { incoming: false, pc, stream, callId: rnd(20), localTag: rnd(8), uri, started: Date.now() });
-    await pc.setLocalDescription(await pc.createOffer());
-    await this.gathered(pc);
+    const c = { incoming: false, callId: rnd(20), localTag: rnd(8), uri, started: Date.now() };
+    this.calls.set(c.callId, c);
+    created && created(c);
+    let pc;
+    try {
+      pc = await this.media(c);
+      await pc.setLocalDescription(await pc.createOffer());
+      await this.gathered(pc);
+    } catch (e) {
+      this.end(c, `microphone or WebRTC failed: ${e.message || e}`);
+      throw e;
+    }
+    if (c.ended) return null;
     let auth = null;
     let cseq = this.cseq++;
     for (let attempt = 0; attempt < 2; attempt++) {
       const branch = `z9hG4bK${rnd(14)}`;
       c.branch = branch;
       c.cseq = cseq;
-      const extra = ["Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE", "Supported: replaces, ice"];
+      const extra = ["Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE, REFER, NOTIFY", "Supported: replaces, ice"];
       if (auth) extra.push(auth);
       const text = this.build("INVITE", uri, { from: `<${this.aor()}>;tag=${c.localTag}`, to: `<${uri}>`, callId: c.callId, cseq, branch, extra, body: pc.localDescription.sdp });
       c.inviteText = text;
       const r = await this.request(text, branch, (p) => {
         c.provisional = p.status;
         if (p.status > 100) c.ringing = true;
-        this.ui.progress && this.ui.progress(p);
+        this.ui.progress && this.ui.progress(c, p);
       });
       if (!r) {
-        this.end("no answer (timeout)");
+        this.end(c, "no answer (timeout)");
         return null;
       }
       if (r.status >= 300) {
@@ -405,7 +509,7 @@ export class WebPhone {
       }
       if (r.status >= 300) {
         c.final = r.status;
-        this.end(`${r.status} ${r.reason}`);
+        this.end(c, `${r.status} ${r.reason}`);
         return r.status;
       }
       // 2xx: dialog established.
@@ -414,93 +518,93 @@ export class WebPhone {
       c.routes = (r.headers["record-route"] || []).slice().reverse();
       c.to = r.h("to");
       await pc.setRemoteDescription({ type: "answer", sdp: r.body });
-      c.ack = this.inDialog("ACK", cseq);
+      c.ack = this.inDialog(c, "ACK", cseq);
       this.send(c.ack);
       c.answered = Date.now();
       c.final = r.status;
-      this.ui.progress && this.ui.progress(r);
-      this.startStats();
+      this.ui.progress && this.ui.progress(c, r);
+      this.startStats(c);
+      if (c.ended) return r.status;
       return r.status;
     }
     return null;
   }
 
-  inDialog(method, cseq, extra = [], body = "") {
-    const c = this.call;
+  inDialog(c, method, cseq, extra = [], body = "") {
     const branch = `z9hG4bK${rnd(14)}`;
     const routes = (c.routes || []).map((r) => `Route: ${r}`);
     const from = c.incoming ? `${c.invite.h("to").replace(/;tag=.*$/, "")};tag=${c.localTag}` : `<${this.aor()}>;tag=${c.localTag}`;
     const to = c.incoming ? c.invite.h("from") : c.to;
-    const text = this.build(method, c.remoteTarget, { from, to, callId: c.callId, cseq, branch, extra: [...routes, ...extra], body });
-    return text;
+    return this.build(method, c.remoteTarget, { from, to, callId: c.callId, cseq, branch, extra: [...routes, ...extra], body });
   }
 
-  async answer(remoteAudio) {
-    const c = this.call;
-    if (!c || !c.incoming) return;
-    const { pc, stream } = await this.media(remoteAudio);
-    Object.assign(c, { pc, stream, started: Date.now() });
+  async answer(c) {
+    if (!c || !c.incoming || c.answered) return;
+    const pc = await this.media(c);
+    c.started = Date.now();
     await pc.setRemoteDescription({ type: "offer", sdp: c.invite.body });
     await pc.setLocalDescription(await pc.createAnswer());
     await this.gathered(pc);
     c.remoteTarget = (c.invite.h("contact") || "").replace(/^.*<([^>]+)>.*$/, "$1");
     c.routes = c.invite.headers["record-route"] || [];
+    c.remoteTag = param(c.invite.h("from"), "tag");
     this.reply(c.invite, 200, "OK", { toTag: c.localTag, body: pc.localDescription.sdp });
     c.answered = Date.now();
     c.final = 200;
-    this.ui.progress && this.ui.progress({ status: 200, reason: "OK" });
-    this.startStats();
+    this.ui.progress && this.ui.progress(c, { status: 200, reason: "OK" });
+    this.startStats(c);
   }
 
-  async hangup() {
-    const c = this.call;
-    if (!c) return;
+  async hangup(c) {
+    if (!c || c.ended) return;
     if (c.answered) {
-      const text = this.inDialog("BYE", this.cseq++, ['Reason: Q.850;cause=16;text="Normal call clearing"']);
+      const text = this.inDialog(c, "BYE", this.cseq++, ['Reason: Q.850;cause=16;text="Normal call clearing"']);
       const branch = text.match(/branch=([^;\r\n]+)/)[1];
+      this.end(c, "local");
       await this.request(text, branch);
-      this.end("local");
     } else if (!c.incoming && c.branch) {
-      const text = this.build("CANCEL", c.uri, { from: `<${this.aor()}>;tag=${c.localTag}`, to: `<${c.uri}>`, callId: c.callId, cseq: c.cseq, branch: c.branch });
-      this.send(text);
-    } else if (c.incoming) {
-      this.reject(603, "Decline");
+      this.send(this.build("CANCEL", c.uri, { from: `<${this.aor()}>;tag=${c.localTag}`, to: `<${c.uri}>`, callId: c.callId, cseq: c.cseq, branch: c.branch }));
+    } else if (!c.incoming) {
+      this.end(c, "cancelled before the INVITE");
+    } else {
+      this.reject(c, 603, "Decline");
     }
   }
 
-  dtmf(digits) {
-    const s = this.call && this.call.pc && this.call.pc.getSenders().find((x) => x.dtmf);
+  dtmf(c, digits) {
+    const s = c && c.pc && c.pc.getSenders().find((x) => x.dtmf);
     if (s && s.dtmf.canInsertDTMF) s.dtmf.insertDTMF(digits, 160, 70);
   }
 
-  startStats() {
-    const pc = this.call.pc;
-    this.stats = [];
-    this.statsTimer = setInterval(async () => {
+  startStats(c) {
+    const pc = c.pc;
+    c.stats = [];
+    c.statsTimer = setInterval(async () => {
       if (!pc || pc.connectionState === "closed") return;
       const rep = await pc.getStats();
       const s = { t: Date.now() };
       rep.forEach((r) => {
-        if (r.type === "inbound-rtp" && r.kind === "audio") Object.assign(s, { recv: r.packetsReceived, lost: r.packetsLost, jitter_ms: (r.jitter || 0) * 1000, codecId: r.codecId });
+        if (r.type === "inbound-rtp" && r.kind === "audio") Object.assign(s, { recv: r.packetsReceived, lost: r.packetsLost, jitter_ms: (r.jitter || 0) * 1000, codecId: r.codecId, rx_level: r.audioLevel });
         if (r.type === "outbound-rtp" && r.kind === "audio") s.sent = r.packetsSent;
+        if (r.type === "media-source" && r.kind === "audio") s.tx_level = r.audioLevel;
         if (r.type === "candidate-pair" && r.nominated && r.state === "succeeded") Object.assign(s, { rtt_ms: (r.currentRoundTripTime || 0) * 1000, pair: r.id, local: r.localCandidateId, remote: r.remoteCandidateId });
       });
       if (s.codecId) {
-        const c = rep.get(s.codecId);
-        if (c) s.codec = c.mimeType;
+        const cd = rep.get(s.codecId);
+        if (cd) s.codec = cd.mimeType;
       }
       if (s.local) {
         const l = rep.get(s.local);
         const r = rep.get(s.remote);
         if (l && r) s.path = `${l.candidateType} ${l.address || l.ip}:${l.port} -> ${r.candidateType} ${r.address || r.ip}:${r.port} (${l.protocol})`;
       }
-      this.stats.push(s);
-      this.ui.stats && this.ui.stats(s);
+      c.stats.push(s);
+      this.ui.stats && this.ui.stats(c, s);
     }, 1000);
   }
 
-  summary() {
-    const s = this.stats;
+  summary(c) {
+    const s = (c && c.stats) || [];
     if (!s.length) return null;
     const last = s[s.length - 1];
     const lossPct = last.recv ? (100 * (last.lost || 0)) / ((last.recv || 0) + (last.lost || 0)) : 0;
@@ -517,17 +621,30 @@ export class WebPhone {
     };
   }
 
-  end(why) {
-    const c = this.call;
-    if (!c) return;
-    clearInterval(this.statsTimer);
+  end(c, why) {
+    if (!c || c.ended) return;
+    c.ended = true;
+    clearInterval(c.statsTimer);
+    if (c.conference) {
+      const o = this.calls.get(c.conference);
+      if (o) this.conference(c, o, false);
+    }
     if (c.pc) c.pc.close();
-    if (c.stream) c.stream.getTracks().forEach((t) => t.stop());
-    this.call = null;
+    if (c.micGain) c.micGain.disconnect();
+    if (c.audio) c.audio.srcObject = null;
+    this.calls.delete(c.callId);
+    if (!this.calls.size && this.mic) {
+      // Release the microphone when no call is left.
+      this.mic.getTracks().forEach((t) => t.stop());
+      if (this.micSrc) this.micSrc.disconnect();
+      this.mic = null;
+      this.micSrc = null;
+    }
     this.ui.onCallEnded(this, why, c);
   }
 
   close() {
+    for (const c of [...this.calls.values()]) this.end(c, "account closed");
     if (this.ws) this.ws.close();
   }
 

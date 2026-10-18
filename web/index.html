@@ -101,7 +101,7 @@
       <button type="button" class="tool" data-tool="mute" disabled><svg><use href="#i-mute"/></svg><span>Mute</span></button>
       <button type="button" class="tool" data-tool="transfer" disabled><svg><use href="#i-transfer"/></svg><span>Transfer</span></button>
       <button type="button" class="tool" data-tool="record" disabled data-native><svg><use href="#i-record"/></svg><span>Record</span></button>
-      <button type="button" class="tool" data-tool="conf" disabled data-native><svg><use href="#i-consult"/></svg><span>Conference</span></button>
+      <button type="button" class="tool" data-tool="conf" disabled><svg><use href="#i-consult"/></svg><span>Conference</span></button>
       <button type="button" class="tool" data-tool="keypad" aria-pressed="true"><svg><use href="#i-keypad"/></svg><span>Keypad</span></button>
       <button type="button" class="tool" data-tool="dnd" aria-pressed="false"><svg><use href="#i-dnd"/></svg><span>DND</span></button>
       <button type="button" class="tool" data-tool="aa" aria-pressed="false"><svg><use href="#i-aa"/></svg><span>Auto answer</span></button>
@@ -113,8 +113,8 @@
       <div class="dial"><input id="xfer-to" placeholder="Transfer to" autocomplete="off" spellcheck="false"></div>
       <div class="xfer-btns">
         <button type="button" class="btn small primary" id="xfer-blind">Blind</button>
-        <button type="button" class="btn small" id="xfer-consult" data-native>Consult first</button>
-        <button type="button" class="btn small" id="xfer-complete" data-native hidden>Complete transfer</button>
+        <button type="button" class="btn small" id="xfer-consult">Consult first</button>
+        <button type="button" class="btn small" id="xfer-complete" hidden>Complete transfer</button>
         <button type="button" class="btn small ghost" id="xfer-cancel">Close</button>
       </div>
       <p class="hint" id="xfer-note"></p>

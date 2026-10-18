@@ -125,7 +125,7 @@ const T = {
   "Complete transfer": ["Concluir transferência", "Completar transferencia", "Weiterleitung abschließen"],
   "Close": ["Fechar", "Cerrar", "Schließen"],
   "Blind sends the call away now. Consult calls the target first, then you complete the transfer.": ["Direta envia a chamada agora. Consultar liga antes para o destino e depois você conclui a transferência.", "Directa envía la llamada ahora. Consultar llama primero al destino y luego completas la transferencia.", "Blind leitet sofort weiter. Rückfrage ruft zuerst das Ziel an, danach schließen Sie die Weiterleitung ab."],
-  "The browser phone supports blind transfer.": ["O telefone do navegador faz transferência direta.", "El teléfono del navegador hace transferencia directa.", "Das Browser-Telefon kann blind weiterleiten."],
+  "Blind transfer only on this account.": ["Só transferência direta nesta conta.", "Solo transferencia directa en esta cuenta.", "Nur Blindweiterleitung bei diesem Konto."],
   "Talk to the new party, then complete the transfer.": ["Fale com o destino e depois conclua a transferência.", "Habla con el destino y luego completa la transferencia.", "Mit dem Ziel sprechen, dann die Weiterleitung abschließen."],
   "Consult call ended.": ["A chamada de consulta terminou.", "La llamada de consulta terminó.", "Rückfrage beendet."],
   "Transfer requested": ["Transferência solicitada", "Transferencia solicitada", "Weiterleitung angefordert"],

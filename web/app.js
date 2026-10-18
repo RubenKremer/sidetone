@@ -368,6 +368,7 @@ function renderControls() {
   tool("transfer").disabled = !connected;
   tool("record").disabled = !(connected && S.ctl.features.record);
   const others = liveLines().filter((x) => x.state === "connected" && (!l || x.line !== l.line));
+  tool("conf").hidden = !(S.ctl.kind === "native" || S.ctl.features.conference);
   tool("conf").disabled = !(connected && (l.conference || others.length));
   tool("conf").setAttribute("aria-pressed", String(!!(l && l.conference)));
   tool("record").setAttribute("aria-pressed", String(!!(l && l.recording)));
@@ -571,7 +572,7 @@ function openXfer() {
   $("#xfer-who").textContent = l.remote_name || l.remote;
   $("#xfer-complete").hidden = true;
   $("#xfer-consult").hidden = !S.ctl.features.attended;
-  $("#xfer-note").textContent = S.ctl.features.attended ? "Blind sends the call away now. Consult calls the target first, then you complete the transfer." : "The browser phone supports blind transfer.";
+  $("#xfer-note").textContent = S.ctl.features.attended ? "Blind sends the call away now. Consult calls the target first, then you complete the transfer." : "Blind transfer only on this account.";
   $("#xfer-to").value = "";
   $("#xfer-to").focus();
 }
@@ -1781,8 +1782,8 @@ const CALL_SETTINGS = [
   ["auto_answer", "Auto answer", "bool"],
   ["auto_answer_delay_ms", "Auto answer after (ms)", "number"],
   ["intercom", "Answer intercom calls at once (Call-Info answer-after, Alert-Info)", "bool", "", null, "native"],
-  ["max_lines", "Lines", "number", "", null, "native"],
-  ["auto_hold", "Put the other calls on hold when you answer or resume one", "bool", "", null, "native"],
+  ["max_lines", "Lines", "number"],
+  ["auto_hold", "Put the other calls on hold when you answer or resume one", "bool"],
   ["busy_code", "When all lines are busy, reject with", "select", "", [["486", "486 Busy Here"], ["480", "480 Temporarily Unavailable"], ["503", "503 Service Unavailable"]], "native"],
   ["ring_timeout_s", "Cancel unanswered outgoing calls after (s)", "number", "", null, "native"],
 ];
