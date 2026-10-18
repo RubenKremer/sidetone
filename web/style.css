@@ -659,3 +659,17 @@ body.web-mode [data-native] { display: none !important; }
 .blf-error .dot, .blf-unknown .dot { background: var(--rule-strong); }
 .tools { grid-template-columns: repeat(5, 1fr); }
 .tool span { font-size: 10.5px; }
+
+/* Presence */
+.pres-row { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; align-items: center; }
+.pres-row select { font: inherit; font-size: 13px; padding: 4px 6px; border: 1px solid var(--rule); border-radius: 6px; background: var(--panel); color: var(--ink); }
+.pres-row input { grid-column: 2; font: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid var(--rule); border-radius: 6px; background: var(--panel); color: var(--ink); }
+.pres-row input[hidden] { display: none; }
+.pres-err { color: var(--bad, #b91c1c); }
+.dot.pres-available { background: #22c55e; }
+.dot.pres-away { background: #f59e0b; }
+.dot.pres-busy, .dot.pres-dnd { background: #ef4444; }
+.dot.pres-offline, .dot.pres-none, .dot.pres-unknown { background: var(--rule-strong); }
+.blf-item.pres-away .dot { box-shadow: 0 0 0 2px #f59e0b55; }
+.blf-item.pres-dnd .dot { box-shadow: 0 0 0 2px #ef444455; }
+.blf-item.blf-idle.pres-offline .dot { background: var(--rule-strong); }

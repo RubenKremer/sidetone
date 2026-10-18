@@ -289,6 +289,7 @@ impl Phone {
                     .ok_or_else(|| anyhow!("missing to_line"))? as u32;
                 e.cmd(Cmd::Conference(line()?, to, on))
             }
+            "presence" => e.cmd(Cmd::SetPresence(s("account"), s("status"), s("note"))),
             "register" => e.cmd(Cmd::Register(s("account"))),
             "unregister" => e.cmd(Cmd::Unregister(s("account"))),
             "dnd" | "auto_answer" => {

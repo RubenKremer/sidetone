@@ -140,6 +140,11 @@ pub struct AccountView {
     /// "UDP", "TCP" or "TLS".
     pub transport: String,
     pub blf: Vec<BlfView>,
+    /// Own presence published with PUBLISH (available, away, busy, dnd, offline).
+    pub presence: Option<String>,
+    pub presence_note: Option<String>,
+    /// Why the last PUBLISH failed, if it did.
+    pub presence_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -148,6 +153,10 @@ pub struct BlfView {
     /// unknown, idle, ringing, busy, error
     pub state: String,
     pub detail: Option<String>,
+    /// Presence from SUBSCRIBE Event: presence (PIDF): available, away, busy,
+    /// dnd, offline; None when the server does not offer presence.
+    pub presence: Option<String>,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -273,6 +282,8 @@ pub enum Cmd {
     AttendedTransfer(u32, u32),
     /// Join two lines into a three-way conference (true) or split it (false).
     Conference(u32, u32, bool),
+    /// Publish own presence for an account: status and note.
+    SetPresence(String, String, String),
     Options(Option<String>, String, Sender<Option<(u16, u64, String)>>),
     ClearCapture,
     Shutdown,
@@ -493,6 +504,7 @@ struct Acc {
     last_keepalive: Instant,
     /// Direct client: no registrar, socket bound to every interface.
     direct: bool,
+    publication: Option<Publication>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -616,12 +628,20 @@ enum Purpose {
     Update,
     Options(u64),
     Subscribe(String),
+    Publish(usize),
 }
 
-/// One BLF subscription (RFC 4235 dialog event package).
+/// One subscription for a watched extension: busy lamp (RFC 4235 dialog
+/// event package) or presence (RFC 3856, PIDF bodies).
 struct Sub {
     acc_id: String,
     label: String,
+    /// "dialog" or "presence"
+    event: &'static str,
+    presence: Option<String>,
+    note: Option<String>,
+    /// The server refused this event package: do not ask again.
+    unsupported: bool,
     uri: String,
     call_id: String,
     local_tag: String,
@@ -660,6 +680,105 @@ fn blf_state(body: &str) -> &'static str {
     } else {
         "idle"
     }
+}
+
+/// Presence and note from a PIDF body (RFC 3863, RPID activities RFC 4480).
+fn pidf_state(body: &str) -> (String, Option<String>) {
+    let b = body.to_ascii_lowercase();
+    let text_of = |tag: &str| -> Option<String> {
+        // Matches <note>, <dm:note>, <pp:note> ...
+        let mut rest = body;
+        loop {
+            let i = rest.find('<')?;
+            rest = &rest[i + 1..];
+            let name_end = rest.find(|c: char| c == '>' || c.is_whitespace())?;
+            let name = &rest[..name_end];
+            if name.rsplit(':').next() == Some(tag) && !name.starts_with('/') {
+                let gt = rest.find('>')?;
+                if rest[..gt].ends_with('/') {
+                    continue;
+                }
+                let after = &rest[gt + 1..];
+                let end = after.find("</")?;
+                let t = after[..end].trim();
+                if !t.is_empty() {
+                    return Some(
+                        t.replace("&lt;", "<")
+                            .replace("&gt;", ">")
+                            .replace("&quot;", "\"")
+                            .replace("&apos;", "'")
+                            .replace("&amp;", "&"),
+                    );
+                }
+            }
+        }
+    };
+    let basic = text_of("basic").map(|x| x.to_ascii_lowercase());
+    // An RPID activity element such as <rpid:away/>, <rpid:on-the-phone />.
+    let has = |a: &str| {
+        [format!(":{a}"), format!("<{a}")].iter().any(|pat| {
+            b.match_indices(pat.as_str()).any(|(i, _)| {
+                let next = b[i + pat.len()..].chars().next().unwrap_or(' ');
+                (next == '/' || next == '>' || next.is_whitespace())
+                    && (pat.starts_with('<')
+                        || b[..i]
+                            .rfind('<')
+                            .map(|lt| !b[lt..i].contains('>'))
+                            .unwrap_or(false))
+            })
+        })
+    };
+    let status = if basic.as_deref() == Some("closed") {
+        "offline"
+    } else if has("busy") || has("on-the-phone") || has("meeting") || has("appointment") {
+        "busy"
+    } else if has("away") || has("vacation") || has("lunch") || has("steering") || has("sleeping") {
+        "away"
+    } else if b.contains("do-not-disturb") {
+        "dnd"
+    } else if basic.as_deref() == Some("open") {
+        "available"
+    } else {
+        "unknown"
+    };
+    (status.to_string(), text_of("note"))
+}
+
+/// PIDF body for our own presence.
+fn pidf_body(entity: &str, status: &str, note: &str) -> String {
+    let basic = if status == "offline" {
+        "closed"
+    } else {
+        "open"
+    };
+    let activity = match status {
+        "away" => "<rpid:activities><rpid:away/></rpid:activities>",
+        "busy" => "<rpid:activities><rpid:busy/></rpid:activities>",
+        "dnd" => "<rpid:activities><rpid:busy/></rpid:activities>",
+        _ => "",
+    };
+    let esc = |t: &str| {
+        t.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
+    let note = if note.trim().is_empty() {
+        String::new()
+    } else {
+        format!("<dm:note>{}</dm:note>", esc(note.trim()))
+    };
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<presence xmlns=\"urn:ietf:params:xml:ns:pidf\" xmlns:dm=\"urn:ietf:params:xml:ns:pidf:data-model\" xmlns:rpid=\"urn:ietf:params:xml:ns:pidf:rpid\" entity=\"{entity}\">\r\n<tuple id=\"sidetone\"><status><basic>{basic}</basic></status></tuple>\r\n<dm:person id=\"p1\">{activity}{note}</dm:person>\r\n</presence>\r\n"
+    )
+}
+
+/// Our own presence publication (RFC 3903).
+struct Publication {
+    status: String,
+    note: String,
+    etag: Option<String>,
+    next: Option<Instant>,
+    error: Option<String>,
 }
 
 struct ClientTx {
@@ -979,13 +1098,27 @@ impl Core {
                 blf: self
                     .subs
                     .iter()
-                    .filter(|x| x.acc_id == a.cfg.id)
-                    .map(|x| BlfView {
-                        target: x.label.clone(),
-                        state: x.state.into(),
-                        detail: x.detail.clone(),
+                    .filter(|x| x.acc_id == a.cfg.id && x.event == "dialog")
+                    .map(|x| {
+                        let p = self.subs.iter().find(|y| {
+                            y.acc_id == x.acc_id && y.label == x.label && y.event == "presence"
+                        });
+                        BlfView {
+                            target: x.label.clone(),
+                            state: x.state.into(),
+                            detail: x.detail.clone(),
+                            presence: p.and_then(|p| p.presence.clone()),
+                            note: p.and_then(|p| p.note.clone()),
+                        }
                     })
                     .collect(),
+                presence: a.publication.as_ref().map(|p| p.status.clone()),
+                presence_note: a
+                    .publication
+                    .as_ref()
+                    .map(|p| p.note.clone())
+                    .filter(|n| !n.is_empty()),
+                presence_error: a.publication.as_ref().and_then(|p| p.error.clone()),
             })
             .collect();
         let calls: Vec<CallView> = self
@@ -1187,6 +1320,7 @@ impl Core {
             nc: 0,
             last_keepalive: Instant::now(),
             direct: false,
+            publication: None,
         }
     }
 
@@ -1757,6 +1891,19 @@ impl Core {
         for i in due {
             self.send_subscribe(i);
         }
+        let pubs: Vec<usize> = (0..self.accs.len())
+            .filter(|&i| {
+                self.accs[i]
+                    .publication
+                    .as_ref()
+                    .and_then(|p| p.next)
+                    .map(|t| now >= t)
+                    .unwrap_or(false)
+            })
+            .collect();
+        for ai in pubs {
+            self.send_publish(ai);
+        }
 
         self.local_tones();
 
@@ -1873,9 +2020,18 @@ impl Core {
             Purpose::Info(id) => self.event("dtmf", Some(id), None, "INFO timed out"),
             Purpose::Subscribe(cid) => {
                 if let Some(x) = self.subs.iter_mut().find(|x| x.call_id == cid) {
-                    x.state = "error";
-                    x.detail = Some("no response to SUBSCRIBE".into());
+                    if x.event == "dialog" {
+                        x.state = "error";
+                        x.detail = Some("no response to SUBSCRIBE".into());
+                    }
+                    x.call_id.clear();
                     x.next = Some(Instant::now() + Duration::from_secs(60));
+                }
+            }
+            Purpose::Publish(ai) => {
+                if let Some(p) = self.accs.get_mut(ai).and_then(|a| a.publication.as_mut()) {
+                    p.error = Some("no response to PUBLISH".into());
+                    p.next = Some(Instant::now() + Duration::from_secs(60));
                 }
             }
             Purpose::Cancel | Purpose::Notify | Purpose::Prack | Purpose::Update => {}
@@ -1946,6 +2102,19 @@ impl Core {
             Cmd::BlindTransfer(id, target) => self.blind_transfer(id, &target),
             Cmd::AttendedTransfer(a, b) => self.attended_transfer(a, b),
             Cmd::Conference(a, b, on) => self.conference(a, b, on),
+            Cmd::SetPresence(acc, status, note) => {
+                if let Some(ai) = self.accs.iter().position(|a| a.cfg.id == acc) {
+                    let etag = self.accs[ai].publication.take().and_then(|p| p.etag);
+                    self.accs[ai].publication = Some(Publication {
+                        status,
+                        note,
+                        etag,
+                        next: Some(Instant::now()),
+                        error: None,
+                    });
+                    self.send_publish(ai);
+                }
+            }
             Cmd::Options(acc, target, reply) => self.send_options(acc, target, reply),
             Cmd::ClearCapture => {
                 self.tap.clear();
@@ -3092,14 +3261,25 @@ impl Core {
             .collect();
         self.subs
             .retain(|x| x.acc_id != id || want.contains(&x.label));
-        for t in want {
-            if self.subs.iter().any(|x| x.acc_id == id && x.label == t) {
+        for (t, event) in want
+            .iter()
+            .flat_map(|t| [(t.clone(), "dialog"), (t.clone(), "presence")])
+        {
+            if self
+                .subs
+                .iter()
+                .any(|x| x.acc_id == id && x.label == t && x.event == event)
+            {
                 continue;
             }
             let uri = sipmsg::target_uri(&self.accs[ai].cfg.profile, &t);
             self.subs.push(Sub {
                 acc_id: id.clone(),
                 label: t,
+                event,
+                presence: None,
+                note: None,
+                unsupported: false,
                 uri: uri.clone(),
                 call_id: String::new(),
                 local_tag: String::new(),
@@ -3129,7 +3309,11 @@ impl Core {
         }
         let x = &mut self.subs[i];
         if x.call_id.is_empty() {
-            x.call_id = format!("{}@blf", rand_hex(16));
+            x.call_id = format!(
+                "{}@{}",
+                rand_hex(16),
+                if x.event == "dialog" { "blf" } else { "pres" }
+            );
             x.local_tag = rand_hex(10);
             x.remote_tag.clear();
             x.remote_target = x.uri.clone();
@@ -3149,10 +3333,15 @@ impl Core {
                 "Contact".to_string(),
                 sipmsg::contact(&p, local, &self.accs[ai].instance, false),
             ),
-            ("Event".to_string(), "dialog".to_string()),
+            ("Event".to_string(), x.event.to_string()),
             (
                 "Accept".to_string(),
-                "application/dialog-info+xml".to_string(),
+                if x.event == "dialog" {
+                    "application/dialog-info+xml"
+                } else {
+                    "application/pidf+xml"
+                }
+                .to_string(),
             ),
             ("Expires".to_string(), "600".to_string()),
         ];
@@ -3212,6 +3401,16 @@ impl Core {
                 .max(30);
             x.next = Some(Instant::now() + Duration::from_secs(exp * 9 / 10));
             x.detail = None;
+        } else if x.event == "presence" {
+            // Many PBXs offer only the dialog package; presence just stays off.
+            x.call_id.clear();
+            x.presence = None;
+            if matches!(code, 403 | 404 | 405 | 489 | 501) {
+                x.unsupported = true;
+                x.next = None;
+            } else {
+                x.next = Some(Instant::now() + Duration::from_secs(60));
+            }
         } else {
             x.state = "error";
             x.detail = Some(format!("{code} {}", reason_of(m)));
@@ -3237,13 +3436,107 @@ impl Core {
             .map(|v| v.trim().to_ascii_lowercase().starts_with("terminated"))
             .unwrap_or(false);
         if !m.body.trim().is_empty() {
-            x.state = blf_state(&m.body);
+            if x.event == "dialog" {
+                x.state = blf_state(&m.body);
+            } else {
+                let (p, n) = pidf_state(&m.body);
+                x.presence = Some(p);
+                x.note = n;
+            }
         }
         if terminated {
             x.call_id.clear();
             x.next = Some(Instant::now() + Duration::from_secs(5));
         }
         self.dirty = true;
+    }
+
+    // ----- presence publication (RFC 3903)
+
+    fn send_publish(&mut self, ai: usize) {
+        let a = &self.accs[ai];
+        if a.sock.is_none() || (a.cfg.register && a.state != "registered") {
+            if let Some(p) = self.accs[ai].publication.as_mut() {
+                p.next = Some(Instant::now() + Duration::from_secs(5));
+            }
+            return;
+        }
+        let Some(pb) = a.publication.as_ref() else {
+            return;
+        };
+        let p = a.cfg.profile.clone();
+        let local = a.local;
+        let aor = sipmsg::aor(&p);
+        let body = pidf_body(&aor, &pb.status, &pb.note);
+        let mut extra = vec![
+            ("Event".to_string(), "presence".to_string()),
+            ("Expires".to_string(), "3600".to_string()),
+        ];
+        if let Some(e) = &pb.etag {
+            extra.push(("SIP-If-Match".to_string(), e.clone()));
+        }
+        let branch = new_branch();
+        let text = build_request(
+            &p.behavior,
+            local,
+            "PUBLISH",
+            &aor,
+            &branch,
+            &sipmsg::from_header(&p, &rand_hex(10)),
+            &format!("<{aor}>"),
+            &format!("{}@pub", rand_hex(16)),
+            1,
+            "PUBLISH",
+            &[],
+            &extra,
+            Some(("application/pidf+xml", &body)),
+        );
+        if let Some(pb) = self.accs[ai].publication.as_mut() {
+            pb.next = None;
+        }
+        // Like REGISTER: to the registrar or outbound proxy, not to the AOR's host.
+        let dest = match self.accs[ai].server {
+            Some(d) => d,
+            None => match self.dest_for(ai, &aor) {
+                Ok(d) => d,
+                Err(e) => {
+                    if let Some(pb) = self.accs[ai].publication.as_mut() {
+                        pb.error = Some(e);
+                    }
+                    return;
+                }
+            },
+        };
+        self.start_tx(ai, "PUBLISH", &branch, text, dest, Purpose::Publish(ai));
+    }
+
+    fn publish_result(&mut self, ai: usize, m: &SipMessage) {
+        let code = m.status().unwrap_or(0);
+        let reason = reason_of(m);
+        let Some(p) = self.accs.get_mut(ai).and_then(|a| a.publication.as_mut()) else {
+            return;
+        };
+        if (200..300).contains(&code) {
+            p.etag = m.header("SIP-ETag").map(|e| e.trim().to_string());
+            let exp = m
+                .header("Expires")
+                .and_then(|e| e.trim().parse::<u64>().ok())
+                .unwrap_or(3600)
+                .max(60);
+            p.next = Some(Instant::now() + Duration::from_secs(exp * 9 / 10));
+            p.error = None;
+            let text = format!("presence published: {}", p.status);
+            self.event("reg", None, Some(ai), text);
+        } else if code == 412 && p.etag.is_some() {
+            // The server forgot our publication: start a new one.
+            p.etag = None;
+            p.next = Some(Instant::now());
+        } else {
+            p.error = Some(format!("{code} {reason}"));
+            p.next = None;
+            let text = format!("PUBLISH refused: {code} {reason}");
+            self.event("error", None, Some(ai), text);
+        }
     }
 
     fn session_refresh(&mut self, id: u32) {
@@ -3604,6 +3897,7 @@ impl Core {
                 }
             }
             Purpose::Subscribe(cid) => self.subscribe_result(&cid, &m),
+            Purpose::Publish(ai) => self.publish_result(ai, &m),
             Purpose::Notify | Purpose::Prack | Purpose::Update => {}
         }
         self.dirty = true;
@@ -3625,6 +3919,12 @@ impl Core {
                 );
             }
         } else {
+            if method == "PUBLISH" {
+                if let Some(p) = self.accs.get_mut(ai).and_then(|a| a.publication.as_mut()) {
+                    p.error = Some(format!("authentication failed ({code})"));
+                    p.next = None;
+                }
+            }
             self.event(
                 "error",
                 None,
@@ -4247,7 +4547,7 @@ impl Core {
             "NOTIFY" => {
                 self.respond(ai, &m, from, 200, "OK", None, &[], None);
                 let event = m.header("Event").unwrap_or("").to_ascii_lowercase();
-                if event.starts_with("dialog") {
+                if event.starts_with("dialog") || event.starts_with("presence") {
                     self.blf_notify(&m);
                 }
                 if let (Some(id), true) = (line_id, event.starts_with("refer")) {
@@ -4696,5 +4996,46 @@ fn tx_clone_shallow(tx: &ClientTx) -> ClientTx {
         purpose: tx.purpose.clone(),
         auth_tries: tx.auth_tries,
         completed: None,
+    }
+}
+
+#[cfg(test)]
+mod presence_tests {
+    use super::{pidf_body, pidf_state};
+
+    #[test]
+    fn pidf_states() {
+        // Asterisk, device state only.
+        let ast = r#"<presence entity="sip:3001@pbx" xmlns="urn:ietf:params:xml:ns:pidf" xmlns:dm="urn:ietf:params:xml:ns:pidf:data-model" xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid">
+ <note>Ready</note><tuple id="3001"><status><basic>open</basic></status></tuple><dm:person /></presence>"#;
+        assert_eq!(pidf_state(ast), ("available".into(), Some("Ready".into())));
+        let busy = r#"<presence xmlns="urn:ietf:params:xml:ns:pidf" xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid" xmlns:dm="urn:ietf:params:xml:ns:pidf:data-model">
+ <note>On the phone</note><tuple id="x"><status><basic>open</basic></status></tuple>
+ <dm:person><rpid:activities><rpid:on-the-phone/></rpid:activities></dm:person></presence>"#;
+        assert_eq!(pidf_state(busy).0, "busy");
+        assert_eq!(
+            pidf_state(&busy.replace("on-the-phone/", "on-the-phone /")).0,
+            "busy"
+        );
+        assert_eq!(pidf_state("<presence><tuple><status><basic>open</basic></status></tuple><activities><away/></activities></presence>").0, "away");
+        // A note that merely mentions a word is not an activity.
+        assert_eq!(pidf_state("<presence><note>away from desk soon</note><tuple><status><basic>open</basic></status></tuple></presence>").0, "available");
+        // RFC 4480 style person element with a namespaced note.
+        let away = r#"<presence xmlns="urn:ietf:params:xml:ns:pidf"><tuple id="t"><status><basic>open</basic></status></tuple>
+ <dm:person id="p"><rpid:activities><rpid:away/></rpid:activities><dm:note>At lunch</dm:note></dm:person></presence>"#;
+        assert_eq!(pidf_state(away), ("away".into(), Some("At lunch".into())));
+        let closed =
+            r#"<presence><tuple id="t"><status><basic>closed</basic></status></tuple></presence>"#;
+        assert_eq!(pidf_state(closed).0, "offline");
+        // What we publish reads back the same.
+        let mine = pidf_body("sip:2001@pbx", "away", "Back at 3 <pm>");
+        assert_eq!(
+            pidf_state(&mine),
+            ("away".into(), Some("Back at 3 <pm>".into()))
+        );
+        assert_eq!(
+            pidf_state(&pidf_body("sip:a@b", "offline", "")).0,
+            "offline"
+        );
     }
 }

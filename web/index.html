@@ -65,6 +65,19 @@
       <button type="button" class="icon-btn" id="acct-reg" title="Register again"><svg><use href="#i-refresh"/></svg></button>
     </div>
     <div class="acct-state" id="acct-state">No account yet. Open Settings to add one.</div>
+    <div class="pres-row" id="pres-row" data-native hidden>
+      <span class="dot" id="pres-dot" aria-hidden="true"></span>
+      <select id="my-pres" aria-label="My presence">
+        <option value="">Presence not published</option>
+        <option value="available">Available</option>
+        <option value="away">Away</option>
+        <option value="busy">Busy</option>
+        <option value="dnd">Do not disturb</option>
+        <option value="offline">Appear offline</option>
+      </select>
+      <input id="my-pres-note" placeholder="Note" aria-label="Presence note" spellcheck="false">
+    </div>
+    <div class="hint pres-err" id="pres-err" hidden></div>
 
     <div class="dial">
       <input id="dial" list="dial-history" placeholder="Number or SIP URI" autocomplete="off" spellcheck="false" aria-label="Destination">

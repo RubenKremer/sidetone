@@ -270,14 +270,44 @@ function renderAccounts() {
 }
 
 const BLF_TEXT = { idle: "Free", ringing: "Ringing", busy: "Busy", error: "Error", unknown: "Unknown" };
+const PRES_TEXT = { available: "Available", away: "Away", busy: "Busy", dnd: "Do not disturb", offline: "Offline", unknown: "Unknown" };
 
 function renderBlf() {
   const a = currentAccount();
   const items = a && a.blf ? a.blf : [];
   $("#blf-box").hidden = !items.length;
   $("#blf").innerHTML = items
-    .map((b) => `<button type="button" class="blf-item blf-${esc(b.state)}" data-dial="${esc(b.target)}" title="${esc(b.detail || "")}"><span class="dot"></span><span class="blf-t">${esc(b.target)}</span><span class="blf-s">${esc(t(BLF_TEXT[b.state] || b.state))}</span></button>`)
+    .map((b) => {
+      // A watched phone that is not registered reads as Offline, not Free.
+      const lamp = b.presence === "offline" && b.state === "idle" ? "" : t(BLF_TEXT[b.state] || b.state);
+      // Presence adds to the lamp only when it says something the lamp does not.
+      const pres = b.presence && !(b.presence === "available" && b.state === "idle") && !(b.presence === "busy" && b.state !== "idle") ? t(PRES_TEXT[b.presence] || b.presence) : "";
+      const note = b.note && !/^(ready|on the phone|ringing|unavailable)$/i.test(b.note) ? b.note : "";
+      const sub = [lamp, pres, note].filter(Boolean).join(" · ");
+      const title = [b.detail, b.presence ? `${t("Presence")}: ${t(PRES_TEXT[b.presence] || b.presence)}${b.note ? ` (${b.note})` : ""}` : ""].filter(Boolean).join("\n");
+      return `<button type="button" class="blf-item blf-${esc(b.state)}${b.presence ? ` pres-${esc(b.presence)}` : ""}" data-dial="${esc(b.target)}" title="${esc(title)}"><span class="dot"></span><span class="blf-t">${esc(b.target)}</span><span class="blf-s">${esc(sub)}</span></button>`;
+    })
     .join("");
+  const native = S.ctl.kind === "native";
+  $("#pres-row").hidden = !native || !a || a.register === false;
+  if (native && a) {
+    const sel = $("#my-pres");
+    if (document.activeElement !== sel) sel.value = a.presence || "";
+    const note = $("#my-pres-note");
+    if (document.activeElement !== note && !note.dataset.dirty) note.value = a.presence_note || "";
+    note.hidden = !a.presence;
+    $("#pres-dot").className = `dot pres-${a.presence || "none"}`;
+    $("#pres-err").hidden = !a.presence_error;
+    $("#pres-err").textContent = a.presence_error ? `${t("The server did not take the presence")}: ${a.presence_error}` : "";
+  }
+}
+
+function publishPresence() {
+  const a = currentAccount();
+  if (!a) return;
+  const note = $("#my-pres-note");
+  note.dataset.dirty = "";
+  cmd({ cmd: "presence", account: a.id, status: $("#my-pres").value || "available", note: note.value.trim() });
 }
 
 function renderLines() {
@@ -630,6 +660,16 @@ function bindPhone() {
     }
   });
 
+  $("#my-pres").addEventListener("change", publishPresence);
+  $("#my-pres-note").addEventListener("input", (e) => (e.target.dataset.dirty = "1"));
+  $("#my-pres-note").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      publishPresence();
+      e.target.blur();
+    }
+  });
+  $("#my-pres-note").addEventListener("change", publishPresence);
   $("#blf").addEventListener("click", (e) => {
     const b = e.target.closest("[data-dial]");
     if (b) {
@@ -1713,7 +1753,7 @@ const NATIVE_ACC_TABS = [
     ["profile.behavior.skip_ack", "Do not send ACK for 2xx (reproduces the 32 s drop)", "bool", "testing only"],
   ]],
   ["Headers", [["profile.behavior.extra_headers", "Headers added to every request", "headers"]]],
-  ["BLF", [["blf", "Extensions to watch (busy lamp field)", "lines", "one per line: an extension, user@host or SIP URI. Sidetone subscribes to the dialog event package (RFC 4235) once the account is registered; the PBX needs hints for them."]]],
+  ["BLF", [["blf", "Extensions to watch (busy lamp field)", "lines", "one per line: an extension, user@host or SIP URI. Sidetone subscribes to the dialog event package (RFC 4235) for the lamp and to presence (RFC 3856, PIDF) when the server offers it, once the account is registered; the PBX needs hints for them."]]],
 ];
 
 const WEB_ACC_TABS = [

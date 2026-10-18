@@ -348,6 +348,42 @@ fn transports_srtp_blf_conference() {
             .unwrap_or_default()
     };
     wait_for(&e, "BLF idle", 10, |e| blf(e) == "idle");
+
+    // Presence (Event: presence, PIDF) next to the lamp, driven from the PBX.
+    let pres = |e: &Engine| {
+        e.state()
+            .accounts
+            .iter()
+            .find(|a| a.id == "a")
+            .and_then(|a| a.blf.first().map(|b| (b.presence.clone(), b.note.clone())))
+            .unwrap_or_default()
+    };
+    wait_for(&e, "presence of 3001 known", 10, |e| pres(e).0.is_some());
+    println!("presence of 3001: {:?}", pres(&e));
+    // Own presence: Asterisk does not take PUBLISH from phones, so expect a clean refusal.
+    e.cmd(Cmd::SetPresence(
+        "a".into(),
+        "away".into(),
+        "testing".into(),
+    ));
+    wait_for(&e, "PUBLISH answered", 10, |e| {
+        e.state()
+            .accounts
+            .iter()
+            .any(|a| a.id == "a" && a.presence_error.is_some())
+            || e.events_since(0)
+                .iter()
+                .any(|v| v.text.starts_with("presence published"))
+    });
+    println!(
+        "PUBLISH: {:?}",
+        e.state()
+            .accounts
+            .iter()
+            .find(|a| a.id == "a")
+            .unwrap()
+            .presence_error
+    );
     let l1 = e.call(CallRequest {
         account: Some("a".into()),
         target: "700".into(),
@@ -363,6 +399,10 @@ fn transports_srtp_blf_conference() {
         line_state(e, l1) == "connected"
     });
     wait_for(&e, "BLF busy", 5, |e| blf(e) == "busy");
+    wait_for(&e, "presence follows the call", 5, |e| {
+        pres(e).0.as_deref() == Some("busy")
+    });
+    println!("presence of 3001 in a call: {:?}", pres(&e));
 
     // Three-way conference: a joins b and the echo test.
     let l2 = e.call(CallRequest {
@@ -391,6 +431,9 @@ fn transports_srtp_blf_conference() {
     });
     e.cmd(Cmd::HangupAll);
     wait_for(&e, "BLF idle again", 10, |e| blf(e) == "idle");
+    wait_for(&e, "presence available again", 10, |e| {
+        pres(e).0.as_deref() == Some("available")
+    });
 
     // The capture keeps SIP over TCP as TCP and SIP over TLS as decrypted PDUs.
     let pcap = e.capture();
