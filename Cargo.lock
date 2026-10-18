@@ -3924,6 +3924,7 @@ dependencies = [
  "ctr",
  "hickory-resolver",
  "hmac",
+ "libloading 0.8.9",
  "md-5",
  "opus",
  "rustls",

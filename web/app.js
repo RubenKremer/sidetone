@@ -1556,6 +1556,7 @@ function table(head, rows) {
 let audioPoll = null;
 async function diagOpen() {
   diagAccounts();
+  if (S.ctl.kind === "native") (SN.loaded ? sniffPoll() : sniffLoad());
   const a = currentAccount();
   if (a && !$("#dg-dns-host").value) $("#dg-dns-host").value = (a.domain || "").replace(/:\d+$/, "");
   const nat = (S.st ? S.st.accounts : []).filter((x) => x.public);
@@ -1644,7 +1645,102 @@ async function diagOpen() {
   }
 }
 
+// ---- passive capture on an interface (native only)
+
+const SN = { seen: 0, rows: [], timer: null, loaded: false, running: false };
+
+async function sniffLoad() {
+  if (S.ctl.kind !== "native" || !S.ctl.sniffInterfaces) return;
+  const sel = $("#sn-if");
+  try {
+    const r = await S.ctl.sniffInterfaces();
+    if (r.error) {
+      sel.innerHTML = "";
+      $("#sn-err").innerHTML = `<p class="bad">${esc(r.error)}</p>`;
+      $("#sn-go").disabled = true;
+      return;
+    }
+    const cur = sel.value || store.get("sidetone.sniff.if", "");
+    const list = r.interfaces.filter((i) => i.up || i.addresses.length);
+    sel.innerHTML = list
+      .map((i) => `<option value="${esc(i.name)}" ${i.name === cur ? "selected" : ""}>${esc(i.description && !/^\\Device/.test(i.description) ? `${i.description} (${i.name})` : i.name)}${i.addresses.length ? ` · ${esc(i.addresses.join(", "))}` : ""}</option>`)
+      .join("");
+    $("#sn-go").disabled = false;
+    $("#sn-err").innerHTML = "";
+    SN.loaded = true;
+    $("#sn-status").textContent = r.library || "";
+  } catch (e) {
+    $("#sn-err").innerHTML = `<p class="bad">${esc(e.message || e)}</p>`;
+  }
+  sniffPoll();
+}
+
+function sniffRender(st) {
+  SN.running = !!st.running;
+  $("#sn-go").textContent = t(SN.running ? "Stop" : "Start");
+  $("#sn-go").classList.toggle("danger", SN.running);
+  $("#sn-analyze").disabled = !st.kept;
+  $("#sn-save").disabled = !st.kept;
+  if (st.iface) {
+    const parts = [`${SN.running ? t("Capturing on") : t("Captured on")} ${st.iface}`, `${st.packets.toLocaleString()} ${t("packets")}`, `${st.sip.toLocaleString()} SIP`, `${st.rtp.toLocaleString()} RTP`];
+    $("#sn-status").textContent = parts.join(" · ");
+  }
+  if (st.error) $("#sn-err").innerHTML = `<p class="warn">${esc(st.error)}</p>`;
+  $("#sn-list").innerHTML = SN.rows.length
+    ? table(
+        [t("Time"), t("From"), t("To"), t("Message")],
+        SN.rows
+          .slice(-200)
+          .reverse()
+          .map((m) => [`<span class="mono">${clock(m.ts_ms, true)}</span>`, `<span class="mono">${esc(m.transport.toLowerCase())}:${esc(m.src)}</span>`, `<span class="mono">${esc(m.dst)}</span>`, `<span class="mono ${m.status >= 400 ? "bad" : m.status >= 200 ? "ok" : ""}">${esc(m.first_line)}</span>`])
+      )
+    : "";
+}
+
+async function sniffPoll() {
+  clearTimeout(SN.timer);
+  if (S.ctl.kind !== "native" || !S.ctl.sniffStatus) return;
+  try {
+    const r = await S.ctl.sniffStatus(SN.seen);
+    for (const m of r.sip) SN.seen = Math.max(SN.seen, m.seq);
+    SN.rows.push(...r.sip);
+    if (SN.rows.length > 1000) SN.rows.splice(0, SN.rows.length - 1000);
+    sniffRender(r.status);
+    if (r.status.running && S.page === "diag") SN.timer = setTimeout(sniffPoll, 1000);
+  } catch {
+    /* server gone; the next page open retries */
+  }
+}
+
+async function sniffToggle() {
+  $("#sn-err").innerHTML = "";
+  try {
+    if (SN.running) {
+      await S.ctl.sniffStop();
+    } else {
+      const iface = $("#sn-if").value;
+      store.set("sidetone.sniff.if", iface);
+      SN.rows = [];
+      SN.seen = 0;
+      await S.ctl.sniffStart(iface, $("#sn-filter").value);
+    }
+  } catch (e) {
+    $("#sn-err").innerHTML = `<p class="bad">${esc(e.message || e)}</p>`;
+  }
+  sniffPoll();
+}
+
 function bindDiag() {
+  $("#sn-go").addEventListener("click", sniffToggle);
+  $("#sn-analyze").addEventListener("click", async () => {
+    const b = await S.ctl.sniffPcap();
+    await load(b, `sidetone-interface-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "")}.pcapng`);
+    showWs("analysis");
+  });
+  $("#sn-save").addEventListener("click", async () => {
+    const b = await S.ctl.sniffPcap();
+    download(b, `sidetone-interface-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "")}.pcapng`, "application/vnd.tcpdump.pcap");
+  });
   $("#dg-opt-go").addEventListener("click", async () => {
     const out = $("#dg-opt-out");
     out.innerHTML = `<p class="muted">Waiting for a response (up to 32 s)…</p>`;

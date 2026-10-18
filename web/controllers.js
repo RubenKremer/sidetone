@@ -96,6 +96,15 @@ export class NativeController extends Emitter {
   async stun(servers) { return (await this.http.post("api/diag/stun", JSON.stringify({ servers }), "application/json")).json(); }
   async options(account, target) { return (await this.http.post("api/diag/options", JSON.stringify({ account, target }), "application/json")).json(); }
   async audio() { return (await this.http.get("api/audio/devices")).json(); }
+  async sniffInterfaces() { return (await this.http.get("api/sniff/interfaces")).json(); }
+  async sniffStart(iface, filter) {
+    const j = await (await this.http.post("api/sniff/start", JSON.stringify({ iface, filter }), "application/json")).json();
+    if (j.error) throw new Error(j.error);
+    return j;
+  }
+  async sniffStop() { return (await this.http.post("api/sniff/stop", "{}", "application/json")).json(); }
+  async sniffStatus(since) { return (await this.http.get(`api/sniff/status?since=${since}`)).json(); }
+  async sniffPcap() { return new Uint8Array(await (await this.http.get("api/sniff/pcap")).arrayBuffer()); }
   async audioStatus() { return (await this.http.get("api/audio/status")).json(); }
   async loopback(on) { return (await this.http.post("api/audio/loopback", JSON.stringify({ on }), "application/json")).json(); }
 }

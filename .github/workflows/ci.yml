@@ -71,6 +71,10 @@ jobs:
         run: cargo run -q -p sidetone-cli -- test examples/asterisk-lab.suite.json --out lab-results --junit lab-results/junit.xml
       - name: Phone engine (lines, hold, DTMF, transfers, TCP/TLS, SRTP, BLF, conference)
         run: cargo test -p sidetone-ua --test engine_lab -- --ignored --nocapture --test-threads=1
+      - name: Interface capture (libpcap loaded at run time, needs root)
+        run: |
+          cargo build -q -p sidetone-ua --example sniff_lab
+          sudo target/debug/examples/sniff_lab
       - name: Exported captures open in Wireshark
         run: |
           for f in lab-results/*.pcapng; do tshark -r "$f" -q -z sip,stat > /dev/null; done

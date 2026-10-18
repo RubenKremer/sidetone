@@ -673,3 +673,11 @@ body.web-mode [data-native] { display: none !important; }
 .blf-item.pres-away .dot { box-shadow: 0 0 0 2px #f59e0b55; }
 .blf-item.pres-dnd .dot { box-shadow: 0 0 0 2px #ef444455; }
 .blf-item.blf-idle.pres-offline .dot { background: var(--rule-strong); }
+
+/* Interface capture */
+.sniff-card { grid-column: 1 / -1; }
+.sn-status { font-size: 13px; color: var(--muted); align-self: center; }
+.sniff-card .row + .row { flex-wrap: nowrap; }
+.sn-list { max-height: 420px; overflow: auto; }
+.sn-list table { font-size: 12.5px; }
+.btn.danger { background: #dc2626; border-color: #dc2626; color: #fff; }

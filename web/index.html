@@ -309,6 +309,22 @@
           <h2>Audio</h2>
           <div id="dg-audio"></div>
         </section>
+        <section class="card sniff-card" data-native>
+          <h2>Capture on an interface</h2>
+          <p class="muted">Records other hosts' traffic as it crosses this computer: a PBX, an SBC, a desk phone on a mirrored port. Uses libpcap (Linux, macOS) or Npcap (Windows) and usually needs elevated rights; the error says what to change.</p>
+          <div class="row">
+            <label>Interface <select id="sn-if"></select></label>
+            <label class="grow">Filter (BPF) <input id="sn-filter" value="port 5060 or port 5061 or (udp and portrange 10000-60000)" spellcheck="false"></label>
+            <button type="button" class="btn primary" id="sn-go">Start</button>
+          </div>
+          <div class="row">
+            <span class="sn-status grow" id="sn-status"></span>
+            <button type="button" class="btn" id="sn-analyze" disabled>Analyze</button>
+            <button type="button" class="btn" id="sn-save" disabled>Save pcapng</button>
+          </div>
+          <div class="dg-out" id="sn-err"></div>
+          <div class="sn-list" id="sn-list"></div>
+        </section>
       </div>
     </section>
 

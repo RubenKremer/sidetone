@@ -170,7 +170,7 @@ fn handle(
     let analyze = |b: &[u8]| analyze_bytes(b).map_err(|e| e.to_string());
     match (method, path.as_str()) {
         (Method::Get, "/api/info") => {
-            let mut features = vec!["analyze", "export", "ai-proxy", "ua", "phone"];
+            let mut features = vec!["analyze", "export", "ai-proxy", "ua", "phone", "sniff"];
             if save.is_some() {
                 features.push("native-save");
             }
@@ -353,6 +353,7 @@ fn handle(
                 Err(e) => err(500, e),
             }
         }
+        (m, p) if p.starts_with("/api/sniff/") => sniff_api(&m, p, &q, &body),
         (m, p)
             if p.starts_with("/api/phone/")
                 || p.starts_with("/api/audio/")
@@ -527,6 +528,57 @@ fn phone_api(m: &Method, path: &str, q: &HashMap<String, String>, body: &[u8]) -
             }
         }
         _ => err(404, "unknown phone endpoint"),
+    }
+}
+
+/// Passive capture on a network interface (libpcap / Npcap loaded at run time).
+fn sniff_api(m: &Method, path: &str, q: &HashMap<String, String>, body: &[u8]) -> Resp {
+    use sidetone_ua::sniff;
+    match (m, path) {
+        (Method::Get, "/api/sniff/interfaces") => match sniff::interfaces() {
+            Ok((list, version)) => json_resp(json!({"interfaces": list, "library": version})),
+            Err(e) => json_resp(json!({"interfaces": [], "error": e})),
+        },
+        (Method::Post, "/api/sniff/start") => {
+            let v = match body_json(body) {
+                Ok(v) => v,
+                Err(r) => return r,
+            };
+            let iface = v
+                .get("iface")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let filter = v
+                .get("filter")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            if iface.is_empty() {
+                return err(400, "choose an interface");
+            }
+            match sniff::global().lock().unwrap().start(&iface, &filter) {
+                Ok(()) => json_resp(json!({"ok": true})),
+                Err(e) => err(400, e),
+            }
+        }
+        (Method::Post, "/api/sniff/stop") => {
+            sniff::global().lock().unwrap().stop_capture();
+            json_resp(json!({"ok": true}))
+        }
+        (Method::Get, "/api/sniff/status") => {
+            let since = q
+                .get("since")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
+            let s = sniff::global().lock().unwrap();
+            json_resp(json!({"status": s.status(), "sip": s.sip_since(since, 300)}))
+        }
+        (Method::Get, "/api/sniff/pcap") => ok_bytes(
+            sniff::global().lock().unwrap().to_pcapng(),
+            "application/octet-stream",
+        ),
+        _ => err(404, "unknown capture endpoint"),
     }
 }
 
