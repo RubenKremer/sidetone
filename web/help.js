@@ -41,6 +41,7 @@ const H = {
         "DNS shows how a domain resolves (NAPTR, SRV, A/AAAA) and which address Sidetone uses.",
         "NAT asks STUN servers which public address they see; different ports for different servers mean a symmetric NAT, the classic cause of one-way audio.",
         "Audio lets you pick the microphone and speaker and play the microphone back to check levels.",
+        "Capture on an interface records other hosts' traffic (a PBX, an SBC, a phone on a mirrored port) with a BPF filter, shows SIP as it passes, and opens the result in Analysis. It needs Npcap on Windows and capture rights on Linux and macOS; the message says what to change.",
       ]],
       ["Common problems", [
         "Registration failed 401/403: check user, authentication user and password. 404: the user does not exist on that domain.",
@@ -100,6 +101,7 @@ const H = {
         "DNS mostra como um domínio é resolvido (NAPTR, SRV, A/AAAA) e qual endereço o Sidetone usa.",
         "NAT pergunta a servidores STUN qual endereço público eles veem; portas diferentes para servidores diferentes indicam NAT simétrico, a causa clássica de áudio de um lado só.",
         "Áudio permite escolher microfone e alto-falante e ouvir o próprio microfone para conferir os níveis.",
+        "Captura numa interface grava o tráfego de outros equipamentos (um PABX, um SBC, um telefone numa porta espelhada) com filtro BPF, mostra o SIP enquanto passa e abre o resultado na Análise. Precisa do Npcap no Windows e de permissão de captura no Linux e no macOS; a mensagem diz o que mudar.",
       ]],
       ["Problemas comuns", [
         "Falha no registro 401/403: confira usuário, usuário de autenticação e senha. 404: o usuário não existe nesse domínio.",
@@ -159,6 +161,7 @@ const H = {
         "DNS muestra cómo se resuelve un dominio (NAPTR, SRV, A/AAAA) y qué dirección usa Sidetone.",
         "NAT pregunta a servidores STUN qué dirección pública ven; puertos distintos para servidores distintos indican NAT simétrico, la causa clásica del audio en un solo sentido.",
         "Audio permite elegir micrófono y altavoz y escuchar tu micrófono para comprobar niveles.",
+        "Captura en una interfaz graba el tráfico de otros equipos (una centralita, un SBC, un teléfono en un puerto espejo) con un filtro BPF, muestra el SIP mientras pasa y abre el resultado en Análisis. Necesita Npcap en Windows y permisos de captura en Linux y macOS; el mensaje indica qué cambiar.",
       ]],
       ["Problemas frecuentes", [
         "Registro fallido 401/403: revisa usuario, usuario de autenticación y contraseña. 404: el usuario no existe en ese dominio.",
@@ -218,6 +221,7 @@ const H = {
         "DNS zeigt, wie eine Domain aufgelöst wird (NAPTR, SRV, A/AAAA) und welche Adresse Sidetone nutzt.",
         "NAT fragt STUN-Server nach der öffentlichen Adresse; unterschiedliche Ports je Server bedeuten symmetrisches NAT, die klassische Ursache für einseitiges Audio.",
         "Audio wählt Mikrofon und Lautsprecher und spielt das Mikrofon zur Pegelkontrolle ab.",
+        "Mitschnitt auf einer Schnittstelle zeichnet den Verkehr anderer Geräte auf (TK-Anlage, SBC, ein Telefon an einem gespiegelten Port), mit BPF-Filter, zeigt SIP live und öffnet das Ergebnis in der Analyse. Braucht Npcap unter Windows und Mitschnittrechte unter Linux und macOS; die Meldung sagt, was zu ändern ist.",
       ]],
       ["Häufige Probleme", [
         "Registrierung fehlgeschlagen 401/403: Benutzer, Authentifizierungsbenutzer und Passwort prüfen. 404: den Benutzer gibt es in dieser Domain nicht.",

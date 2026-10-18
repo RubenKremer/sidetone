@@ -118,7 +118,7 @@ are in the dark theme (the Theme button, or your system setting).
     <td width="50%" valign="top">
       <img src="docs/images/sidetone-settings.jpg" alt="Account settings on the Media tab: codecs in order of preference with Opus, PCMU and PCMA ticked, SRTP media encryption set to Optional, packet time and offered direction, and tabs for Account, Server and registration, Network, Media, DTMF, Advanced SIP, Headers and BLF" width="100%">
       <br>
-      <sub>Per-account media: Opus and G.711 in your order, SRTP off, optional or required.</sub>
+      <sub>Per-account media: Opus and G.711 in your order, SRTP off, optional or required, with SDES or DTLS-SRTP keys.</sub>
       <h3>Every knob a desk phone has, and a preview</h3>
       Per account: UDP, TCP or TLS, outbound proxy, expiry and retry, keepalives, local IP and port, rport, symmetric RTP, RTP ports, DSCP, SDP address override, T1, codec order (Opus, PCMU, PCMA), SRTP, ptime, DTMF mode and payload type, session timers, <code>user=phone</code>, compact headers, PRACK, GRUU, long Contact, extra headers, BLF extensions, and a preview of the INVITE they produce. Some exist to reproduce a broken client on purpose, like skipping the ACK.
     </td>
@@ -127,7 +127,7 @@ are in the dark theme (the Theme button, or your system setting).
       <br>
       <sub>Reachability, DNS, NAT and audio checks in one place.</sub>
       <h3>Diagnostics before the call</h3>
-      OPTIONS ping with round trip and server agent, RFC 3263 lookups (NAPTR, SRV for UDP, TCP and TLS, A/AAAA), STUN against two servers to spot a symmetric NAT, the address each registrar sees you from, and a microphone and speaker test with level meters.
+      OPTIONS ping with round trip and server agent, RFC 3263 lookups (NAPTR, SRV for UDP, TCP and TLS, A/AAAA), STUN against two servers to spot a symmetric NAT, the address each registrar sees you from, a microphone and speaker test with level meters, and a live capture on any network interface for traffic that is not the phone's own.
     </td>
   </tr>
   <tr>
@@ -143,7 +143,7 @@ are in the dark theme (the Theme button, or your system setting).
       <br>
       <sub>No install: the browser version on GitHub Pages, calling over WebRTC.</sub>
       <h3>The same phone in the browser</h3>
-      On GitHub Pages Sidetone talks SIP over WebSocket (RFC 7118) with WebRTC audio, so it reaches any PBX or SBC with a WSS listener. One line at a time with hold, mute, blind transfer and DTMF; analysis runs in the page through WebAssembly.
+      On GitHub Pages Sidetone talks SIP over WebSocket (RFC 7118) with WebRTC audio, so it reaches any PBX or SBC with a WSS listener. Several lines with automatic hold and call waiting, mute, blind and attended transfer, a three-way conference mixed with Web Audio, and DTMF; analysis runs in the page through WebAssembly.
     </td>
   </tr>
   <tr>
@@ -171,13 +171,15 @@ are in the dark theme (the Theme button, or your system setting).
     </td>
     <td width="33%" valign="top">
       <h4>Captures in and out</h4>
-      Read: pcap and pcapng (Ethernet, VLAN, Linux cooked v1 and v2, raw IP, loopback), IPv4 and IPv6, SIP over UDP and TCP, TLS key logs from pcapng.
+      Capture live on any network interface (libpcap or Npcap, loaded at run time) with a BPF filter, watch SIP go by, then analyze or save it.
       <br><br>
-      Write: annotated pcapng with findings as packet comments and TLS keys kept; redacted pcapng for sharing; one call or the whole capture; ladder as SVG; report as JSON; stereo WAV of each test call (left sent, right received).
+      Read: pcap and pcapng (Ethernet, VLAN, Linux cooked v1 and v2, raw IP, loopback, Wireshark exported PDUs), IPv4 and IPv6, SIP over UDP, TCP and decrypted TLS, TLS key logs from pcapng.
+      <br><br>
+      Write: the phone's own traffic as it travelled (SIP over TCP as TCP, over TLS as decrypted exported PDUs, like Wireshark's Export PDUs); annotated pcapng with findings as packet comments and TLS keys kept; redacted pcapng for sharing; one call or the whole capture; ladder as SVG; report as JSON; stereo WAV of each test call (left sent, right received).
     </td>
     <td width="33%" valign="top">
       <h4>The phone</h4>
-      Several accounts with re-registration at 90% of the expiry and retry on failure &middot; SIP over UDP, TCP and TLS (certificate check on or off per account) &middot; SRTP with SDES keys (AES_CM_128_HMAC_SHA1_80 and _32, optional or mandatory) &middot; digest auth (MD5, qop auth) &middot; several lines with automatic hold &middot; hold and resume by re-INVITE &middot; mute &middot; blind transfer (REFER) and attended transfer (REFER with Replaces), and being transferred &middot; three-way conference mixed locally &middot; BLF (SUBSCRIBE to the dialog event package) showing idle, ringing and busy &middot; DTMF as RFC 4733, SIP INFO or inband tones, and received digits shown &middot; DND and auto answer with the reject code you choose &middot; intercom answer (Call-Info, Alert-Info) &middot; PRACK, UPDATE, session timers, late offer &middot; ringback and ring tones &middot; per-call WAV recording &middot; DNS SRV and outbound proxy &middot; direct, unregistered calls to any SIP URI (anonymous From, for testing URI dialing) &middot; dial strings with headers and post-answer DTMF (<code>600?Subject=x,,123#</code>) &middot; G.711 &mu;-law and A-law, and Opus (narrowband, in-band FEC) &middot; interface in English, Portuguese (Brazil), Spanish and German, with built-in help &middot; WebRTC with Opus, ICE and DTLS-SRTP in the browser
+      Several accounts with re-registration at 90% of the expiry and retry on failure &middot; SIP over UDP, TCP and TLS (certificate check on or off per account) &middot; SRTP with SDES keys or DTLS-SRTP (certificate checked against a=fingerprint), AES_CM_128_HMAC_SHA1_80 and _32 and AEAD_AES_128/256_GCM, optional or mandatory &middot; digest auth (MD5, qop auth) &middot; several lines with automatic hold &middot; hold and resume by re-INVITE &middot; mute &middot; blind transfer (REFER) and attended transfer (REFER with Replaces), and being transferred &middot; three-way conference mixed locally &middot; BLF (SUBSCRIBE to the dialog event package) showing idle, ringing and busy, with presence (PIDF) when the server offers it, and your own presence published with PUBLISH &middot; DTMF as RFC 4733, SIP INFO or inband tones, and received digits shown &middot; DND and auto answer with the reject code you choose &middot; intercom answer (Call-Info, Alert-Info) &middot; PRACK, UPDATE, session timers, late offer &middot; ringback and ring tones &middot; per-call WAV recording &middot; DNS SRV and outbound proxy &middot; direct, unregistered calls to any SIP URI (anonymous From, for testing URI dialing) &middot; dial strings with headers and post-answer DTMF (<code>600?Subject=x,,123#</code>) &middot; G.711 &mu;-law and A-law, and wideband Opus (16 kHz audio path, in-band FEC) &middot; interface in English, Portuguese (Brazil), Spanish and German, with built-in help &middot; WebRTC with Opus, ICE and DTLS-SRTP in the browser, with several lines, attended transfer and conference
     </td>
   </tr>
   <tr>
@@ -301,17 +303,16 @@ cargo test --workspace --exclude sidetone-desktop
 
 A recent stable Rust (CI uses stable). The desktop app builds with
 `npx @tauri-apps/cli@2 build` in `app/`; on Linux it needs WebKitGTK 4.1.
-For a local PBX to call: `lab/run-asterisk.sh` (Asterisk with UDP,
-WebSocket and WebRTC endpoints, echo, busy and unallocated numbers).
+For a local PBX to call: `lab/run-asterisk.sh` (Asterisk on UDP, TCP, TLS
+and WebSocket, with SDES and DTLS-SRTP users, a WebRTC user, BLF and presence
+hints, echo, busy and unallocated numbers).
 
 > [!IMPORTANT]
 > **Status: alpha.** The analyzer, the desktop and browser phones, test
 > suites and the MCP server work and are covered by tests and a live PBX
-> in CI, but Sidetone is young. Not yet there: wideband audio in the native
-> phone (Opus runs narrowband), presence beyond BLF, DTLS-SRTP in the native
-> phone, and passive capture of other hosts' traffic. SIP sent over TCP/TLS by the native phone is shown in
-> the trace but written to the capture as UDP. The browser phone handles one call at a
-> time. MOS is an estimate from one capture point.
+> in CI, but Sidetone is young: expect rough edges with PBXs and SBCs the
+> lab does not cover, and please report them. MOS is an estimate from one
+> capture point, as any single-point measurement is.
 
 ## Help wanted
 
@@ -329,15 +330,15 @@ WebSocket and WebRTC endpoints, echo, busy and unallocated numbers).
 
 Each version gets a release with installers for every platform: take the
 [latest release](https://github.com/igtoth/sidetone/releases/latest), or
-pick a file below (version 0.1.4).
+pick a file below (version 0.1.5).
 
 | Platform | Desktop app | Command line |
 |---|---|---|
-| Windows 10/11 (x64) | [Installer (.exe)](https://github.com/igtoth/sidetone/releases/download/v0.1.4/Sidetone_0.1.4_x64-setup.exe) &middot; [MSI](https://github.com/igtoth/sidetone/releases/download/v0.1.4/Sidetone_0.1.4_x64_en-US.msi) | [sidetone-v0.1.4-x86_64-pc-windows-msvc.zip](https://github.com/igtoth/sidetone/releases/download/v0.1.4/sidetone-v0.1.4-x86_64-pc-windows-msvc.zip) |
-| macOS 11+ (Apple silicon) | [Sidetone_0.1.4_aarch64.dmg](https://github.com/igtoth/sidetone/releases/download/v0.1.4/Sidetone_0.1.4_aarch64.dmg) | [sidetone-v0.1.4-aarch64-apple-darwin.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.4/sidetone-v0.1.4-aarch64-apple-darwin.tar.gz) |
-| macOS 11+ (Intel) | [Sidetone_0.1.4_x64.dmg](https://github.com/igtoth/sidetone/releases/download/v0.1.4/Sidetone_0.1.4_x64.dmg) | [sidetone-v0.1.4-x86_64-apple-darwin.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.4/sidetone-v0.1.4-x86_64-apple-darwin.tar.gz) |
-| Linux (x86_64) | [AppImage](https://github.com/igtoth/sidetone/releases/download/v0.1.4/Sidetone_0.1.4_amd64.AppImage) &middot; [.deb](https://github.com/igtoth/sidetone/releases/download/v0.1.4/Sidetone_0.1.4_amd64.deb) &middot; [.rpm](https://github.com/igtoth/sidetone/releases/download/v0.1.4/Sidetone-0.1.4-1.x86_64.rpm) | [sidetone-v0.1.4-x86_64-unknown-linux-gnu.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.4/sidetone-v0.1.4-x86_64-unknown-linux-gnu.tar.gz) |
-| Linux (arm64) | | [sidetone-v0.1.4-aarch64-unknown-linux-gnu.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.4/sidetone-v0.1.4-aarch64-unknown-linux-gnu.tar.gz) |
+| Windows 10/11 (x64) | [Installer (.exe)](https://github.com/igtoth/sidetone/releases/download/v0.1.5/Sidetone_0.1.5_x64-setup.exe) &middot; [MSI](https://github.com/igtoth/sidetone/releases/download/v0.1.5/Sidetone_0.1.5_x64_en-US.msi) | [sidetone-v0.1.5-x86_64-pc-windows-msvc.zip](https://github.com/igtoth/sidetone/releases/download/v0.1.5/sidetone-v0.1.5-x86_64-pc-windows-msvc.zip) |
+| macOS 11+ (Apple silicon) | [Sidetone_0.1.5_aarch64.dmg](https://github.com/igtoth/sidetone/releases/download/v0.1.5/Sidetone_0.1.5_aarch64.dmg) | [sidetone-v0.1.5-aarch64-apple-darwin.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.5/sidetone-v0.1.5-aarch64-apple-darwin.tar.gz) |
+| macOS 11+ (Intel) | [Sidetone_0.1.5_x64.dmg](https://github.com/igtoth/sidetone/releases/download/v0.1.5/Sidetone_0.1.5_x64.dmg) | [sidetone-v0.1.5-x86_64-apple-darwin.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.5/sidetone-v0.1.5-x86_64-apple-darwin.tar.gz) |
+| Linux (x86_64) | [AppImage](https://github.com/igtoth/sidetone/releases/download/v0.1.5/Sidetone_0.1.5_amd64.AppImage) &middot; [.deb](https://github.com/igtoth/sidetone/releases/download/v0.1.5/Sidetone_0.1.5_amd64.deb) &middot; [.rpm](https://github.com/igtoth/sidetone/releases/download/v0.1.5/Sidetone-0.1.5-1.x86_64.rpm) | [sidetone-v0.1.5-x86_64-unknown-linux-gnu.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.5/sidetone-v0.1.5-x86_64-unknown-linux-gnu.tar.gz) |
+| Linux (arm64) | | [sidetone-v0.1.5-aarch64-unknown-linux-gnu.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.5/sidetone-v0.1.5-aarch64-unknown-linux-gnu.tar.gz) |
 | Web | no download: [open it in the browser](https://igtoth.github.io/sidetone/) | |
 
 ### Install
@@ -352,22 +353,30 @@ not signed yet, so the first time right-click it and choose Open (or run
 `xattr -dr com.apple.quarantine /Applications/Sidetone.app`). macOS asks
 for microphone access on the first call.
 
-**Linux.** Debian and Ubuntu: `sudo apt install ./Sidetone_0.1.4_amd64.deb`.
-Fedora and openSUSE: `sudo dnf install ./Sidetone-0.1.4-1.x86_64.rpm`.
-Anywhere else: `chmod +x Sidetone_0.1.4_amd64.AppImage` and run it. The
+**Linux.** Debian and Ubuntu: `sudo apt install ./Sidetone_0.1.5_amd64.deb`.
+Fedora and openSUSE: `sudo dnf install ./Sidetone-0.1.5-1.x86_64.rpm`.
+Anywhere else: `chmod +x Sidetone_0.1.5_amd64.AppImage` and run it. The
 desktop app needs WebKitGTK 4.1 (present on current distributions).
 
 **Command line.** Unpack the archive and put `sidetone` on your `PATH`:
 
 ```sh
-tar xzf sidetone-v0.1.4-x86_64-unknown-linux-gnu.tar.gz
-sudo install sidetone-v0.1.4-x86_64-unknown-linux-gnu/sidetone /usr/local/bin/
+tar xzf sidetone-v0.1.5-x86_64-unknown-linux-gnu.tar.gz
+sudo install sidetone-v0.1.5-x86_64-unknown-linux-gnu/sidetone /usr/local/bin/
 sidetone serve        # the full app in your browser at http://127.0.0.1:8640
 ```
 
 On macOS remove the quarantine flag first
 (`xattr -d com.apple.quarantine sidetone`). The archive also has the
 example test suites.
+
+**Capturing other hosts' traffic** (Diagnostics, Capture on an interface)
+needs a packet capture library and the right to use it. Windows: install
+[Npcap](https://npcap.com/) (Wireshark installs it). macOS: libpcap is built
+in; install Wireshark's ChmodBPF or run as root. Linux: `libpcap` is usually
+installed; give the binary the capability once with
+`sudo setcap cap_net_raw,cap_net_admin=eip /usr/bin/sidetone-desktop` (or
+the `sidetone` CLI), or run it with `sudo`. Everything else works without it.
 
 **From source.** See [Get started](#get-started).
 
