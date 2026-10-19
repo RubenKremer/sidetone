@@ -86,6 +86,8 @@ pub struct PhoneSettings {
     pub capture_rtp: bool,
     /// Keep the audio of every call for WAV download.
     pub record_calls: bool,
+    /// Global codec list in preference order, for accounts without their own.
+    pub codecs: Vec<String>,
 }
 
 impl Default for PhoneSettings {
@@ -105,6 +107,7 @@ impl Default for PhoneSettings {
             capture: true,
             capture_rtp: true,
             record_calls: false,
+            codecs: crate::media::default_codecs(),
         }
     }
 }
@@ -341,6 +344,7 @@ impl Engine {
         accounts: Vec<AccountCfg>,
         audio: Option<AudioIo>,
     ) -> Engine {
+        crate::sipmsg::set_global_codecs(settings.codecs.clone());
         let (tx, rx) = channel();
         let shared = Arc::new(Mutex::new(Shared {
             seq: 0,
@@ -2151,6 +2155,7 @@ impl Core {
         match c {
             Cmd::SetAccounts(v) => self.set_accounts(v),
             Cmd::SetSettings(s) => {
+                crate::sipmsg::set_global_codecs(s.codecs.clone());
                 self.tap.set_enabled(s.capture);
                 self.settings = s;
                 self.route_audio();

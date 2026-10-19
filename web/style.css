@@ -336,7 +336,7 @@ body.dragging .ws { outline: 2px dashed var(--mark); outline-offset: -8px; }
 .meters { display: grid; gap: 6px; margin: 10px 0; max-width: 420px; }
 
 /* ---------- calls page ---------- */
-.calls-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 14px; margin-bottom: 14px; }
+.calls-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 14px; margin-bottom: 14px; align-items: start; }
 .cd-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
 .badge { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; border-radius: 4px; padding: 1px 7px; background: var(--paper); color: var(--muted); }
 .badge.st-connected { background: rgba(22, 163, 74, 0.14); color: var(--ok); }
@@ -347,9 +347,9 @@ body.dragging .ws { outline: 2px dashed var(--mark); outline-offset: -8px; }
 .kv dd { margin: 0; word-break: break-all; }
 .recs { border-top: 1px solid var(--rule); margin-top: 12px; }
 .recs ul { margin: 0; padding-left: 18px; }
-.events-card { display: flex; flex-direction: column; max-height: 380px; }
+.events-card { display: flex; flex-direction: column; max-height: 230px; }
 .events { list-style: none; margin: 6px 0 0; padding: 0; overflow: auto; font-size: 12.5px; flex: 1; }
-.events li { display: grid; grid-template-columns: 62px 96px 1fr; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--rule); }
+.events li { display: grid; grid-template-columns: 62px 96px 1fr; gap: 8px; padding: 2px 0; border-bottom: 1px solid var(--rule); }
 .ev-t { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
 .ev-k { color: var(--muted); }
 .ev-error .ev-k, .ev-error .ev-x { color: var(--bad); }
@@ -835,3 +835,19 @@ table.hist tbody tr.sel { background: var(--mark-soft); }
 .fs-op .fs-l { color: var(--req); }
 .fs-join .fs-l { color: var(--end, #7c3aed); }
 .fs-value .fs-l { color: var(--ok); font-weight: 500; }
+
+#call-detail .empty-note { margin: 2px 0 0; }
+
+/* Codec lists */
+.codec-pick ol.codecs { list-style: none; margin: 6px 0 0; padding: 0; border: 1px solid var(--rule); border-radius: 8px; max-height: 360px; overflow-y: auto; background: var(--panel); }
+.codec-pick li { display: grid; grid-template-columns: minmax(150px, auto) 1fr auto auto; gap: 10px; align-items: center; padding: 3px 8px; border-bottom: 1px solid var(--rule); }
+.codec-pick li:last-child { border-bottom: 0; }
+.codec-pick .kbps { color: var(--muted); font-size: 12px; text-align: right; }
+.codec-pick .cbtns { display: inline-flex; gap: 2px; }
+.codec-pick .cbtns .icon-btn { width: 24px; height: 24px; font-size: 12px; }
+.codec-pick.inherit ol.codecs { opacity: 0.45; pointer-events: none; }
+.fld.wide { grid-column: 1 / -1; }
+#opts .codec-pick li { grid-template-columns: 1fr auto; }
+#opts .codec-pick li .muted, #opts .codec-pick li .kbps { display: none; }
+#opts .codec-pick ol.codecs { max-height: 180px; }
+.opt-h { font-size: 12px; font-weight: 600; }

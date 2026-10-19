@@ -2,6 +2,7 @@
 //! behavior profile while recording every packet for analysis.
 
 pub mod audio;
+pub mod codecs;
 pub mod dns;
 pub mod dtls;
 pub mod engine;

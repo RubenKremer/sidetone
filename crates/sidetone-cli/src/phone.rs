@@ -515,3 +515,94 @@ pub fn shutdown() {
         p.save_history();
     }
 }
+
+/// The configuration file as sidetone-config JSON (what Settings, Import and
+/// export writes), without passwords unless asked.
+pub fn export_config(secrets: bool) -> Result<Value> {
+    let dir = config_dir().ok_or_else(|| anyhow!("no configuration directory"))?;
+    let mut cfg: PhoneConfig = std::fs::read(dir.join("phone.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    if !secrets {
+        for a in &mut cfg.accounts {
+            a.profile.account.password = None;
+        }
+    }
+    Ok(json!({
+        "format": "sidetone-config",
+        "version": 1,
+        "exported_at": chrono_now(),
+        "app_version": env!("CARGO_PKG_VERSION"),
+        "engine": "native",
+        "secrets": secrets,
+        "phone": cfg,
+        "ui": {},
+    }))
+}
+
+/// Loads a sidetone-config file into the configuration directory. Returns the
+/// number of accounts imported. A running phone picks it up on its next start.
+pub fn import_config(v: &Value, merge: bool) -> Result<usize> {
+    if v.get("format").and_then(|x| x.as_str()) != Some("sidetone-config") {
+        return Err(anyhow!("not a sidetone-config file"));
+    }
+    if v.get("version").and_then(|x| x.as_u64()).unwrap_or(1) > 1 {
+        return Err(anyhow!("made by a newer Sidetone; update to import it"));
+    }
+    if v.get("engine").and_then(|x| x.as_str()) == Some("web") {
+        return Err(anyhow!("this file comes from the browser version; import it in the app (Settings, Import and export)"));
+    }
+    let new: PhoneConfig = serde_json::from_value(v.get("phone").cloned().unwrap_or_default())
+        .map_err(|e| anyhow!("bad configuration: {e}"))?;
+    let dir = config_dir().ok_or_else(|| anyhow!("no configuration directory"))?;
+    let path = dir.join("phone.json");
+    let n = new.accounts.len();
+    let out = if merge {
+        let mut cur: PhoneConfig = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        for mut a in new.accounts {
+            let mut id = a.id.clone();
+            let mut k = 2;
+            while cur.accounts.iter().any(|x| x.id == id) {
+                id = format!("{}-{k}", a.id);
+                k += 1;
+            }
+            a.id = id;
+            cur.accounts.push(a);
+        }
+        cur
+    } else {
+        new
+    };
+    write_private(&path, &serde_json::to_vec_pretty(&out)?)?;
+    Ok(n)
+}
+
+fn chrono_now() -> String {
+    // RFC 3339 in UTC without extra dependencies.
+    let s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64;
+    let (days, rem) = (s.div_euclid(86400), s.rem_euclid(86400));
+    // Civil date from days since 1970-01-01 (H. Hinnant's algorithm).
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}

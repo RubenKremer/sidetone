@@ -645,3 +645,124 @@ fn dtls_srtp() {
     println!("incoming: {:?}", call(&e, li).unwrap().security);
     e.cmd(Cmd::HangupAll);
 }
+
+/// Share of the right channel (received audio) of a stereo recording that is
+/// a tone at `hz`, by the Goertzel algorithm (1.0 = pure tone).
+fn tone_share(wav: &[u8], hz: f64) -> f64 {
+    let rate = u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]) as f64;
+    let data = &wav[44..];
+    let right: Vec<f64> = data
+        .chunks_exact(4)
+        .map(|f| i16::from_le_bytes([f[2], f[3]]) as f64)
+        .collect();
+    // Skip the start (ringing, jitter buffer filling) and the end.
+    let n = right.len();
+    let x = &right[n / 4..n * 3 / 4];
+    if x.is_empty() {
+        return 0.0;
+    }
+    let total: f64 = x.iter().map(|v| v * v).sum::<f64>();
+    let w = 2.0 * std::f64::consts::PI * hz / rate;
+    let (mut s1, mut s2) = (0.0, 0.0);
+    for v in x {
+        let s0 = v + 2.0 * w.cos() * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    let power = s1 * s1 + s2 * s2 - 2.0 * w.cos() * s1 * s2;
+    // A pure sine of amplitude A over N samples: Goertzel power N²A²/4, energy N·A²/2.
+    if total < 1.0 {
+        return 0.0;
+    }
+    (2.0 * power / (x.len() as f64 * total)).min(1.0)
+}
+
+#[test]
+#[ignore]
+fn codecs_interop() {
+    let settings = PhoneSettings {
+        audio_source: "tone".into(),
+        tone_hz: 1000.0,
+        auto_hold: false,
+        auto_answer: true,
+        auto_answer_delay_ms: 0,
+        record_calls: true,
+        ..Default::default()
+    };
+    let a = acc("a", "2001", "secret2001", DtmfMode::Rfc4733);
+    let b = acc("b", "3001", "secret3001", DtmfMode::Rfc4733);
+    let e = Engine::start(settings, vec![a, b], None);
+    wait_for(&e, "registered", 10, |e| {
+        let st = e.state();
+        st.accounts.len() == 2 && st.accounts.iter().all(|a| a.state == "registered")
+    });
+    // Through 700 Asterisk transcodes between the codec and G.711 (3001), so both
+    // our encoder and our decoder meet an independent implementation. G.729 and
+    // iLBC have no transcoder in the lab, so they go through the echo (600).
+    let cases: &[(&str, &str, &str)] = &[
+        ("PCMA", "700", "PCMA"),
+        ("G722", "700", "G722"),
+        ("opus", "700", "opus"),
+        ("GSM", "700", "GSM"),
+        ("G726-32", "700", "G726-32"),
+        ("AAL2-G726-32", "700", "AAL2-G726-32"),
+        ("speex/8000", "700", "speex"),
+        ("speex/16000", "700", "speex"),
+        ("L16/8000", "700", "L16"),
+        ("L16/16000", "700", "L16"),
+        ("G729", "600", "G729"),
+        ("iLBC", "600", "iLBC"),
+    ];
+    let mut bad = Vec::new();
+    let only = std::env::var("SIDETONE_CODECS").unwrap_or_default();
+    for (codec, target, expect) in cases {
+        if !only.is_empty() && !only.split(',').any(|c| c == *codec) {
+            continue;
+        }
+        let before: Vec<u32> = e.state().calls.iter().map(|c| c.line).collect();
+        let l = e.call(CallRequest {
+            account: Some("a".into()),
+            target: (*target).into(),
+            overrides: Some(serde_json::json!({ "codecs": [codec] })),
+            ..Default::default()
+        });
+        wait_for(&e, &format!("{codec} connected"), 10, |e| {
+            line_state(e, l) == "connected"
+        });
+        std::thread::sleep(Duration::from_millis(3500));
+        let st = e.state();
+        let me = st.calls.iter().find(|c| c.line == l).unwrap();
+        let used = me.codec.clone().unwrap_or_default();
+        println!("  rtp sent {} received {} rx level {}", me.rtp_sent, me.rtp_received, me.rx_level);
+        let other = st
+            .calls
+            .iter()
+            .find(|c| c.line != l && !before.contains(&c.line) && c.direction == "in")
+            .map(|c| c.line);
+        e.cmd(Cmd::HangupAll);
+        wait_for(&e, "ended", 8, |e| {
+            e.state().calls.iter().all(|c| c.state == "ended")
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        let mine = e
+            .recording(l)
+            .map(|w| tone_share(&w, 1000.0))
+            .unwrap_or(0.0);
+        let theirs = other
+            .and_then(|o| e.recording(o))
+            .map(|w| tone_share(&w, 1000.0));
+        println!(
+            "codec {codec:>13}: negotiated {used:<13} decoded tone {mine:.2}{}",
+            theirs
+                .map(|t| format!(", G.711 side hears our encoder {t:.2}"))
+                .unwrap_or_default()
+        );
+        if !used.eq_ignore_ascii_case(expect) || mine < 0.5 || theirs.is_some_and(|t| t < 0.5) {
+            bad.push(format!("{codec}: {used} {mine:.2} {theirs:?}"));
+        }
+        // Lines linger 40 s after the end; let the next call get fresh ones.
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    e.cmd(Cmd::HangupAll);
+    assert!(bad.is_empty(), "codecs failing: {bad:?}");
+}

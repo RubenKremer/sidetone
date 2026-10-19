@@ -25,7 +25,32 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum ConfigCmd {
+    /// Write the configuration (accounts, settings, codecs) as sidetone-config JSON.
+    Export {
+        /// Output file (standard output when left out).
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// Include account passwords.
+        #[arg(long)]
+        secrets: bool,
+    },
+    /// Load a sidetone-config JSON file exported by the app or by this command.
+    Import {
+        file: PathBuf,
+        /// Add the accounts to the current ones instead of replacing everything.
+        #[arg(long)]
+        merge: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum Cmd {
+    /// Export or import the phone configuration (the same file as Settings, Import and export).
+    Config {
+        #[command(subcommand)]
+        action: ConfigCmd,
+    },
     /// Analyze a pcap/pcapng capture: calls, ladder, RTP quality, findings.
     Analyze {
         file: PathBuf,
@@ -430,6 +455,27 @@ fn main() -> Result<()> {
             let text = aihttp::ask(&cfg, &prompt)?;
             println!("{text}");
         }
+        Cmd::Config { action } => match action {
+            ConfigCmd::Export { out, secrets } => {
+                let v = sidetone_cli::phone::export_config(secrets)?;
+                let text = serde_json::to_string_pretty(&v)?;
+                match out {
+                    Some(p) => {
+                        std::fs::write(&p, text)?;
+                        eprintln!("wrote {}", p.display());
+                    }
+                    None => println!("{text}"),
+                }
+            }
+            ConfigCmd::Import { file, merge } => {
+                let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&file)?)?;
+                let n = sidetone_cli::phone::import_config(&v, merge)?;
+                eprintln!(
+                    "imported {n} account(s){}",
+                    if merge { " (merged)" } else { "" }
+                );
+            }
+        },
         Cmd::Samples { dir } => {
             std::fs::create_dir_all(&dir)?;
             for (name, desc) in sidetone_core::synth::SCENARIOS {

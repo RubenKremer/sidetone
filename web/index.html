@@ -97,6 +97,7 @@
     <div class="opts" id="opts" hidden>
       <label>Extra headers for the next call <span class="hint">one per line, Name: value</span>
         <textarea id="opt-headers" rows="2" spellcheck="false" placeholder="X-Test-Case: 42"></textarea></label>
+      <div data-native><span class="opt-h">Codecs for the next call</span><div id="opt-codecs-box"></div></div>
       <label>Profile overrides (JSON) <span class="hint" data-native>any account knob, e.g. codecs or dtmf_mode</span>
         <textarea id="opt-overrides" rows="2" spellcheck="false" placeholder='{"codecs": ["PCMA"], "dtmf_mode": "info"}'></textarea></label>
       <p class="hint">Dial string shortcuts: <code>600?Subject=test</code> adds headers, <code>600,,1234#</code> sends DTMF after answer (each comma waits 1 s).</p>
@@ -388,6 +389,7 @@
             <li><button type="button" data-set="ai">AI</button></li>
             <li><button type="button" data-set="keys">Keyboard</button></li>
             <li><button type="button" data-set="lang">Language</button></li>
+            <li><button type="button" data-set="backup">Import and export</button></li>
           </ol>
         </nav>
         <div class="set-body" id="set-body"></div>

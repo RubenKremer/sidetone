@@ -87,7 +87,10 @@ pub struct Behavior {
     /// Add `;rport` to Via (RFC 3581).
     pub rport: bool,
     /// Audio codecs in preference order (PCMU, PCMA).
+    /// Codecs in preference order; empty uses the global list from Settings.
     pub codecs: Vec<String>,
+    /// G.726 with the AAL2 bit order (most significant first) instead of RFC 3551.
+    pub g726_aal2: bool,
     pub ptime_ms: u32,
     pub dtmf_mode: DtmfMode,
     pub dtmf_payload_type: u8,
@@ -136,7 +139,8 @@ impl Default for Behavior {
             offer_gruu: false,
             long_contact: false,
             rport: true,
-            codecs: vec!["PCMU".into(), "PCMA".into()],
+            codecs: Vec::new(),
+            g726_aal2: false,
             ptime_ms: 20,
             dtmf_mode: DtmfMode::Rfc4733,
             dtmf_payload_type: 101,

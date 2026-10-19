@@ -163,7 +163,7 @@ pub fn stream_audio(bytes: &[u8], stream_id: usize) -> Result<StreamAudio, Strin
             }
             if !up.contains("OPUS") {
                 out.note = Some(format!(
-                    "{codec} cannot be decoded here; only G.711 and Opus can be played"
+                    "{codec} is played by the desktop app; the browser plays G.711 and Opus"
                 ));
             }
         }

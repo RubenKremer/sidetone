@@ -551,6 +551,9 @@ async function dial(target) {
       return;
     }
   }
+  // Codecs chosen for this call only.
+  const cc = S.ctl.features.overrides ? readCodecPicker($("#opt-codecs"), null) : null;
+  if (cc && cc.length) req.overrides = { ...(req.overrides || {}), codecs: cc };
   rememberDialed(target);
   const r = await cmd(req);
   if (r && r.line) S.sel = r.line;
@@ -767,6 +770,15 @@ function bindPhone() {
     const o = $("#opts");
     o.hidden = !o.hidden;
     $("#opts-toggle").setAttribute("aria-expanded", String(!o.hidden));
+    if (!o.hidden && S.ctl.features.overrides && !$("#opt-codecs")) {
+      S.ctl.getConfig().then((cfg) => {
+        const a = currentAccount();
+        const acc = a && cfg.accounts ? cfg.accounts.find((x) => x.id === a.id) : null;
+        const own = acc && acc.profile && acc.profile.behavior && acc.profile.behavior.codecs;
+        const fallback = own && own.length ? own : (cfg.settings && cfg.settings.codecs) || CODEC_DEFAULTS;
+        $("#opt-codecs-box").innerHTML = codecPicker("opt-codecs", null, { label: "Use the account's codecs", fallback });
+      }).catch(() => {});
+    }
   });
   $("#btn-call").addEventListener("click", callOrAnswer);
   $("#btn-hangup").addEventListener("click", hangupSel);
@@ -2812,6 +2824,7 @@ const NATIVE_ACC_TABS = [
   ]],
   ["Media", [
     ["profile.behavior.codecs", "Codecs, in order of preference", "codecs"],
+    ["profile.behavior.g726_aal2", "G.726 with the AAL2 bit order (AAL2-G726-xx)", "bool"],
     ["profile.behavior.srtp", "Media encryption (SRTP)", "select", "Optional offers SRTP and accepts plain RTP; Required hangs up or rejects calls without it.", [["off", "Off (RTP)"], ["optional", "Optional"], ["mandatory", "Required"]]],
     ["profile.behavior.srtp_keys", "SRTP keys", "select", "SDES puts the keys in the SDP (a=crypto): use it with TLS. DTLS-SRTP negotiates them on the media path and checks the far end's certificate against a=fingerprint.", [["sdes", "SDES (a=crypto)"], ["dtls", "DTLS-SRTP (a=fingerprint)"]]],
     ["profile.behavior.ptime_ms", "Packet time (ms)", "select", "", [["10", "10"], ["20", "20"], ["30", "30"], ["40", "40"], ["60", "60"]]],
@@ -2856,7 +2869,68 @@ const WEB_ACC_TABS = [
   ["Network", [["ice", "STUN or TURN servers", "text", "comma separated, e.g. stun:stun.l.google.com:19302"]]],
 ];
 
+// Codecs the desktop engine can use: [settings name, on by default, kbit/s, description, payload type, rtpmap, fmtp].
+const CODEC_LIST = [
+  ["PCMU", true, 64, "G.711 μ-law", 0, "PCMU/8000"],
+  ["PCMA", true, 64, "G.711 A-law", 8, "PCMA/8000"],
+  ["G722", true, 64, "G.722 wideband, 16 kHz", 9, "G722/8000"],
+  ["opus", true, 32, "Opus wideband, 16 kHz audio, FEC", 111, "opus/48000/2", "useinbandfec=1"],
+  ["G729", false, 8, "G.729 Annex A", 18, "G729/8000", "annexb=no"],
+  ["iLBC", false, 13, "iLBC, 30 ms frames", 102, "iLBC/8000", "mode=30"],
+  ["speex/16000", false, 28, "Speex wideband", 98, "speex/16000"],
+  ["speex/8000", false, 15, "Speex narrowband", 97, "speex/8000"],
+  ["GSM", false, 13, "GSM 06.10 full rate", 3, "GSM/8000"],
+  ["G726-32", false, 32, "G.726 ADPCM", 112, "G726-32/8000"],
+  ["G726-40", false, 40, "G.726 ADPCM", 106, "G726-40/8000"],
+  ["G726-24", false, 24, "G.726 ADPCM", 105, "G726-24/8000"],
+  ["G726-16", false, 16, "G.726 ADPCM", 104, "G726-16/8000"],
+  ["L16/16000", false, 256, "Linear PCM 16 kHz", 115, "L16/16000"],
+  ["L16/44100", false, 706, "Linear PCM 44.1 kHz", 116, "L16/44100"],
+  ["L16/8000", false, 128, "Linear PCM 8 kHz", 114, "L16/8000"],
+];
+const CODEC_DEFAULTS = CODEC_LIST.filter((c) => c[1]).map((c) => c[0]);
+const codecInfo = (k) => CODEC_LIST.find((c) => c[0].toLowerCase() === String(k).toLowerCase());
+
+/// Ordered checklist of codecs. `inherit` adds a "use the …" switch: when on, the
+/// value saved is [] (account: global list) or null (one call: the account's).
+function codecPicker(id, value, inherit) {
+  const inh = inherit && (value == null || (Array.isArray(value) && !value.length));
+  const cur = (inh ? (inherit.fallback || CODEC_DEFAULTS) : value || []).map((k) => (codecInfo(k) || [k])[0]).filter((k) => codecInfo(k));
+  const order = [...cur, ...CODEC_LIST.map((c) => c[0]).filter((k) => !cur.includes(k))];
+  return `<div class="codec-pick${inh ? " inherit" : ""}" id="${id}">
+    ${inherit ? `<label class="check"><input type="checkbox" data-inherit ${inh ? "checked" : ""}> ${esc(t(inherit.label))}</label>` : ""}
+    <ol class="codecs">${order
+      .map((k) => {
+        const c = codecInfo(k);
+        return `<li data-codec="${esc(k)}"><label class="check"><input type="checkbox" ${cur.includes(k) ? "checked" : ""}> <b class="mono">${esc(k)}</b></label><span class="muted small">${esc(t(c[3]))}</span><span class="kbps mono">${c[2]} kbit/s</span><span class="cbtns"><button type="button" class="icon-btn" data-cup title="${esc(t("Move up"))}">↑</button><button type="button" class="icon-btn" data-cdown title="${esc(t("Move down"))}">↓</button></span></li>`;
+      })
+      .join("")}</ol></div>`;
+}
+
+/// Reads a codec checklist: null/[] when inheriting, else the ticked codecs in order.
+function readCodecPicker(el, inheritValue) {
+  if (!el) return inheritValue;
+  const inh = el.querySelector("[data-inherit]");
+  if (inh && inh.checked) return inheritValue;
+  return [...el.querySelectorAll("li")].filter((li) => li.querySelector("input").checked).map((li) => li.dataset.codec);
+}
+
+// Up/down and the inherit switch work the same in every codec list.
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-cup], [data-cdown]");
+  if (!b) return;
+  const li = b.closest("li");
+  if (b.hasAttribute("data-cup") && li.previousElementSibling) li.parentElement.insertBefore(li, li.previousElementSibling);
+  if (b.hasAttribute("data-cdown") && li.nextElementSibling) li.parentElement.insertBefore(li.nextElementSibling, li);
+  li.closest("form")?.dispatchEvent(new Event("input", { bubbles: true }));
+});
+document.addEventListener("change", (e) => {
+  const i = e.target.closest("[data-inherit]");
+  if (i) i.closest(".codec-pick").classList.toggle("inherit", i.checked);
+});
+
 const CALL_SETTINGS = [
+  ["codecs", "Codecs offered by default (accounts can use their own list)", "codecs-global", "", null, "native"],
   ["dnd", "Do not disturb", "bool"],
   ["dnd_code", "Reject calls in DND with", "select", "", [["486", "486 Busy Here"], ["480", "480 Temporarily Unavailable"], ["603", "603 Decline"]], "native"],
   ["auto_answer", "Auto answer", "bool"],
@@ -2880,7 +2954,11 @@ function fieldHtml(f, value, id) {
       return `<label class="fld">${esc(label)} ${h}<input type="password" id="${id}" value="${esc(value ?? "")}" autocomplete="new-password"></label>`;
     case "select":
       return `<label class="fld">${esc(label)} ${h}<select id="${id}">${opts.map(([v, t]) => `<option value="${esc(v)}" ${String(value) === v ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label>`;
-    case "codecs": {
+    case "codecs-global":
+      return `<div class="fld wide"><span>${esc(label)}</span>${codecPicker(id, value && value.length ? value : CODEC_DEFAULTS, null)}<span class="hint">${esc(t("Tick the codecs to offer and put them in order of preference. The first one the other side also has is used."))}</span></div>`;
+    case "codecs":
+      return `<div class="fld wide"><span>${esc(label)}</span>${codecPicker(id, value, { label: "Use the global codec list (Settings, Call handling)", fallback: SET.cfg && SET.cfg.settings && SET.cfg.settings.codecs })}<span class="hint">${esc(t("Opus and G.722 carry wideband audio (16 kHz). G.726 uses the RFC 3551 bit order unless AAL2 is ticked below."))}</span></div>`;
+    case "codecs-old": {
       const all = ["PCMU", "PCMA", "opus"];
       const CODEC_NAMES = { PCMU: "PCMU (G.711 μ-law)", PCMA: "PCMA (G.711 A-law)", opus: "Opus" };
       const cur = (value || []).filter((c) => all.includes(c));
@@ -2911,7 +2989,8 @@ function readField(f, id, obj) {
     case "number": v = el.value === "" ? 0 : Number(el.value); break;
     case "select": v = /^\d+$/.test(el.value) && typeof get(obj, path) === "number" ? Number(el.value) : el.value; break;
     case "lines": v = el.value.split("\n").map((x) => x.trim()).filter(Boolean); break;
-    case "codecs": v = [...el.querySelectorAll("li")].filter((li) => li.querySelector("input").checked).map((li) => li.dataset.codec); break;
+    case "codecs": v = readCodecPicker(el, []); break;
+    case "codecs-global": v = readCodecPicker(el, CODEC_DEFAULTS); break;
     case "headers": v = [...el.querySelectorAll(".hdr-row")].map((r) => [r.children[0].value.trim(), r.children[1].value.trim()]).filter(([k]) => k); break;
     case "opt": v = el.value.trim() || null; break;
     default: v = el.value;
@@ -3070,7 +3149,7 @@ async function defaultBehavior() {
   // The engine fills defaults for a missing behavior; save then read back gives them.
   behaviorDefaults = {
     transport: "udp", tls_verify: true, local_port: 0, local_ip: null, t1_ms: 500, max_forwards: 70, session_timer: 0, user_phone: false, compact_headers: false, require_prack: false,
-    offer_gruu: false, long_contact: false, rport: true, codecs: ["PCMU", "PCMA"], ptime_ms: 20, dtmf_mode: "rfc4733", dtmf_payload_type: 101, srtp: "off", srtp_keys: "sdes",
+    offer_gruu: false, long_contact: false, rport: true, codecs: [], g726_aal2: false, ptime_ms: 20, dtmf_mode: "rfc4733", dtmf_payload_type: 101, srtp: "off", srtp_keys: "sdes",
     symmetric_rtp: true, rtcp: false, rtp_port_start: 40000, rtp_port_end: 49999, dscp_sip: 0, dscp_rtp: 0, keepalive_interval: 0, user_agent: `Sidetone/${S.version || ""}`,
     proxy_require: null, filter_registrar: false, extra_headers: [], sdp_direction: "sendrecv", skip_ack: false, sdp_ip_override: null,
   };
@@ -3189,13 +3268,13 @@ function invitePreview(acc) {
     `${hn("Content-Type")}: application/sdp`,
   ];
   const ip = b.sdp_ip_override || local.split(":")[0];
-  const cpt = (c) => (c === "PCMA" ? 8 : c === "opus" ? 111 : 0);
-  const pts = (b.codecs || []).map(cpt);
+  const offered = (b.codecs && b.codecs.length ? b.codecs : (SET.cfg && SET.cfg.settings && SET.cfg.settings.codecs) || CODEC_DEFAULTS).map(codecInfo).filter(Boolean);
+  const pts = offered.map((c) => c[4]);
   const dt = b.dtmf_mode === "rfc4733" ? [b.dtmf_payload_type] : [];
   const sdp = [
     "v=0", `o=sidetone 1 1 IN IP4 ${ip}`, "s=Sidetone", `c=IN IP4 ${ip}`, "t=0 0",
     `m=audio ${b.rtp_port_start} RTP/AVP ${[...pts, ...dt].join(" ")}`,
-    ...(b.codecs || []).flatMap((c) => (c === "opus" ? ["a=rtpmap:111 opus/48000/2", "a=fmtp:111 useinbandfec=1"] : [`a=rtpmap:${cpt(c)} ${c}/8000`])),
+    ...offered.flatMap((c) => [`a=rtpmap:${c[4]} ${b.g726_aal2 ? c[5].replace(/^G726/, "AAL2-G726") : c[5]}`, ...(c[6] ? [`a=fmtp:${c[4]} ${c[6]}`] : [])]),
     ...(dt.length ? [`a=rtpmap:${dt[0]} telephone-event/8000`, `a=fmtp:${dt[0]} 0-16`] : []),
     `a=ptime:${b.ptime_ms}`, `a=${b.sdp_direction}`,
   ];
@@ -3366,6 +3445,8 @@ async function renderGlobal(section) {
         st.className = "hint bad";
       }
     });
+  } else if (section === "backup") {
+    renderBackup(body);
   } else if (section === "lang") {
     body.innerHTML = `<div class="set-head"><h1>Language</h1></div>
       <div class="set-form"><div class="fields">
@@ -3385,6 +3466,140 @@ async function renderGlobal(section) {
     ];
     body.innerHTML = `<div class="set-head"><h1>Keyboard</h1></div>${table(["Key", "Action"], rows.map(([k, v]) => [`<kbd>${esc(k)}</kbd>`, esc(v)]))}`;
   }
+}
+
+// ---- Configuration backup: one JSON file with accounts, phone settings and
+// the interface preferences, so a setup moves between computers or is shared.
+
+const BACKUP_FORMAT = "sidetone-config";
+const UI_SKIP = /^sidetone\.(web\.history|web\.cap\.|web\.config$)/;
+
+async function exportConfig(withSecrets) {
+  const cfg = await S.ctl.getConfig();
+  const phone = JSON.parse(JSON.stringify(cfg));
+  for (const a of phone.accounts || []) {
+    if (withSecrets) continue;
+    if (a.profile && a.profile.account) a.profile.account.password = null;
+    if ("password" in a) a.password = "";
+  }
+  const ui = {};
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith("sidetone.") || UI_SKIP.test(k)) continue;
+      const raw = localStorage.getItem(k);
+      let v;
+      try {
+        v = JSON.parse(raw);
+      } catch {
+        v = raw;
+      }
+      if (k === "sidetone.ai" && v && !withSecrets) v = { ...v, key: "" };
+      ui[k] = v;
+    }
+  } catch { /* storage unavailable */ }
+  return {
+    format: BACKUP_FORMAT,
+    version: 1,
+    exported_at: new Date().toISOString(),
+    app_version: S.version || "",
+    engine: S.ctl.kind,
+    secrets: !!withSecrets,
+    phone,
+    ui,
+  };
+}
+
+/// Accounts written by the other engine (desktop <-> browser) keep user, domain, password and name.
+function convertAccounts(list, from, to) {
+  if (from === to || !Array.isArray(list)) return list || [];
+  return list.map((a, i) => {
+    if (to === "web") {
+      const acc = (a.profile && a.profile.account) || {};
+      return { id: `w${Date.now().toString(36)}${i}`, label: a.label || "", enabled: a.enabled !== false, register: a.register !== false, user: acc.user || "", authUser: acc.auth_user || "", password: acc.password || "", displayName: acc.display_name || "", domain: acc.domain || "", ws: "", ice: "stun:stun.l.google.com:19302", expires: acc.expires || 300, rememberPassword: !!acc.password };
+    }
+    return { id: String(i + 1), label: a.label || "", enabled: a.enabled !== false, register: a.register !== false, retry_s: 30, blf: [], profile: { name: "", account: { user: a.user || "", auth_user: a.authUser || null, password: a.password || null, domain: a.domain || "", display_name: a.displayName || null, outbound_proxy: null, expires: a.expires || 300, q_value: null }, behavior: null } };
+  });
+}
+
+function renderBackup(body) {
+  body.innerHTML = `<div class="set-head"><h1>${esc(t("Import and export"))}</h1></div>
+    <div class="set-form">
+      <section class="card"><h2>${esc(t("Export"))}</h2>
+        <p class="muted">${esc(t("Saves accounts, phone settings, codecs and the interface preferences in one JSON file (format sidetone-config, version 1)."))}</p>
+        <label class="check"><input type="checkbox" id="bk-secrets"> ${esc(t("Include passwords and AI API keys (keep the file private)"))}</label>
+        <div class="row" style="margin-top:10px"><button type="button" class="btn primary" id="bk-export">${esc(t("Export configuration"))}</button></div>
+      </section>
+      <section class="card" style="margin-top:14px"><h2>${esc(t("Import"))}</h2>
+        <p class="muted">${esc(t("Opens a file exported by Sidetone. Accounts from the desktop app and from the browser are converted to this version."))}</p>
+        <label class="btn small">${esc(t("Choose file"))}<input type="file" id="bk-file" accept=".json,application/json" hidden></label>
+        <div id="bk-preview"></div>
+      </section>
+    </div>`;
+  $("#bk-export").addEventListener("click", async () => {
+    try {
+      const data = await exportConfig($("#bk-secrets").checked);
+      const name = `sidetone-config-${new Date().toISOString().slice(0, 10)}.json`;
+      await download(new TextEncoder().encode(JSON.stringify(data, null, 2)), name, "application/json");
+    } catch (e) {
+      toast(e.message || String(e), 5000);
+    }
+  });
+  $("#bk-file").addEventListener("change", async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    let data;
+    try {
+      data = JSON.parse(await f.text());
+      if (data.format !== BACKUP_FORMAT || !data.phone) throw new Error(t("This is not a Sidetone configuration file."));
+      if (data.version > 1) throw new Error(t("This file was made by a newer Sidetone; update to import it."));
+    } catch (err) {
+      $("#bk-preview").innerHTML = `<p class="bad">${esc(err.message || String(err))}</p>`;
+      return;
+    }
+    const accs = data.phone.accounts || [];
+    $("#bk-preview").innerHTML = `<div class="notice" style="margin-top:10px">
+      <b>${esc(f.name)}</b>: ${accs.length} ${esc(t("accounts"))}, ${Object.keys(data.ui || {}).length} ${esc(t("interface preferences"))}, ${esc(t("exported"))} ${esc((data.exported_at || "").replace("T", " ").slice(0, 16))}${data.app_version ? `, Sidetone ${esc(data.app_version)}` : ""}${data.secrets ? "" : `<br><span class="muted">${esc(t("The file has no passwords: enter them again after importing."))}</span>`}
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button type="button" class="btn primary" id="bk-replace">${esc(t("Replace my configuration"))}</button>
+        <button type="button" class="btn" id="bk-merge">${esc(t("Add the accounts to mine"))}</button>
+      </div>`;
+    const apply = async (merge) => {
+      const cur = await S.ctl.getConfig();
+      let accounts = convertAccounts(accs, data.engine, S.ctl.kind);
+      if (merge) {
+        const used = new Set((cur.accounts || []).map((a) => a.id));
+        accounts = [
+          ...(cur.accounts || []),
+          ...accounts.map((a, i) => {
+            let id = a.id;
+            while (used.has(id)) id = `${a.id}-${i + 2}`;
+            used.add(id);
+            return { ...a, id };
+          }),
+        ];
+      }
+      const next = { accounts };
+      if (!merge && data.phone.settings && data.engine === S.ctl.kind) next.settings = data.phone.settings;
+      if (!merge && data.phone.audio && data.engine === S.ctl.kind) next.audio = data.phone.audio;
+      await S.ctl.setConfig(next);
+      if (!merge) {
+        for (const [k, v] of Object.entries(data.ui || {})) {
+          if (k === "sidetone.ai" && v && !v.key) {
+            const old = store.get("sidetone.ai", {});
+            store.set(k, { ...v, key: old.key || "" });
+          } else if (k === "sidetone.lang" && typeof v === "string") {
+            try { localStorage.setItem(k, v); } catch { /* storage unavailable */ }
+          } else store.set(k, v);
+        }
+      }
+      toast(t("Configuration imported"));
+      setTimeout(() => location.reload(), 600);
+    };
+    $("#bk-replace").addEventListener("click", () => apply(false));
+    $("#bk-merge").addEventListener("click", () => apply(true));
+  });
 }
 
 function bindSettings() {

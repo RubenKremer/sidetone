@@ -70,25 +70,71 @@ pub fn alaw_decode(b: u8) -> i16 {
     (if sign != 0 { s } else { -s }) as i16
 }
 
-/// Audio codec of a call. Opus carries the payload type negotiated in SDP;
-/// two Opus values compare equal whatever their payload type, so a codec
-/// from the profile matches the same codec in an offer.
+/// Audio codec of a call. Dynamic codecs carry the payload type negotiated
+/// in SDP; two values of the same codec compare equal whatever their payload
+/// type, so a codec from the profile matches the same codec in an offer.
 #[derive(Debug, Clone, Copy, Eq)]
 pub enum Codec {
     Pcmu,
     Pcma,
+    /// G.722: 16 kHz audio, 64 kbit/s, RTP clock 8000 (RFC 3551 quirk).
+    G722,
+    /// GSM 06.10 full rate, 13 kbit/s, 20 ms frames.
+    Gsm,
+    /// G.729 Annex A, 8 kbit/s, 10 ms frames.
+    G729,
+    /// G.726 at 16, 24, 32 or 40 kbit/s; `true` is the AAL2 bit order.
+    G726(u8, u8, bool),
+    /// iLBC in 20 or 30 ms mode.
+    Ilbc(u8, u8),
+    /// Speex narrowband (8000) or wideband (16000).
+    Speex(u8, u32),
+    /// Uncompressed 16-bit PCM, big-endian, at 8000, 16000 or 44100 Hz.
+    L16(u8, u32),
     Opus(u8),
 }
 
 impl PartialEq for Codec {
     fn eq(&self, o: &Codec) -> bool {
-        matches!(
-            (self, o),
-            (Codec::Pcmu, Codec::Pcmu)
-                | (Codec::Pcma, Codec::Pcma)
-                | (Codec::Opus(_), Codec::Opus(_))
-        )
+        match (self, o) {
+            (Codec::G726(_, a, x), Codec::G726(_, b, y)) => a == b && x == y,
+            (Codec::Ilbc(..), Codec::Ilbc(..)) => true,
+            (Codec::Speex(_, a), Codec::Speex(_, b)) => a == b,
+            (Codec::L16(_, a), Codec::L16(_, b)) => a == b,
+            (Codec::Opus(_), Codec::Opus(_)) => true,
+            (a, b) => std::mem::discriminant(a) == std::mem::discriminant(b),
+        }
     }
+}
+
+/// Every codec the phone can use, by the name used in settings, in the order
+/// shown to the user: (name, offered by default, kbit/s, description).
+pub const CODECS: &[(&str, bool, u32, &str)] = &[
+    ("PCMU", true, 64, "G.711 μ-law"),
+    ("PCMA", true, 64, "G.711 A-law"),
+    ("G722", true, 64, "G.722 wideband (16 kHz)"),
+    ("opus", true, 32, "Opus wideband (16 kHz audio, FEC)"),
+    ("G729", false, 8, "G.729 Annex A"),
+    ("iLBC", false, 13, "iLBC, 30 ms frames"),
+    ("speex/16000", false, 28, "Speex wideband"),
+    ("speex/8000", false, 15, "Speex narrowband"),
+    ("GSM", false, 13, "GSM 06.10 full rate"),
+    ("G726-32", false, 32, "G.726 ADPCM"),
+    ("G726-40", false, 40, "G.726 ADPCM"),
+    ("G726-24", false, 24, "G.726 ADPCM"),
+    ("G726-16", false, 16, "G.726 ADPCM"),
+    ("L16/16000", false, 256, "Linear PCM 16 kHz"),
+    ("L16/44100", false, 706, "Linear PCM 44.1 kHz"),
+    ("L16/8000", false, 128, "Linear PCM 8 kHz"),
+];
+
+/// The codecs offered when nothing else is configured.
+pub fn default_codecs() -> Vec<String> {
+    CODECS
+        .iter()
+        .filter(|c| c.1)
+        .map(|c| c.0.to_string())
+        .collect()
 }
 
 /// Payload type Sidetone offers for Opus.
@@ -106,15 +152,54 @@ impl Codec {
         match self {
             Codec::Pcmu => 0,
             Codec::Pcma => 8,
-            Codec::Opus(pt) => pt,
+            Codec::G722 => 9,
+            Codec::Gsm => 3,
+            Codec::G729 => 18,
+            Codec::G726(pt, ..)
+            | Codec::Ilbc(pt, _)
+            | Codec::Speex(pt, _)
+            | Codec::L16(pt, _)
+            | Codec::Opus(pt) => pt,
         }
     }
+    /// From the name used in settings ("PCMU", "G722", "G726-32", "L16/16000", "opus"...).
     pub fn from_name(n: &str) -> Option<Codec> {
         match n.to_ascii_uppercase().as_str() {
             "PCMU" => Some(Codec::Pcmu),
             "PCMA" => Some(Codec::Pcma),
+            "G722" => Some(Codec::G722),
+            "GSM" => Some(Codec::Gsm),
+            "G729" => Some(Codec::G729),
+            "G726-16" => Some(Codec::G726(104, 16, false)),
+            "G726-24" => Some(Codec::G726(105, 24, false)),
+            "G726-32" | "G726" => Some(Codec::G726(112, 32, false)),
+            "G726-40" => Some(Codec::G726(106, 40, false)),
+            "AAL2-G726-32" => Some(Codec::G726(112, 32, true)),
+            "ILBC" => Some(Codec::Ilbc(102, 30)),
+            "SPEEX/8000" | "SPEEX" => Some(Codec::Speex(97, 8000)),
+            "SPEEX/16000" => Some(Codec::Speex(98, 16000)),
+            "L16/8000" | "L16" => Some(Codec::L16(114, 8000)),
+            "L16/16000" => Some(Codec::L16(115, 16000)),
+            "L16/44100" => Some(Codec::L16(116, 44100)),
             "OPUS" => Some(Codec::Opus(OPUS_PT)),
             _ => None,
+        }
+    }
+    /// The name used in settings.
+    pub fn key(self) -> String {
+        match self {
+            Codec::G726(_, k, _) => format!("G726-{k}"),
+            Codec::Ilbc(..) => "iLBC".into(),
+            Codec::Speex(_, r) => format!("speex/{r}"),
+            Codec::L16(_, r) => format!("L16/{r}"),
+            c => c.name(),
+        }
+    }
+    /// The same codec with the G.726 AAL2 bit order on or off.
+    pub fn with_aal2(self, aal2: bool) -> Codec {
+        match self {
+            Codec::G726(pt, k, _) => Codec::G726(pt, k, aal2),
+            c => c,
         }
     }
     /// Static payload types only.
@@ -122,28 +207,75 @@ impl Codec {
         match pt {
             0 => Some(Codec::Pcmu),
             8 => Some(Codec::Pcma),
+            9 => Some(Codec::G722),
+            3 => Some(Codec::Gsm),
+            18 => Some(Codec::G729),
             _ => None,
         }
     }
     /// A payload type of an SDP media line, using its rtpmap for dynamic types.
     pub fn from_media(m: &sidetone_core::sdp::Media, pt: u8) -> Option<Codec> {
-        match m.codecs.iter().find(|c| c.pt == pt) {
-            Some(c) if c.name.eq_ignore_ascii_case("opus") => Some(Codec::Opus(pt)),
-            Some(c) => Codec::from_pt(pt).filter(|x| x.name().eq_ignore_ascii_case(&c.name)),
-            None => Codec::from_pt(pt),
+        let Some(c) = m.codecs.iter().find(|c| c.pt == pt) else {
+            return Codec::from_pt(pt);
+        };
+        let name = c.name.to_ascii_uppercase();
+        let fmtp = c.fmtp.clone().unwrap_or_default().to_ascii_lowercase();
+        if let Some(k) = name
+            .strip_prefix("AAL2-G726-")
+            .and_then(|k| k.parse::<u8>().ok())
+        {
+            return [16, 24, 32, 40]
+                .contains(&k)
+                .then_some(Codec::G726(pt, k, true));
+        }
+        if let Some(k) = name
+            .strip_prefix("G726-")
+            .and_then(|k| k.parse::<u8>().ok())
+        {
+            return [16, 24, 32, 40]
+                .contains(&k)
+                .then_some(Codec::G726(pt, k, false));
+        }
+        match name.as_str() {
+            "OPUS" => Some(Codec::Opus(pt)),
+            "ILBC" => Some(Codec::Ilbc(
+                pt,
+                if fmtp.contains("mode=20") { 20 } else { 30 },
+            )),
+            "SPEEX" if c.rate == 8000 || c.rate == 16000 => Some(Codec::Speex(pt, c.rate)),
+            "L16" if [8000, 16000, 44100].contains(&c.rate) => Some(Codec::L16(pt, c.rate)),
+            _ => Codec::from_pt(pt).filter(|x| x.name().eq_ignore_ascii_case(&c.name)),
         }
     }
-    pub fn name(self) -> &'static str {
+    /// Encoding name in SDP.
+    pub fn name(self) -> String {
         match self {
-            Codec::Pcmu => "PCMU",
-            Codec::Pcma => "PCMA",
-            Codec::Opus(_) => "opus",
+            Codec::Pcmu => "PCMU".into(),
+            Codec::Pcma => "PCMA".into(),
+            Codec::G722 => "G722".into(),
+            Codec::Gsm => "GSM".into(),
+            Codec::G729 => "G729".into(),
+            Codec::G726(_, k, false) => format!("G726-{k}"),
+            Codec::G726(_, k, true) => format!("AAL2-G726-{k}"),
+            Codec::Ilbc(..) => "iLBC".into(),
+            Codec::Speex(..) => "speex".into(),
+            Codec::L16(..) => "L16".into(),
+            Codec::Opus(_) => "opus".into(),
         }
     }
     /// RTP clock rate.
     pub fn clock(self) -> u32 {
         match self {
             Codec::Opus(_) => 48000,
+            Codec::L16(_, r) | Codec::Speex(_, r) => r,
+            _ => 8000,
+        }
+    }
+    /// Sample rate of the audio the codec carries.
+    pub fn audio_rate(self) -> u32 {
+        match self {
+            Codec::G722 | Codec::Opus(_) => 16000,
+            Codec::L16(_, r) | Codec::Speex(_, r) => r,
             _ => 8000,
         }
     }
@@ -151,8 +283,35 @@ impl Codec {
     pub fn rtpmap(self) -> String {
         match self {
             Codec::Opus(_) => "opus/48000/2".into(),
-            c => format!("{}/8000", c.name()),
+            c => format!("{}/{}", c.name(), c.clock()),
         }
+    }
+    /// The a=fmtp parameters Sidetone sends for this codec.
+    pub fn fmtp(self) -> Option<String> {
+        match self {
+            Codec::Opus(_) => Some("useinbandfec=1".into()),
+            Codec::Ilbc(_, m) => Some(format!("mode={m}")),
+            Codec::G729 => Some("annexb=no".into()),
+            _ => None,
+        }
+    }
+    /// A packet time the codec can use (frame-based codecs need whole frames).
+    pub fn fit_ptime(self, ms: u32) -> u32 {
+        let ms = ms.clamp(10, 120);
+        let frame = match self {
+            Codec::Opus(_) => {
+                return if [10, 20, 40, 60].contains(&ms) {
+                    ms
+                } else {
+                    20
+                }
+            }
+            Codec::Gsm | Codec::Speex(..) => 20,
+            Codec::Ilbc(_, m) => m as u32,
+            Codec::G729 => 10,
+            _ => return ms,
+        };
+        (ms / frame).max(1) * frame
     }
 }
 
@@ -160,6 +319,80 @@ impl Codec {
 pub enum Encoder {
     G711(Codec, Box<Halfband>),
     Opus(Box<opus::Encoder>),
+    G722(Box<crate::codecs::g722::encoder::Encoder>),
+    /// Frame-based narrowband codecs (8 kHz): GSM, G.729, iLBC, Speex NB.
+    Frames(Box<Framed>, Box<Halfband>, Vec<i16>),
+    SpeexWb(Box<crate::codecs::Speex>, Vec<i16>),
+    G726(Box<crate::codecs::g726::G726Encoder>, Box<Halfband>),
+    L16(u32, Box<Halfband>, Option<Box<crate::codecs::Resampler>>),
+}
+
+/// A narrowband codec that works on whole frames.
+pub enum Framed {
+    Gsm(crate::codecs::Gsm),
+    G729(crate::codecs::G729),
+    Ilbc(crate::codecs::Ilbc),
+    Speex(crate::codecs::Speex),
+}
+
+impl Framed {
+    fn new(c: Codec) -> Option<Framed> {
+        match c {
+            Codec::Gsm => crate::codecs::Gsm::new().map(Framed::Gsm),
+            Codec::G729 => Some(Framed::G729(crate::codecs::G729::new())),
+            Codec::Ilbc(_, m) => crate::codecs::Ilbc::new(m as u32).map(Framed::Ilbc),
+            Codec::Speex(_, 8000) => crate::codecs::Speex::new(false).map(Framed::Speex),
+            _ => None,
+        }
+    }
+    fn frame(&self) -> usize {
+        match self {
+            Framed::Gsm(_) => 160,
+            Framed::G729(_) => 80,
+            Framed::Ilbc(i) => i.frame,
+            Framed::Speex(s) => s.frame,
+        }
+    }
+    fn encode(&mut self, pcm: &[i16]) -> Vec<u8> {
+        match self {
+            Framed::Gsm(g) => pcm.chunks_exact(160).flat_map(|f| g.encode(f)).collect(),
+            Framed::G729(g) => g.encode(pcm),
+            Framed::Ilbc(i) => i.encode(pcm),
+            Framed::Speex(s) => s.encode(pcm),
+        }
+    }
+    fn decode(&mut self, payload: &[u8]) -> Vec<i16> {
+        match self {
+            Framed::Gsm(g) => payload.chunks_exact(33).flat_map(|f| g.decode(f)).collect(),
+            Framed::G729(g) => g.decode(payload),
+            Framed::Ilbc(i) => i.decode(payload),
+            Framed::Speex(s) => s.decode(payload),
+        }
+    }
+}
+
+fn g726(
+    kbps: u8,
+    aal2: bool,
+) -> (
+    crate::codecs::g726::G726Rate,
+    crate::codecs::g726::G726Packing,
+) {
+    use crate::codecs::g726::{G726Packing, G726Rate};
+    let rate = match kbps {
+        16 => G726Rate::Rate16000,
+        24 => G726Rate::Rate24000,
+        40 => G726Rate::Rate40000,
+        _ => G726Rate::Rate32000,
+    };
+    (
+        rate,
+        if aal2 {
+            G726Packing::Left
+        } else {
+            G726Packing::Right
+        },
+    )
 }
 
 const HB_TAPS: usize = 47;
@@ -243,6 +476,8 @@ impl Default for Halfband {
 
 impl Encoder {
     pub fn new(c: Codec) -> Encoder {
+        use crate::codecs::{g722, g726::G726Encoder, Resampler, Speex};
+        let fallback = || Encoder::G711(Codec::Pcmu, Box::default());
         match c {
             Codec::Opus(_) => {
                 match opus::Encoder::new(AUDIO_RATE, opus::Channels::Mono, opus::Application::Voip)
@@ -252,9 +487,34 @@ impl Encoder {
                         e.set_packet_loss_perc(5).ok();
                         Encoder::Opus(Box::new(e))
                     }
-                    Err(_) => Encoder::G711(Codec::Pcmu, Box::default()),
+                    Err(_) => fallback(),
                 }
             }
+            Codec::G722 => Encoder::G722(Box::new(g722::encoder::Encoder::new(
+                g722::Bitrate::Mode1_64000,
+                false,
+                false,
+            ))),
+            Codec::Speex(_, 16000) => match Speex::new(true) {
+                Some(s) => Encoder::SpeexWb(Box::new(s), Vec::new()),
+                None => fallback(),
+            },
+            Codec::Gsm | Codec::G729 | Codec::Ilbc(..) | Codec::Speex(..) => match Framed::new(c) {
+                Some(f) => Encoder::Frames(Box::new(f), Box::default(), Vec::new()),
+                None => fallback(),
+            },
+            Codec::G726(_, k, aal2) => {
+                let (rate, packing) = g726(k, aal2);
+                match G726Encoder::try_new(rate, packing) {
+                    Ok(e) => Encoder::G726(Box::new(e), Box::default()),
+                    Err(_) => fallback(),
+                }
+            }
+            Codec::L16(_, r) => Encoder::L16(
+                r,
+                Box::default(),
+                (r == 44100).then(|| Box::new(Resampler::new(AUDIO_RATE, 44100))),
+            ),
             c => Encoder::G711(c, Box::default()),
         }
     }
@@ -275,6 +535,43 @@ impl Encoder {
                     out.extend_from_slice(&buf[..n]);
                 }
             }
+            Encoder::G722(e) => out.extend(e.encode(pcm)),
+            Encoder::Frames(f, hb, pend) => {
+                hb.down(pcm, pend);
+                let n = pend.len() / f.frame() * f.frame();
+                if n > 0 {
+                    let chunk: Vec<i16> = pend.drain(..n).collect();
+                    out.extend(f.encode(&chunk));
+                }
+            }
+            Encoder::SpeexWb(s, pend) => {
+                pend.extend_from_slice(pcm);
+                let n = pend.len() / s.frame * s.frame;
+                if n > 0 {
+                    let chunk: Vec<i16> = pend.drain(..n).collect();
+                    out.extend(s.encode(&chunk));
+                }
+            }
+            Encoder::G726(e, hb) => {
+                let mut n = Vec::with_capacity(pcm.len() / 2);
+                hb.down(pcm, &mut n);
+                let mut buf = vec![0u8; n.len()];
+                if let Ok(k) = e.encode_i16(&n, &mut buf) {
+                    out.extend_from_slice(&buf[..k]);
+                }
+            }
+            Encoder::L16(rate, hb, rs) => {
+                let samples: Vec<i16> = match (*rate, rs) {
+                    (16000, _) => pcm.to_vec(),
+                    (_, Some(r)) => r.process(pcm),
+                    _ => {
+                        let mut n = Vec::with_capacity(pcm.len() / 2);
+                        hb.down(pcm, &mut n);
+                        n
+                    }
+                };
+                out.extend(samples.iter().flat_map(|s| s.to_be_bytes()));
+            }
         }
     }
 }
@@ -283,44 +580,88 @@ impl Encoder {
 pub struct Decoder {
     codec: Codec,
     opus: Option<opus::Decoder>,
-    /// Interpolates G.711 up to AUDIO_RATE.
+    g722: Option<crate::codecs::g722::decoder::Decoder>,
+    framed: Option<Framed>,
+    speex_wb: Option<crate::codecs::Speex>,
+    g726: Option<crate::codecs::g726::G726Decoder>,
+    resampler: Option<crate::codecs::Resampler>,
+    /// Interpolates 8 kHz codecs up to AUDIO_RATE.
     up: Box<Halfband>,
 }
 
 impl Decoder {
     pub fn new(c: Codec) -> Decoder {
-        let opus = match c {
-            Codec::Opus(_) => opus::Decoder::new(AUDIO_RATE, opus::Channels::Mono).ok(),
-            _ => None,
-        };
+        use crate::codecs::{g722, g726::G726Decoder, Resampler, Speex};
         Decoder {
             codec: c,
-            opus,
+            opus: matches!(c, Codec::Opus(_))
+                .then(|| opus::Decoder::new(AUDIO_RATE, opus::Channels::Mono).ok())
+                .flatten(),
+            g722: (c == Codec::G722)
+                .then(|| g722::decoder::Decoder::new(g722::Bitrate::Mode1_64000, false, false)),
+            framed: Framed::new(c),
+            speex_wb: matches!(c, Codec::Speex(_, 16000))
+                .then(|| Speex::new(true))
+                .flatten(),
+            g726: match c {
+                Codec::G726(_, k, aal2) => {
+                    let (rate, packing) = g726(k, aal2);
+                    G726Decoder::try_new(rate, packing).ok()
+                }
+                _ => None,
+            },
+            resampler: matches!(c, Codec::L16(_, 44100)).then(|| Resampler::new(44100, AUDIO_RATE)),
             up: Box::default(),
         }
     }
     /// Decodes one payload of payload type `pt`; None when the type is not audio we know.
     pub fn decode(&mut self, pt: u8, payload: &[u8]) -> Option<Vec<i16>> {
+        // G.711 is understood whatever was negotiated (early media, PBX switching).
         let narrow: Option<Vec<i16>> = match Codec::from_pt(pt) {
             Some(Codec::Pcmu) => Some(payload.iter().map(|&b| ulaw_decode(b)).collect()),
             Some(Codec::Pcma) => Some(payload.iter().map(|&b| alaw_decode(b)).collect()),
-            _ => None,
+            // A dynamic codec sent under another dynamic type (some PBXs renumber
+            // after a re-INVITE): still ours when the payload is audio-sized.
+            _ if pt != self.codec.pt()
+                && !(pt >= 96 && self.codec.pt() >= 96 && payload.len() > 8) =>
+            {
+                return None
+            }
+            _ => match self.codec {
+                Codec::Gsm | Codec::G729 | Codec::Ilbc(..) | Codec::Speex(_, 8000) => {
+                    Some(self.framed.as_mut()?.decode(payload))
+                }
+                Codec::G726(..) => Some(self.g726.as_mut()?.decode_vec(payload)),
+                Codec::L16(_, 8000) => Some(be16(payload)),
+                _ => None,
+            },
         };
         if let Some(n) = narrow {
             let mut out = Vec::with_capacity(n.len() * 2);
             self.up.up(&n, &mut out);
             return Some(out);
         }
-        if let (Codec::Opus(p), Some(d)) = (self.codec, self.opus.as_mut()) {
-            if p == pt {
+        match self.codec {
+            Codec::G722 => Some(self.g722.as_mut()?.decode(payload)),
+            Codec::Speex(_, 16000) => Some(self.speex_wb.as_mut()?.decode(payload)),
+            Codec::L16(_, 16000) => Some(be16(payload)),
+            Codec::L16(_, 44100) => Some(self.resampler.as_mut()?.process(&be16(payload))),
+            Codec::Opus(_) => {
+                let d = self.opus.as_mut()?;
                 let mut out = vec![0i16; SPMS * 120];
                 let n = d.decode(payload, &mut out, false).ok()?;
                 out.truncate(n);
-                return Some(out);
+                Some(out)
             }
+            _ => None,
         }
-        None
     }
+}
+
+fn be16(b: &[u8]) -> Vec<i16> {
+    b.chunks_exact(2)
+        .map(|x| i16::from_be_bytes([x[0], x[1]]))
+        .collect()
 }
 
 /// What the UA sends as audio.
@@ -639,10 +980,7 @@ impl RtpSession {
         tap: Tap,
     ) {
         // Opus frames are 10, 20, 40 or 60 ms.
-        let ptime_ms = match codec {
-            Codec::Opus(_) if ![10, 20, 40, 60].contains(&ptime_ms) => 20,
-            _ => ptime_ms,
-        };
+        let ptime_ms = codec.fit_ptime(ptime_ms);
         let recv_sock = self.socket.try_clone().expect("clone rtp socket");
         let send_sock = self.socket.try_clone().expect("clone rtp socket");
         let stop = self.stop.clone();
@@ -1104,7 +1442,7 @@ mod tests {
         }
         assert!(peak_out > 5000, "tone survives: {peak_out}");
         assert!(dec.decode(0, &[0xff; 160]).is_some(), "G.711 still decodes");
-        assert!(dec.decode(96, &[0; 10]).is_none(), "unknown payload type");
+        assert!(dec.decode(13, &[0; 10]).is_none(), "comfort noise is not audio we decode");
         assert_eq!(Codec::Opus(111), Codec::Opus(107));
         assert_eq!(c.clock(), 48000);
     }

@@ -629,26 +629,44 @@ fn rtp_wav(bytes: &[u8], id: usize) -> std::result::Result<(Vec<u8>, String), St
     if !a.pcm.is_empty() {
         return Ok((wav_mono(&a.pcm, a.rate), info(&a)));
     }
-    if a.codec.to_ascii_uppercase().contains("OPUS") && !a.frames.is_empty() {
-        let rate = 16000u32;
-        let mut dec = opus::Decoder::new(rate, opus::Channels::Mono).map_err(|e| e.to_string())?;
-        let mut pcm: Vec<i16> = Vec::new();
-        let mut buf = vec![0i16; 5760];
-        for (pos, f) in &a.frames {
-            // RTP clock is 48 kHz; place each frame where its timestamp says.
-            let at = (*pos as u64 * rate as u64 / 48000) as usize;
-            if pcm.len() < at {
-                pcm.resize(at, 0);
+    // Every codec the phone speaks: decode with the engine's decoders to 16 kHz.
+    if let Some(codec) = codec_for(&a.codec, a.clock_rate) {
+        if !a.frames.is_empty() {
+            use sidetone_ua::media::{Decoder, AUDIO_RATE};
+            let mut dec = Decoder::new(codec);
+            let mut pcm: Vec<i16> = Vec::new();
+            for (pos, f) in &a.frames {
+                // Place each payload where its RTP timestamp says.
+                let at = (*pos as u64 * AUDIO_RATE as u64 / codec.clock().max(1) as u64) as usize;
+                if pcm.len() < at {
+                    pcm.resize(at, 0);
+                }
+                if let Some(d) = dec.decode(codec.pt(), f) {
+                    pcm.extend_from_slice(&d);
+                }
             }
-            if let Ok(n) = dec.decode(f, &mut buf, false) {
-                pcm.extend_from_slice(&buf[..n]);
-            }
+            return Ok((wav_mono(&pcm, AUDIO_RATE), info(&a)));
         }
-        return Ok((wav_mono(&pcm, rate), info(&a)));
     }
     Err(a
         .note
         .unwrap_or_else(|| format!("{} cannot be played", a.codec)))
+}
+
+/// The engine codec for an RTP stream's codec name and clock rate.
+fn codec_for(name: &str, clock: u32) -> Option<sidetone_ua::media::Codec> {
+    use sidetone_ua::media::Codec;
+    let n = name.to_ascii_uppercase();
+    let key = match n.as_str() {
+        "SPEEX" => format!("speex/{clock}"),
+        "L16" => format!("L16/{clock}"),
+        _ => name.to_string(),
+    };
+    Codec::from_name(&key).or_else(|| {
+        n.strip_prefix("AAL2-")
+            .and_then(Codec::from_name)
+            .map(|c| c.with_aal2(true))
+    })
 }
 
 /// Passive capture on a network interface (libpcap / Npcap loaded at run time).
