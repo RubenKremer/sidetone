@@ -142,11 +142,12 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
+          # GitHub runs bash with pipefail: a missing search path must not stop the step.
+          set +o pipefail
           exe=$(find target app/src-tauri/target -maxdepth 3 -path '*release/*' -iname '*.exe' 2>/dev/null | grep -iE '/(sidetone-desktop|sidetone)\.exe$' | grep -v '/sidetone\.exe$' | head -1)
           [ -n "$exe" ] || exe=$(find target app/src-tauri/target -maxdepth 3 -path '*release/*' -iname 'sidetone*.exe' 2>/dev/null | head -1)
           if [ -z "$exe" ]; then
-            echo "desktop executable not found; executables built:"
-            find . -path ./node_modules -prune -o -iname '*.exe' -print 2>/dev/null | grep -v '/deps/\|/build/' | head -40
+            echo "::error::desktop executable not found; built: $(find . -path ./node_modules -prune -o -iname '*.exe' -print 2>/dev/null | grep -v '/deps/\|/build/' | head -20 | tr '\n' ' ')"
             exit 1
           fi
           echo "portable from $exe"
