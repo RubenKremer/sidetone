@@ -14,6 +14,9 @@ const store = {
   set(k, v) {
     try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* storage unavailable */ }
   },
+  del(k) {
+    try { localStorage.removeItem(k); } catch { /* storage unavailable */ }
+  },
 };
 
 class Emitter {
@@ -89,6 +92,13 @@ export class NativeController extends Emitter {
   }
   async history() { return (await this.http.get("api/phone/history")).json(); }
   async clearHistory() { await this.http.post("api/phone/history/clear", "", "application/json"); }
+  async historyCapture(callId) {
+    try {
+      return new Uint8Array(await (await this.http.get(`api/phone/history/capture?call_id=${encodeURIComponent(callId)}`)).arrayBuffer());
+    } catch {
+      return null;
+    }
+  }
   async deleteHistory(ids) { await this.http.post("api/phone/history/delete", JSON.stringify({ call_ids: ids }), "application/json"); }
   async capture() { return new Uint8Array(await (await this.http.get("api/phone/capture")).arrayBuffer()); }
   async clearCapture() { return this.cmd({ cmd: "clear_capture" }); }
@@ -383,6 +393,9 @@ export class WebController extends Emitter {
         });
         this.histList = this.histList.slice(0, 300);
         store.set("sidetone.web.history", this.histList);
+        // Keep this call's SIP (with its SDP codecs) for the history, once the BYE/200 is in.
+        const cid = l.call_id;
+        setTimeout(() => this.saveCallLog(cid), 3000);
         this.publish();
       },
     };
@@ -575,10 +588,51 @@ export class WebController extends Emitter {
   }
 
   async history() { return this.histList; }
-  async clearHistory() { this.histList = []; store.set("sidetone.web.history", []); }
+  async clearHistory() {
+    const ids = this.histList.map((h) => h.call_id);
+    this.histList = [];
+    store.set("sidetone.web.history", []);
+    for (const id of ids) store.del(`sidetone.web.cap.${id}`);
+  }
   async deleteHistory(ids) {
     this.histList = this.histList.filter((h) => !ids.includes(h.call_id));
     store.set("sidetone.web.history", this.histList);
+    for (const id of ids) store.del(`sidetone.web.cap.${id}`);
+  }
+
+  /// Saves the SIP of one call (browser storage) and its offered/answered codecs.
+  saveCallLog(callId) {
+    if (!this.phone || !callId) return;
+    const re = new RegExp(`^(Call-ID|i)\\s*:\\s*${callId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "mi");
+    const log = this.phone.captureLog();
+    const entries = log.entries.filter((e) => re.test(e.text));
+    if (!entries.length) return;
+    store.set(`sidetone.web.cap.${callId}`, { ...log, entries });
+    const sdpCodecs = (t) => [...t.matchAll(/^a=rtpmap:\d+ ([^/\s]+)/gm)].map((m) => m[1]);
+    const withSdp = entries.filter((e) => /\r?\n\r?\nv=0/.test(e.text));
+    const offer = withSdp[0];
+    const answer = offer && withSdp.find((e) => e !== offer && e.out !== offer.out);
+    const h = this.histList.find((x) => x.call_id === callId);
+    if (h) {
+      h.offer_codecs = offer ? sdpCodecs(offer.text) : [];
+      h.answer_codecs = answer ? sdpCodecs(answer.text) : [];
+      h.capture = true;
+      store.set("sidetone.web.history", this.histList);
+    }
+    // Keep the saved logs to the calls still in the history.
+    const keep = new Set(this.histList.map((x) => `sidetone.web.cap.${x.call_id}`));
+    try {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith("sidetone.web.cap.") && !keep.has(k)) localStorage.removeItem(k);
+      }
+    } catch { /* storage unavailable */ }
+  }
+
+  async historyCapture(callId, be) {
+    const log = store.get(`sidetone.web.cap.${callId}`, null);
+    if (!log) return null;
+    return be.captureFromLog(log);
   }
 
   /// The capture of a browser call is rebuilt from the SIP log (media is DTLS-SRTP).

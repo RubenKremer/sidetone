@@ -134,10 +134,34 @@ impl Phone {
             config: Mutex::new(cfg),
             dir,
         };
-        // Persist history in the background as calls end.
-        std::thread::spawn(|| loop {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            if let Some(p) = PHONE.get() {
+        // Persist history in the background as calls end, and keep each
+        // call's own capture next to it a few seconds after it ends (so the
+        // final BYE/200 and the last RTP are in).
+        std::thread::spawn(|| {
+            let mut tried: std::collections::HashSet<String> = Default::default();
+            let mut pending: Vec<(String, std::time::Instant)> = Vec::new();
+            let mut first = true;
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let Some(p) = PHONE.get() else { continue };
+                for h in p.engine.history() {
+                    if tried.insert(h.call_id.clone())
+                        && !first
+                        && p.call_capture_path(&h.call_id).is_some_and(|f| !f.exists())
+                    {
+                        pending.push((h.call_id, std::time::Instant::now()));
+                    }
+                }
+                first = false;
+                let due: Vec<String> = pending
+                    .iter()
+                    .filter(|(_, t)| t.elapsed() > std::time::Duration::from_secs(3))
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                pending.retain(|(id, _)| !due.contains(id));
+                for id in due {
+                    p.save_call_capture(&id);
+                }
                 if p.engine.take_history_dirty() {
                     p.save_history();
                 }
@@ -151,6 +175,85 @@ impl Phone {
             let c = self.config.lock().unwrap().clone();
             if let Ok(b) = serde_json::to_vec_pretty(&c) {
                 let _ = write_private(&d.join("phone.json"), &b);
+            }
+        }
+    }
+
+    /// Where the capture of one call from the history is kept.
+    pub fn call_capture_path(&self, call_id: &str) -> Option<PathBuf> {
+        let safe: String = call_id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || "._-".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .take(120)
+            .collect();
+        if safe.is_empty() {
+            return None;
+        }
+        self.dir
+            .as_ref()
+            .map(|d| d.join("calls").join(format!("{safe}.pcapng")))
+    }
+
+    /// Saves the SIP and RTP of one call from the session capture, and fills
+    /// the codecs of the history entry from its SDP.
+    fn save_call_capture(&self, call_id: &str) {
+        let Some(path) = self.call_capture_path(call_id) else {
+            return;
+        };
+        let bytes = self.engine.capture();
+        let Ok(report) = sidetone_core::analyze_bytes(&bytes) else {
+            return;
+        };
+        let Some(idx) = report.calls.iter().position(|c| c.call_id == call_id) else {
+            return;
+        };
+        let c = &report.calls[idx];
+        self.engine
+            .set_history_codecs(call_id, c.offer_codecs.clone(), c.answer_codecs.clone());
+        let mut opts = sidetone_core::export::ExportOptions {
+            call: Some(idx),
+            ..Default::default()
+        };
+        let mut out = sidetone_core::export::export_pcapng(&report, &opts);
+        // Very long calls keep the signaling only.
+        if out.len() > 50 * 1024 * 1024 {
+            opts.sip_only = true;
+            out = sidetone_core::export::export_pcapng(&report, &opts);
+        }
+        let _ = write_private(&path, &out);
+    }
+
+    /// The saved capture of a call from the history.
+    pub fn call_capture(&self, call_id: &str) -> Option<Vec<u8>> {
+        std::fs::read(self.call_capture_path(call_id)?).ok()
+    }
+
+    /// History with a flag telling which calls have a saved capture.
+    pub fn history_view(&self) -> Vec<Value> {
+        self.engine
+            .history()
+            .into_iter()
+            .map(|h| {
+                let has = self
+                    .call_capture_path(&h.call_id)
+                    .is_some_and(|f| f.exists());
+                let mut v = json!(h);
+                v["capture"] = json!(has);
+                v
+            })
+            .collect()
+    }
+
+    fn remove_call_captures(&self, ids: &[String]) {
+        for id in ids {
+            if let Some(f) = self.call_capture_path(id) {
+                let _ = std::fs::remove_file(f);
             }
         }
     }
@@ -323,10 +426,18 @@ impl Phone {
 
     pub fn delete_history(&self, call_ids: &[String]) {
         self.engine.delete_history(call_ids);
+        self.remove_call_captures(call_ids);
         self.save_history();
     }
 
     pub fn clear_history(&self) {
+        let ids: Vec<String> = self
+            .engine
+            .history()
+            .into_iter()
+            .map(|h| h.call_id)
+            .collect();
+        self.remove_call_captures(&ids);
         self.engine.clear_history();
         self.save_history();
     }

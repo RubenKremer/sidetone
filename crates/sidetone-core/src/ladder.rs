@@ -208,8 +208,8 @@ fn render_with(r: &Report, msgs: Vec<usize>, streams: Vec<usize>, opt: &LadderOp
 .st-ladder .lbl{stroke:none;font-weight:600}
 .st-ladder .retx line{stroke-dasharray:5 4;opacity:.6}
 .st-ladder .retx text{opacity:.7}
-.st-ladder .msg{cursor:pointer}
-.st-ladder .msg:hover .hit{fill:var(--grid);fill-opacity:.35}
+.st-ladder .msg,.st-ladder .stream{cursor:pointer}
+.st-ladder .msg:hover .hit,.st-ladder .stream:hover .hit{fill:var(--grid);fill-opacity:.35}
 .st-ladder .hit{fill:transparent}
 .st-ladder .sev-error{fill:var(--err)}
 .st-ladder .sev-warning{fill:var(--warn)}
@@ -334,10 +334,11 @@ fn render_with(r: &Report, msgs: Vec<usize>, streams: Vec<usize>, opt: &LadderOp
             let rel = (st.start_ns - t0) as f64 / 1e9;
             let _ = write!(
                 s,
-                r#"<g class="stream" data-stream="{si}"><title>{} → {} SSRC {}</title><text class="t" x="8" y="{:.1}" font-size="11">+{rel:.3}s</text>"#,
+                r#"<g class="stream" data-stream="{si}"><title>{} → {} SSRC {}</title><rect class="hit" x="0" y="{:.1}" width="{width:.0}" height="{row_h:.0}"/><text class="t" x="8" y="{:.1}" font-size="11">+{rel:.3}s</text>"#,
                 esc(&st.src),
                 esc(&st.dst),
                 esc(&st.ssrc),
+                y - row_h / 2.0 - 2.0,
                 y + 4.0
             );
             if (x1 - x2).abs() < 1.0 {

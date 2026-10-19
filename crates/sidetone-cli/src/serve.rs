@@ -488,7 +488,13 @@ fn phone_api(m: &Method, path: &str, q: &HashMap<String, String>, body: &[u8]) -
                 Err(e) => err(400, e),
             }
         }
-        (Method::Get, "/api/phone/history") => json_resp(json!(phone::get().engine.history())),
+        (Method::Get, "/api/phone/history") => json_resp(json!(phone::get().history_view())),
+        (Method::Get, "/api/phone/history/capture") => {
+            match phone::get().call_capture(q.get("call_id").map(|s| s.as_str()).unwrap_or("")) {
+                Some(b) => ok_bytes(b, "application/vnd.tcpdump.pcap"),
+                None => err(404, "no saved capture for this call"),
+            }
+        }
         (Method::Post, "/api/phone/history/delete") => {
             let ids: Vec<String> = serde_json::from_slice::<Value>(&body)
                 .ok()

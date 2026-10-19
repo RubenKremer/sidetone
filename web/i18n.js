@@ -161,6 +161,21 @@ const T = {
   "calls deleted from the history": ["chamadas excluídas do histórico", "llamadas borradas del historial", "Anrufe aus dem Verlauf gelöscht"],
   "From date": ["Data de", "Fecha desde", "Datum von"],
   "To date": ["Data até", "Fecha hasta", "Datum bis"],
+  "Click a call to see its full SIP, ladder, findings and explanation; double-click opens it in Analysis.": ["Clique numa chamada para ver o SIP completo, o ladder, os achados e a explicação; duplo clique abre na Análise.", "Haz clic en una llamada para ver el SIP completo, el ladder, los hallazgos y la explicación; doble clic la abre en Análisis.", "Einen Anruf anklicken, um SIP, Ladder, Befunde und Erklärung zu sehen; Doppelklick öffnet ihn in der Analyse."],
+  "Click: details here. Double-click: open in Analysis.": ["Clique: detalhes aqui. Duplo clique: abrir na Análise.", "Clic: detalles aquí. Doble clic: abrir en Análisis.", "Klick: Details hier. Doppelklick: in der Analyse öffnen."],
+  "offer": ["oferta", "oferta", "Angebot"],
+  "answer": ["resposta", "respuesta", "Antwort"],
+  "Loading the call": ["Carregando a chamada", "Cargando la llamada", "Anruf wird geladen"],
+  "This call's SIP is no longer available: it ended before captures were kept, or the trace was cleared.": ["O SIP desta chamada não está mais disponível: ela terminou antes de as capturas serem guardadas, ou o trace foi limpo.", "El SIP de esta llamada ya no está disponible: terminó antes de que se guardaran las capturas, o se limpió la traza.", "Das SIP dieses Anrufs ist nicht mehr verfügbar: Er endete, bevor Mitschnitte gespeichert wurden, oder der Trace wurde geleert."],
+  "Selected call": ["Chamada selecionada", "Llamada seleccionada", "Ausgewählter Anruf"],
+  "Open in Analysis": ["Abrir na Análise", "Abrir en Análisis", "In der Analyse öffnen"],
+  "Codecs": ["Codecs", "Códecs", "Codecs"],
+  "Capture": ["Captura", "Captura", "Mitschnitt"],
+  "from this session's trace": ["do trace desta sessão", "de la traza de esta sesión", "aus dem Trace dieser Sitzung"],
+  "saved with the history": ["salva com o histórico", "guardada con el historial", "mit dem Verlauf gespeichert"],
+  "not available": ["não disponível", "no disponible", "nicht verfügbar"],
+  "the other side": ["o outro lado", "el otro lado", "die Gegenseite"],
+  "this phone": ["este telefone", "este teléfono", "dieses Telefon"],
   "Presence not published": ["Presença não publicada", "Presencia no publicada", "Presence nicht veröffentlicht"],
   "Available": ["Disponível", "Disponible", "Verfügbar"],
   "Away": ["Ausente", "Ausente", "Abwesend"],
@@ -670,7 +685,7 @@ export function t(s) {
 }
 
 // Containers whose text is evidence or user data and must not change.
-const SKIP = "pre, code, kbd, .sipmsg, .tr-list, .trace-list, .ladder, .findings, .c-parties, .ln-remote, .mono, .ai-out, textarea, input, #dial-history, .help-raw";
+const SKIP = ".hd-ladder, pre, code, kbd, .sipmsg, .tr-list, .trace-list, .ladder, .findings, .c-parties, .ln-remote, .mono, .ai-out, textarea, input, #dial-history, .help-raw";
 
 function translateNode(root) {
   if (lang === "en" || !root) return;

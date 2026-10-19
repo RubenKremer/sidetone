@@ -814,3 +814,14 @@ body.compact .ai-dock { display: none; }
 .hist-tools .hf { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
 .hist-tools input[type=date], .hist-tools select { font: inherit; font-size: 13px; padding: 4px 6px; border: 1px solid var(--rule-strong); border-radius: 6px; background: var(--panel); color: var(--ink); }
 table.hist .del { color: var(--bad); }
+
+/* History: selectable rows and the selected call */
+table.hist tbody tr[data-hrow] { cursor: pointer; }
+table.hist tbody tr.sel { background: var(--mark-soft); }
+.hist-detail .hd-ladder { max-height: 420px; overflow: auto; border: 1px solid var(--rule); border-radius: 8px; margin: 10px 0 14px; background: var(--sunk); }
+.hist-detail .hd-ladder svg { display: block; max-width: none; }
+.hist-detail .st-ladder text { font-family: var(--mono); }
+
+#tab-media tr[data-stream] { cursor: pointer; }
+#tab-media tr[data-stream].sel { background: var(--mark-soft); }
+.ladder .st-ladder .stream.sel .hit { fill: var(--mark); fill-opacity: 0.35; }

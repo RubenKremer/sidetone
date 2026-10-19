@@ -216,6 +216,11 @@ pub struct HistoryEntry {
     pub reason: Option<String>,
     pub ended_by: Option<String>,
     pub codec: Option<String>,
+    /// Codecs in the SDP offer and answer, filled from the call's capture.
+    #[serde(default)]
+    pub offer_codecs: Vec<String>,
+    #[serde(default)]
+    pub answer_codecs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -432,6 +437,16 @@ impl Engine {
     pub fn set_history(&self, h: Vec<HistoryEntry>) {
         let mut s = self.shared.lock().unwrap();
         s.history = h.into_iter().take(MAX_HISTORY).collect();
+    }
+
+    /// Fills the offered and answered codecs of a call in the history.
+    pub fn set_history_codecs(&self, call_id: &str, offer: Vec<String>, answer: Vec<String>) {
+        let mut s = self.shared.lock().unwrap();
+        if let Some(h) = s.history.iter_mut().find(|h| h.call_id == call_id) {
+            h.offer_codecs = offer;
+            h.answer_codecs = answer;
+            s.history_dirty = true;
+        }
     }
 
     /// Removes the calls with these Call-IDs from the history.
@@ -3088,6 +3103,7 @@ impl Core {
             reason: l.reason.clone(),
             ended_by: l.ended_by.clone(),
             codec: l.codec.map(|c| c.name().to_string()),
+            ..Default::default()
         };
         let text = format!(
             "call ended{}{}",

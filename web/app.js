@@ -1164,14 +1164,14 @@ async function renderHistory() {
       const missed = h.direction === "in" && !h.answered;
       const icon = missed ? "missed" : h.direction === "in" ? "in" : "out";
       const result = h.answered ? "Answered" : resultText(h.final_code, h.reason) || "Not answered";
-      return `<tr class="${missed ? "missed" : ""}">
+      return `<tr class="${missed ? "missed" : ""}${S.histSel === h.call_id ? " sel" : ""}" data-hrow="${i}" title="${esc(t("Click: details here. Double-click: open in Analysis."))}">
         <td><input type="checkbox" data-hsel="${esc(h.call_id)}" ${HSEL.has(h.call_id) ? "checked" : ""} aria-label="${esc(t("Select"))}"></td>
         <td><svg class="hi" aria-label="${icon}"><use href="#i-${icon}"/></svg></td>
         <td>${h.remote_name ? `<b>${esc(h.remote_name)}</b> ` : ""}<span class="mono">${esc(h.remote)}</span></td>
         <td>${when(h.started_ms)}</td>
         <td class="num">${h.answered ? dur(h.duration_s * 1000) : ""}</td>
         <td class="${h.answered ? "" : "muted"}">${esc(result)}</td>
-        <td class="mono muted">${esc(h.codec || "")}</td>
+        <td>${codecCell(h)}</td>
         <td class="muted">${esc(accName(h.account))}</td>
         <td class="acts"><button type="button" class="linklike" data-redial="${i}">Call</button> <button type="button" class="linklike" data-han="${i}">Analyze</button> <button type="button" class="linklike del" data-hdel="${i}" title="${esc(t("Delete from history"))}">✕</button></td>
       </tr>`;
@@ -1188,7 +1188,13 @@ async function renderHistory() {
       dial(h.remote);
     }
     const a = e.target.closest("[data-han]");
-    if (a) analyzeLine(rows[+a.dataset.han].call_id);
+    if (a) openHistoryCall(rows[+a.dataset.han], true);
+    const row = e.target.closest("[data-hrow]");
+    if (row && !e.target.closest("button, input, a")) {
+      clearTimeout(S.histClick);
+      // Wait a moment so a double click does not load twice.
+      S.histClick = setTimeout(() => openHistoryCall(rows[+row.dataset.hrow], false), 220);
+    }
     const d = e.target.closest("[data-hdel]");
     if (d) {
       const id = rows[+d.dataset.hdel].call_id;
@@ -1196,6 +1202,12 @@ async function renderHistory() {
       await S.ctl.deleteHistory([id]);
       renderHistory();
     }
+  };
+  $("#hist").ondblclick = (e) => {
+    const row = e.target.closest("[data-hrow]");
+    if (!row || e.target.closest("button, input, a")) return;
+    clearTimeout(S.histClick);
+    openHistoryCall(rows[+row.dataset.hrow], true);
   };
   $("#hist").onchange = (e) => {
     const c = e.target.closest("[data-hsel]");
@@ -1209,10 +1221,91 @@ async function renderHistory() {
   renderCallDetail();
 }
 
+/// The codec used, then what was offered and answered.
+function codecCell(h) {
+  const audio = (l) => (l || []).filter((c) => !/telephone-event|^CN$/i.test(c));
+  const used = h.codec || audio(h.answer_codecs)[0] || "";
+  const dtmf = (h.answer_codecs || []).some((c) => /telephone-event/i.test(c));
+  const parts = [];
+  if (h.offer_codecs && h.offer_codecs.length) parts.push(`${t("offer")} ${h.offer_codecs.join(", ")}`);
+  if (h.answer_codecs && h.answer_codecs.length) parts.push(`${t("answer")} ${h.answer_codecs.join(", ")}`);
+  return `${used ? `<b class="mono">${esc(used)}</b>` : ""}${dtmf ? ` <span class="tag">DTMF 4733</span>` : ""}${parts.length ? `<div class="muted small mono">${esc(parts.join(" · "))}</div>` : ""}`;
+}
+
+/// Loads one call from the history into Analysis (its saved capture, or the
+/// session capture) and shows it here; `go` switches to Analysis.
+async function openHistoryCall(h, go) {
+  if (!h) return;
+  S.histSel = h.call_id;
+  $$("#hist tr").forEach((r) => r.classList.toggle("sel", r.dataset.hrow != null && historyRows()[+r.dataset.hrow]?.call_id === h.call_id));
+  const box = $("#hist-detail");
+  box.hidden = false;
+  box.innerHTML = `<p class="muted">${esc(t("Loading the call"))}…</p>`;
+  let bytes = null;
+  try {
+    bytes = S.ctl.historyCapture ? await S.ctl.historyCapture(h.call_id, S.be) : null;
+  } catch {
+    bytes = null;
+  }
+  let fromSession = false;
+  if (!bytes) {
+    try {
+      bytes = await S.ctl.capture(S.be);
+      fromSession = true;
+    } catch {
+      bytes = null;
+    }
+  }
+  if (bytes) {
+    await load(bytes, `${(h.remote || "call").replace(/[^\w.@-]+/g, "_")}-${new Date(h.started_ms).toISOString().slice(0, 19).replace(/[:T]/g, "")}.pcapng`);
+  }
+  const ci = S.report ? S.report.calls.findIndex((c) => c.call_id === h.call_id) : -1;
+  if (ci >= 0) await selectCall(ci);
+  renderHistoryDetail(h, ci, fromSession);
+  if (go && ci >= 0) showWs("analysis");
+  else if (go) toast(t("This call's SIP is no longer available: it ended before captures were kept, or the trace was cleared."), 5000);
+}
+
+function renderHistoryDetail(h, ci, fromSession) {
+  const box = $("#hist-detail");
+  const result = h.answered ? t("Answered") : resultText(h.final_code, h.reason) || t("Not answered");
+  const c = ci >= 0 ? S.report.calls[ci] : null;
+  const d = new Date(h.started_ms);
+  box.innerHTML = `<div class="sect-head"><h2>${esc(t("Selected call"))}: ${h.remote_name ? `${esc(h.remote_name)} ` : ""}<span class="mono">${esc(h.remote)}</span></h2>
+      <span class="row">${c ? `<button type="button" class="btn small primary" id="hd-open">${esc(t("Open in Analysis"))}</button> <button type="button" class="btn small" id="hd-save">${esc(t("Save pcapng"))}</button>` : ""}</span></div>
+    ${kv([
+      [t("Direction"), esc(t(h.direction === "in" ? "Incoming" : "Outgoing"))],
+      [t("Started"), esc(`${d.toLocaleDateString()} ${d.toLocaleTimeString()}`)],
+      [t("Duration"), h.answered ? esc(dur(h.duration_s * 1000)) : ""],
+      [t("Result"), `${esc(result)}${h.final_code ? ` <span class="mono">${h.final_code}</span>` : ""}${h.ended_by ? ` <span class="muted">(${esc(t("ended by"))} ${esc(t(/remote|callee|far/i.test(h.ended_by) ? "the other side" : "this phone"))})</span>` : ""}`],
+      [t("Codecs"), codecCell(h)],
+      [t("Account"), esc(accName(h.account))],
+      ["Call-ID", `<span class="mono">${esc(h.call_id)}</span>`],
+      [t("Capture"), c ? esc(t(fromSession ? "from this session's trace" : "saved with the history")) + `, ${c.messages.length} SIP, ${c.streams.length} RTP` : `<span class="muted">${esc(t("not available"))}</span>`],
+    ])}
+    ${c ? `<div class="hd-ladder" id="hd-ladder"></div>${renderExplain(S.report, ci, S.report.findings)}` : `<p class="muted">${esc(t("This call's SIP is no longer available: it ended before captures were kept, or the trace was cleared."))}</p>`}`;
+  if (c) {
+    const lad = $("#ladder");
+    $("#hd-ladder").innerHTML = lad ? lad.innerHTML : "";
+    $("#hd-ladder").addEventListener("click", (e) => {
+      const g = e.target.closest(".msg");
+      if (g) {
+        showWs("analysis");
+        selectMessage(+g.dataset.msg);
+      }
+    });
+    $("#hd-open").addEventListener("click", () => showWs("analysis"));
+    $("#hd-save").addEventListener("click", async () => {
+      const out = await S.be.exportPcap(S.bytes, { call: ci, annotate: true });
+      download(out, S.name, "application/vnd.tcpdump.pcap");
+    });
+  }
+}
+
 function historyCsv() {
   const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-  const head = ["started", "direction", "remote", "remote_name", "answered", "duration_s", "final_code", "reason", "ended_by", "codec", "account", "call_id"];
-  const lines = historyRows().map((h) => [new Date(h.started_ms).toISOString(), h.direction, h.remote, h.remote_name, h.answered, h.duration_s.toFixed(1), h.final_code, h.reason, h.ended_by, h.codec, accName(h.account), h.call_id].map(q).join(","));
+  const head = ["started", "direction", "remote", "remote_name", "answered", "duration_s", "final_code", "reason", "ended_by", "codec", "offer_codecs", "answer_codecs", "account", "call_id"];
+  const lines = historyRows().map((h) => [new Date(h.started_ms).toISOString(), h.direction, h.remote, h.remote_name, h.answered, h.duration_s.toFixed(1), h.final_code, h.reason, h.ended_by, h.codec, (h.offer_codecs || []).join(" "), (h.answer_codecs || []).join(" "), accName(h.account), h.call_id].map(q).join(","));
   return [head.join(","), ...lines].join("\r\n");
 }
 
@@ -1613,6 +1706,7 @@ function sdpOf(m) {
 function selectMessage(idx, switchTab = true) {
   S.msg = idx;
   $$("#ladder .msg").forEach((g) => g.classList.toggle("sel", +g.dataset.msg === idx));
+  $$("#ladder .stream").forEach((g) => g.classList.remove("sel"));
   const g = $(`#ladder .msg[data-msg="${idx}"]`);
   if (g) g.scrollIntoView({ block: "nearest", inline: "nearest" });
   const m = S.report.messages[idx];
@@ -1709,6 +1803,7 @@ async function openPlayer(id) {
   if (!box) return;
   stopPlayer();
   const st = S.report.streams[id];
+  markStream(id);
   box.hidden = false;
   box.innerHTML = `<p class="muted">${esc(t("Decoding"))} ${esc(st.codec)}…</p>`;
   try {
@@ -1748,6 +1843,14 @@ async function openPlayer(id) {
   } catch (e) {
     box.innerHTML = `<p class="bad">${esc(e.message || String(e))}</p>`;
   }
+}
+
+/// Highlights the selected RTP stream in the ladder and in the Media table.
+function markStream(id) {
+  S.stream = id;
+  $$("#ladder .stream, #hd-ladder .stream").forEach((g) => g.classList.toggle("sel", +g.dataset.stream === id));
+  $$("#tab-media tr[data-stream]").forEach((r) => r.classList.toggle("sel", +r.dataset.stream === id));
+  $$("#ladder .msg").forEach((g) => g.classList.remove("sel"));
 }
 
 function drawWave() {
@@ -2298,8 +2401,8 @@ function bindAnalysis() {
     }
   });
   $("#tab-media").addEventListener("click", (e) => {
-    const b = e.target.closest("[data-play]");
-    if (b) openPlayer(+b.dataset.play);
+    const b = e.target.closest("[data-play]") || (!e.target.closest("button, a, input, .rtp-player") && e.target.closest("tr[data-stream]"));
+    if (b) openPlayer(+(b.dataset.play ?? b.dataset.stream));
   });
   const openFinding = (li) => {
     const f = S.report.findings[+li.dataset.finding];
