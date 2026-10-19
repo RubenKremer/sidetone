@@ -187,7 +187,7 @@ function showWs(name) {
     renderHelp($("#help-page"), {
       lang: currentLang(),
       version: S.version,
-      mode: t(S.ctl.kind === "web" ? "Browser phone (WebRTC)" : "Desktop engine (UDP)"),
+      mode: t(engineModeLabel()),
       langs: LANGS,
       onLang: setLang,
     });
@@ -231,6 +231,12 @@ function currentAccount() {
   if (!st || !st.accounts.length) return null;
   const id = $("#acct").value;
   return st.accounts.find((a) => a.id === id) || st.accounts[0];
+}
+
+function engineModeLabel() {
+  if (S.ctl.kind === "web") return "Browser phone (WebRTC)";
+  const tr = (currentAccount()?.transport || "UDP").toUpperCase();
+  return `Desktop engine (${tr === "TCP" || tr === "TLS" ? tr : "UDP"})`;
 }
 
 const REG_TEXT = {
@@ -416,6 +422,7 @@ function renderStatus() {
   const live = liveLines().length;
   $("#st-lines").textContent = live ? `${live} call${live > 1 ? "s" : ""}` : "Idle";
   $("#st-cap").textContent = st ? `${st.capture_packets.toLocaleString()} packets captured` : "";
+  $("#st-mode").textContent = t(engineModeLabel());
   $("#trace-count").textContent = S.trace.length ? S.trace.length.toLocaleString() : "";
   const e = $("#st-err");
   e.hidden = !S.errors;
@@ -2502,7 +2509,7 @@ async function main() {
     S.ctl.setProvisionParser((xml, kind) => S.be.parseProvision(xml, kind));
   }
   document.body.classList.toggle("web-mode", S.ctl.kind === "web");
-  $("#st-mode").textContent = S.ctl.kind === "web" ? "Browser phone (WebRTC)" : "Desktop engine (UDP)";
+  $("#st-mode").textContent = t(engineModeLabel());
   bindChrome();
   bindPhone();
   bindTrace();

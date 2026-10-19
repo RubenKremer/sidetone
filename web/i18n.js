@@ -176,6 +176,8 @@ const T = {
   "Idle": ["Livre", "Libre", "Frei"],
   "No NAT on the signaling path": ["Sem NAT no caminho da sinalização", "Sin NAT en la ruta de señalización", "Kein NAT auf dem Signalisierungsweg"],
   "Desktop engine (UDP)": ["Motor desktop (UDP)", "Motor de escritorio (UDP)", "Desktop-Engine (UDP)"],
+  "Desktop engine (TCP)": ["Motor desktop (TCP)", "Motor de escritorio (TCP)", "Desktop-Engine (TCP)"],
+  "Desktop engine (TLS)": ["Motor desktop (TLS)", "Motor de escritorio (TLS)", "Desktop-Engine (TLS)"],
   "Browser phone (WebRTC)": ["Telefone do navegador (WebRTC)", "Teléfono del navegador (WebRTC)", "Browser-Telefon (WebRTC)"],
 
   // calls page
