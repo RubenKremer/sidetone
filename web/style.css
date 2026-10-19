@@ -713,3 +713,21 @@ table.hist.active tr.ended td { color: var(--muted); }
 .msg-sum { background: var(--sunk); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 14px 4px; margin: 8px 0 10px; max-width: 1100px; }
 .msg-sum .kv { margin-bottom: 6px; }
 .msg-sum .kv dd { word-break: break-word; }
+
+/* Registration panel on the account page */
+.acc-reg { margin-top: 14px; }
+.acc-reg .sect-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ar-state { display: flex; align-items: center; gap: 8px; margin: 8px 0; font-weight: 500; }
+.ar-state.bad { color: var(--bad); }
+.ar-list { display: grid; gap: 2px; font-size: 13px; max-height: 360px; overflow: auto; }
+.ar-list summary { cursor: pointer; padding: 3px 4px; border-radius: 4px; }
+.ar-list summary:hover { background: var(--sunk); }
+.ar-list pre { margin: 4px 0 8px 18px; padding: 8px 10px; background: var(--sunk); border-radius: 6px; overflow: auto; }
+.tr-d.out { color: var(--req); }
+.tr-d.in { color: var(--end); }
+.fld.invalid input, .fld.invalid select { border-color: var(--bad); box-shadow: 0 0 0 2px color-mix(in srgb, var(--bad) 25%, transparent); }
+.fld-err { color: var(--bad); font-size: 12.5px; }
+#acct-state.link { cursor: pointer; text-decoration: underline dotted; }
+
+.notice { border: 1px solid var(--rule); border-left: 3px solid var(--mark); background: var(--mark-soft); border-radius: 6px; padding: 9px 12px; margin: 0 0 12px; font-size: 13.5px; }
+.notice a { font-weight: 600; margin-left: 4px; }

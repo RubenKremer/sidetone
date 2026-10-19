@@ -271,8 +271,10 @@ function renderAccounts() {
   }
   const a = currentAccount();
   $("#acct-dot").className = `dot ${regClass(a)}`;
-  $("#acct-state").textContent = accountStateText(a);
+  $("#acct-state").textContent = t(accountStateText(a));
   $("#acct-state").classList.toggle("bad", regClass(a) === "bad");
+  // A problem with the account: one click opens it in Settings.
+  $("#acct-state").classList.toggle("link", !!a && regClass(a) === "bad");
 }
 
 const BLF_TEXT = { idle: "Free", ringing: "Ringing", busy: "Busy", error: "Error", unknown: "Unknown" };
@@ -456,7 +458,10 @@ function onState(st) {
   if (S.page === "calls") renderCallDetail();
   if (S.page === "calls") renderActive();
   if (S.page === "calls" && !prev) renderHistory();
-  if (S.page === "settings" && SET.cfg) renderSetNav();
+  if (S.page === "settings" && SET.cfg) {
+    renderSetNav();
+    renderAccReg();
+  }
 }
 
 function flashTitle(text) {
@@ -600,7 +605,7 @@ async function analyzeLine(callId) {
       if (i >= 0) selectCall(i);
     }
   } catch (e) {
-    toast(`Nothing to analyze yet: ${e.message || e}`, 4000);
+    toast(t("Nothing to analyze yet: no SIP was sent or received. Check the account in Settings."), 5000);
   }
 }
 
@@ -627,6 +632,13 @@ function bindPhone() {
     if (S.ctl.kind === "web") S.ctl.activate($("#acct").value);
     renderAccounts();
     renderStatus();
+  });
+  $("#acct-state").addEventListener("click", () => {
+    const a = currentAccount();
+    if (!a || !$("#acct-state").classList.contains("link")) return;
+    SET.accId = a.id;
+    SET.section = null;
+    showWs("settings");
   });
   $("#acct-reg").addEventListener("click", () => {
     const a = currentAccount();
@@ -1108,6 +1120,7 @@ function onTrace(items) {
     while (list.children.length > 3000) list.firstElementChild.remove();
     if (atEnd) list.scrollTop = list.scrollHeight;
   }
+  if (S.page === "settings" && items.some((x) => /REGISTER/.test(x.cseq))) renderAccReg();
   renderStatus();
 }
 
@@ -2386,19 +2399,22 @@ async function renderSetBody() {
   // Fill behavior defaults so every field shows a value.
   if (native && !acc.profile.behavior) acc.profile.behavior = (await defaultBehavior()) || {};
   const tabs = native ? NATIVE_ACC_TABS : WEB_ACC_TABS;
-  const t = Math.min(SET.accTab, tabs.length - 1);
-  const [, fields] = tabs[t];
+  const tabIdx = Math.min(SET.accTab, tabs.length - 1);
+  const [, fields] = tabs[tabIdx];
   body.innerHTML = `
     <div class="set-head">
       <h1>${esc(acc.label || (native ? acc.profile.account.user : acc.user) || "New account")}</h1>
       <div class="row"><button type="button" class="btn small" id="acc-dup">Duplicate</button><button type="button" class="btn small danger" id="acc-del">Delete</button></div>
     </div>
-    <div class="seg" role="tablist">${tabs.map(([n], i) => `<button type="button" role="tab" data-acctab="${i}" aria-selected="${i === t}">${esc(n)}</button>`).join("")}</div>
+    ${native ? "" : `<div class="notice">${esc(t("The browser can only talk SIP over WebSocket (wss://, or ws:// on a local network): your PBX or SBC needs a WebSocket listener, such as Asterisk's transport-wss, FreeSWITCH's wss-binding or an SBC with WebRTC. For plain SIP over UDP, TCP or TLS, use the desktop app."))} <a href="https://github.com/igtoth/sidetone#downloads" target="_blank" rel="noopener">${esc(t("Download the desktop app"))}</a></div>`}
+    <div class="seg" role="tablist">${tabs.map(([n], i) => `<button type="button" role="tab" data-acctab="${i}" aria-selected="${i === tabIdx}">${esc(n)}</button>`).join("")}</div>
     <form class="set-form" id="acc-form" autocomplete="off">
       <div class="fields">${fields.map((f, i) => fieldHtml(f, get(acc, f[0]), `af-${i}`)).join("")}</div>
-      ${native && tabs[t][0] === "Advanced SIP" ? `<h3>What an INVITE from this account looks like</h3><pre class="sipmsg preview" id="inv-preview"></pre>` : ""}
+      ${native && tabs[tabIdx][0] === "Advanced SIP" ? `<h3>What an INVITE from this account looks like</h3><pre class="sipmsg preview" id="inv-preview"></pre>` : ""}
       <div class="set-actions"><span class="hint" id="acc-dirty"></span><button type="submit" class="btn primary">Save account</button></div>
-    </form>`;
+    </form>
+    <section class="set-form acc-reg" id="acc-reg"></section>`;
+  renderAccReg();
   const form = $("#acc-form");
   const collect = () => fields.forEach((f, i) => readField(f, `af-${i}`, acc));
   const preview = () => {
@@ -2441,6 +2457,23 @@ async function renderSetBody() {
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     collect();
+    const miss = missingField(acc, native);
+    if (miss) {
+      // Open the tab that has the field and point at it.
+      const [tab, key, why] = miss;
+      SET.accTab = tab;
+      renderSetBody();
+      const i = tabs[tab][1].findIndex((f) => f[0] === key);
+      const el = $(`#af-${i}`);
+      if (el) {
+        const fld = el.closest(".fld") || el.parentElement;
+        fld.classList.add("invalid");
+        fld.insertAdjacentHTML("beforeend", `<span class="fld-err">${esc(t(why))}</span>`);
+        el.focus();
+      }
+      toast(t(why), 5000);
+      return;
+    }
     await saveAccounts();
   });
   $("#acc-del").addEventListener("click", async () => {
@@ -2484,6 +2517,65 @@ async function addAccount() {
   SET.accTab = 0;
   renderSetNav();
   renderSetBody();
+}
+
+/// The first required field an account lacks: [tab index, field key, message].
+function missingField(acc, native) {
+  const tabs = native ? NATIVE_ACC_TABS : WEB_ACC_TABS;
+  const where = (key) => tabs.findIndex(([, fs]) => fs.some((f) => f[0] === key));
+  if (!acc.enabled) return null;
+  if (native) {
+    const a = acc.profile.account;
+    if (acc.register !== false && !(a.domain || "").trim()) return [where("profile.account.domain"), "profile.account.domain", "Fill in the SIP domain or registrar (host or host:port)."];
+    if (acc.register !== false && !(a.user || "").trim()) return [where("profile.account.user"), "profile.account.user", "Fill in the user (extension or number)."];
+    return null;
+  }
+  if (!(acc.user || "").trim()) return [where("user"), "user", "Fill in the user (extension or number)."];
+  if (!(acc.domain || "").trim()) return [where("domain"), "domain", "Fill in the SIP domain."];
+  const ws = (acc.ws || "").trim();
+  if (!ws) return [where("ws"), "ws", "The browser phone needs the WebSocket URL of your PBX or SBC, e.g. wss://pbx.example.com:8089/ws. The desktop app talks UDP, TCP or TLS and needs no WebSocket."];
+  if (!/^wss?:\/\//i.test(ws)) return [where("ws"), "ws", "The WebSocket URL starts with wss:// (or ws:// on a local network)."];
+  return null;
+}
+
+/// Live registration status of the account being edited: state, the REGISTER
+/// exchange as it happens, and shortcuts to the trace and the analysis.
+function renderAccReg() {
+  const box = $("#acc-reg");
+  if (!box || !SET.cfg) return;
+  const native = S.ctl.kind === "native";
+  const acc = SET.cfg.accounts.find((a) => a.id === SET.accId);
+  if (!acc) return;
+  const live = S.st && S.st.accounts.find((x) => x.id === acc.id);
+  const user = native ? acc.profile.account.user : acc.user;
+  const regs = S.trace
+    .filter((x) => (x.method === "REGISTER" || (x.status && /REGISTER/.test(x.cseq))) && (!user || x.raw.includes(`sip:${user}@`)))
+    .slice(-12);
+  const open = new Set([...box.querySelectorAll("details[open]")].map((d) => d.dataset.seq));
+  const cls = live ? regClass(live) : "";
+  box.innerHTML = `
+    <div class="sect-head"><h2>${esc(t("Registration"))}</h2>
+      <div class="row">
+        <button type="button" class="btn small" id="ar-reg" ${live ? "" : "disabled"}>${esc(t("Register now"))}</button>
+        <button type="button" class="btn small" id="ar-trace">${esc(t("Show in SIP trace"))}</button>
+        <button type="button" class="btn small" id="ar-an" ${regs.length ? "" : "disabled"}>${esc(t("Analyze"))}</button>
+      </div></div>
+    <p class="ar-state ${cls}"><span class="dot ${cls}"></span> ${esc(live ? t(accountStateText(live)) : t("Not saved yet: save the account to register."))}</p>
+    ${live && live.error ? `<p class="bad">${esc(t(live.error))}</p>` : ""}
+    ${regs.length
+      ? `<div class="ar-list">${regs
+          .map((x) => `<details data-seq="${x.seq}" ${open.has(String(x.seq)) ? "open" : ""}><summary><span class="mono muted">${clock(x.ts_ms, true)}</span> <span class="tr-d ${x.dir}">${x.dir === "out" ? "→" : "←"}</span> <span class="mono ${x.status >= 400 ? "bad" : x.status >= 200 ? "ok" : ""}">${esc(x.first_line)}</span></summary><pre class="sipmsg">${highlightSip(x.raw)}</pre></details>`)
+          .join("")}</div>`
+      : `<p class="hint">${esc(t(live ? "No REGISTER sent yet." : "The REGISTER and the server's answers will show here as they happen."))}</p>`}`;
+  $("#ar-reg").addEventListener("click", () => cmd({ cmd: "register", account: acc.id }));
+  $("#ar-trace").addEventListener("click", () => {
+    showWs("trace");
+    $("#tr-hide-reg").checked = false;
+    $("#tr-call").value = "";
+    $("#tr-filter").value = user || "";
+    renderTrace(true);
+  });
+  $("#ar-an").addEventListener("click", () => analyzeLine(regs.length ? regs[regs.length - 1].call_id : null));
 }
 
 async function saveAccounts() {

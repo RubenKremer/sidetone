@@ -214,7 +214,7 @@ export class WebController extends Emitter {
     this.publish();
     if (!a.enabled) { this.acc.state = "off"; return this.publish(); }
     if (!a.ws || !a.domain || !a.user) {
-      this.acc = this.accView(a, "error", { error: "Fill in the WebSocket URL, domain and user in Settings" });
+      this.acc = this.accView(a, "error", { error: !a.ws ? "Fill in the WebSocket URL in Settings, Server and registration" : "Fill in the domain and user in Settings" });
       return this.publish();
     }
     const pw = a.password || this.passwords[a.id] || "";
@@ -562,7 +562,7 @@ export class WebController extends Emitter {
 
   /// The capture of a browser call is rebuilt from the SIP log (media is DTLS-SRTP).
   async capture(be) {
-    if (!this.phone || !this.phone.log.length) throw new Error("Nothing captured yet");
+    if (!this.phone || !this.phone.log.length) throw new Error("Nothing captured yet: no SIP was sent or received");
     return be.captureFromLog(this.phone.captureLog());
   }
   async clearCapture() { return this.cmd({ cmd: "clear_capture" }); }
