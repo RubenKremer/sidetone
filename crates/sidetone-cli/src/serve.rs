@@ -140,6 +140,11 @@ fn ua_from(v: &Value) -> Result<Ua> {
 /// Native "save as" hook supplied by the desktop app: (suggested name, bytes) -> saved path.
 pub type SaveHook = std::sync::Arc<dyn Fn(&str, &[u8]) -> Result<Option<PathBuf>> + Send + Sync>;
 
+/// Window hook supplied by the desktop app: "phone" makes the window compact,
+/// "full" restores the troubleshooting layout.
+pub type WindowHook = Box<dyn Fn(&str) + Send + Sync>;
+pub static WINDOW_HOOK: std::sync::OnceLock<WindowHook> = std::sync::OnceLock::new();
+
 fn handle(
     req: &mut Request,
     web: &Option<PathBuf>,
@@ -176,8 +181,18 @@ fn handle(
             if save.is_some() {
                 features.push("native-save");
             }
+            if WINDOW_HOOK.get().is_some() {
+                features.push("window");
+            }
             ok_bytes(json!({"mode": "server", "version": env!("CARGO_PKG_VERSION"), "features": features}).to_string().into_bytes(), "application/json")
         }
+        (Method::Post, "/api/window") => match WINDOW_HOOK.get() {
+            Some(f) => {
+                f(q.get("mode").map(|s| s.as_str()).unwrap_or("full"));
+                json_resp(json!({"ok": true}))
+            }
+            None => err(404, "no window to resize"),
+        },
         (Method::Post, "/api/save") => match save {
             Some(f) => match f(
                 q.get("name").map(|s| s.as_str()).unwrap_or("sidetone.bin"),

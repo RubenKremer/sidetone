@@ -32,6 +32,10 @@
     <symbol id="i-spk" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5v14l-4.5-4.5H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></symbol>
     <symbol id="i-in" viewBox="0 0 24 24"><path d="M18 6L7 17M7 9v8h8"/></symbol>
     <symbol id="i-out" viewBox="0 0 24 24"><path d="M6 18L17 7M9 7h8v8"/></symbol>
+    <symbol id="i-history" viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 1 0 2.5-6M3.5 4v4.5H8"/><path d="M12 7.5V12l3 2"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></symbol>
+    <symbol id="i-expand" viewBox="0 0 24 24"><path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
     <symbol id="i-missed" viewBox="0 0 24 24"><path d="M4 8l6 6 4-4 6 6"/><path d="M15 16h5v-5"/></symbol>
   </defs>
 </svg>
@@ -50,6 +54,10 @@
     <button type="button" role="tab" data-ws="help">Help</button>
   </nav>
   <div class="bar-right">
+    <button type="button" class="icon-btn compact-only" id="c-back" title="Back to the phone"><svg><use href="#i-back"/></svg></button>
+    <button type="button" class="icon-btn compact-only" id="c-calls" title="Calls and history"><svg><use href="#i-history"/></svg></button>
+    <button type="button" class="icon-btn compact-only" id="c-settings" title="Settings"><svg><use href="#i-gear"/></svg></button>
+    <button type="button" class="icon-btn compact-only" id="c-full" title="Troubleshooting mode: trace, analysis and diagnostics"><svg><use href="#i-expand"/></svg></button>
     <button type="button" class="btn small ai-btn" id="ai-toggle" aria-expanded="false"><svg><use href="#i-ai"/></svg>Ask AI</button>
     <label class="btn small" for="file">Open capture<input id="file" type="file" accept=".pcap,.pcapng,.cap" hidden></label>
     <button class="btn small ghost" type="button" id="explain-toggle" aria-pressed="true" title="Show or hide the explanations (Explanation tab, SDP line by line, header help)">Explanations</button>

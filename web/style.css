@@ -779,3 +779,26 @@ input.bad-filter { border-color: var(--bad) !important; background: color-mix(in
 .rtp-player { margin: 12px 0; border: 1px solid var(--rule); border-radius: 8px; padding: 10px 12px; background: var(--panel); max-width: 1100px; }
 .rtp-player canvas { width: 100%; height: 110px; display: block; border-radius: 4px; cursor: pointer; margin: 8px 0; }
 .pl-ctl { align-items: center; gap: 10px; }
+
+/* Compact phone window (desktop app, phone-only mode): just the phone. */
+.compact-only { display: none !important; }
+body.compact .compact-only { display: inline-flex !important; }
+body.compact:not(.compact-open) #c-back { display: none !important; }
+body.compact .ws-tabs, body.compact .bar-right > :not(.compact-only), body.compact .status { display: none !important; }
+body.compact .bar { gap: 8px; padding: 0 10px; }
+body.compact .bar-right { margin-left: auto; gap: 4px; }
+body.compact .brand { width: auto; }
+body.compact .shell { flex-direction: column; }
+body.compact .phone { width: 100%; max-width: none; border-right: 0; flex: 1; }
+body.compact .ws-col { display: none; }
+body.compact.compact-open .phone { display: none; }
+body.compact.compact-open .ws-col { display: flex; flex: 1; min-height: 0; }
+body.compact .ws-page { padding: 12px; }
+body.compact .settings { grid-template-columns: 1fr; }
+body.compact .set-nav { position: static; }
+body.compact .calls-grid { grid-template-columns: 1fr; }
+body.compact table.hist, body.compact .active-wrap { display: block; overflow-x: auto; }
+body.compact { height: 100vh; overflow: hidden; }
+body.compact .phone { overflow-y: auto; min-height: 0; border-bottom: 0; }
+body.compact.compact-open .ws { overflow-y: auto; min-height: 0; }
+body.compact .ai-dock { display: none; }

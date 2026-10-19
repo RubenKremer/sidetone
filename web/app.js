@@ -99,6 +99,7 @@ async function httpBackend() {
     ].map(([name, description]) => ({ name, description })),
     sample: async (n) => new Uint8Array(await (await get(`api/sample?${q({ name: n })}`)).arrayBuffer()),
     captureFromLog: async (log) => new Uint8Array(await (await post("api/sip-log-capture", JSON.stringify(log), "application/json")).arrayBuffer()),
+    setWindow: (mode) => post(`api/window?${q({ mode })}`, new Uint8Array()),
     save: (info.features || []).includes("native-save") ? async (data, name) => (await post(`api/save?${q({ name })}`, data)).json() : null,
   };
 }
@@ -374,6 +375,7 @@ function renderControls() {
   const live = l && l.state !== "ended";
   const connected = l && l.state === "connected";
   const incoming = l && l.state === "incoming";
+  if (incoming) document.body.classList.remove("compact-open");
   const callBtn = $("#btn-call");
   callBtn.querySelector("span").textContent = incoming ? "Answer" : "Call";
   callBtn.classList.toggle("pulse", !!incoming);
@@ -3155,12 +3157,28 @@ function bindChrome() {
     if (S.report && S.msg != null) selectMessage(S.msg, false);
   });
   // Troubleshooting (everything) or Phone only (calls, history, settings, help).
+  // In the desktop app, phone only also shrinks the window to the phone panel.
+  const winCtl = S.be.kind === "http" && (S.be.features || []).includes("window");
   const applyMode = (m) => {
     document.body.classList.toggle("phone-mode", m === "phone");
+    document.body.classList.toggle("compact", winCtl && m === "phone");
+    document.body.classList.remove("compact-open");
+    if (winCtl) S.be.setWindow(m === "phone" ? "phone" : "full").catch(() => {});
     $("#mode").textContent = t(m === "phone" ? "Mode: phone only" : "Mode: troubleshooting");
     if (m === "phone" && ["trace", "analysis", "diag"].includes(S.page)) showWs("calls");
   };
   applyMode(store.get("sidetone.mode", "troubleshoot"));
+  const openCompact = (page) => {
+    showWs(page);
+    document.body.classList.add("compact-open");
+  };
+  $("#c-calls").addEventListener("click", () => openCompact("calls"));
+  $("#c-settings").addEventListener("click", () => openCompact("settings"));
+  $("#c-back").addEventListener("click", () => document.body.classList.remove("compact-open"));
+  $("#c-full").addEventListener("click", () => {
+    store.set("sidetone.mode", "troubleshoot");
+    applyMode("troubleshoot");
+  });
   $("#mode").addEventListener("click", () => {
     const m = store.get("sidetone.mode", "troubleshoot") === "phone" ? "troubleshoot" : "phone";
     store.set("sidetone.mode", m);
