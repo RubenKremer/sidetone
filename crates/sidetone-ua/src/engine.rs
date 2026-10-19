@@ -43,6 +43,11 @@ pub struct AccountCfg {
     pub retry_s: u32,
     /// Extensions or URIs watched with SUBSCRIBE Event: dialog (busy lamp field).
     pub blf: Vec<String>,
+    /// Subscribe to message-summary (RFC 3842) for the voicemail lamp.
+    pub mwi: bool,
+    /// Number dialed to reach voicemail (e.g. *97); empty = the mailbox
+    /// address the server announces, if any.
+    pub voicemail: String,
     pub profile: Profile,
     /// HTTP(S) URL for NOTIFY-driven provisioning resync.
     pub provision_url: Option<String>,
@@ -63,6 +68,8 @@ impl Default for AccountCfg {
             register: true,
             retry_s: 30,
             blf: Vec::new(),
+            mwi: true,
+            voicemail: String::new(),
             profile: Profile::default(),
             provision_url: None,
             provision_tls_verify: true,
@@ -135,6 +142,20 @@ pub struct PhoneSettings {
     pub capture_rtp: bool,
     /// Keep the audio of every call for WAV download.
     pub record_calls: bool,
+    /// Global codec list in preference order, for accounts without their own.
+    pub codecs: Vec<String>,
+    /// Forward every incoming call here (302 Moved Temporarily); empty = off.
+    pub forward_always: String,
+    /// Forward when busy (DND or every line in use).
+    pub forward_busy: String,
+    /// Forward calls not answered within `forward_no_answer_s`.
+    pub forward_no_answer: String,
+    pub forward_no_answer_s: u64,
+    /// Homer/HEP collector ("host:port", UDP) that gets a copy of every SIP
+    /// message; empty for none.
+    pub hep_collector: String,
+    /// Capture agent ID sent in HEP.
+    pub hep_agent_id: u32,
 }
 
 impl Default for PhoneSettings {
@@ -154,11 +175,18 @@ impl Default for PhoneSettings {
             capture: true,
             capture_rtp: true,
             record_calls: false,
+            codecs: crate::media::default_codecs(),
+            forward_always: String::new(),
+            forward_busy: String::new(),
+            forward_no_answer: String::new(),
+            forward_no_answer_s: 20,
+            hep_collector: String::new(),
+            hep_agent_id: 2001,
         }
     }
 }
 
-/// Microphone and speaker queues at 8 kHz, filled and drained by the audio layer.
+/// Microphone and speaker queues at AUDIO_RATE, filled and drained by the audio layer.
 #[derive(Clone)]
 pub struct AudioIo {
     pub mic: Arc<Ring>,
@@ -176,6 +204,8 @@ pub struct AccountView {
     pub domain: String,
     pub enabled: bool,
     pub register: bool,
+    /// Number dialed for voicemail (account setting).
+    pub voicemail: String,
     /// off, registering, registered, failed, unreachable, error, unregistering
     pub state: String,
     pub code: Option<u16>,
@@ -194,6 +224,46 @@ pub struct AccountView {
     pub presence_note: Option<String>,
     /// Why the last PUBLISH failed, if it did.
     pub presence_error: Option<String>,
+    /// Voicemail from message-summary NOTIFY (RFC 3842).
+    pub mwi: Option<MwiView>,
+}
+
+#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+pub struct MwiView {
+    pub waiting: bool,
+    pub new: u32,
+    pub old: u32,
+    /// Message-Account: the mailbox address, when the server gives one.
+    pub account: Option<String>,
+}
+
+/// Parses an application/simple-message-summary body.
+pub fn parse_mwi(body: &str) -> Option<MwiView> {
+    let mut v = MwiView::default();
+    let mut seen = false;
+    for line in body.lines() {
+        let Some((k, val)) = line.split_once(':') else {
+            continue;
+        };
+        let (k, val) = (k.trim().to_ascii_lowercase(), val.trim());
+        match k.as_str() {
+            "messages-waiting" => {
+                seen = true;
+                v.waiting = val.eq_ignore_ascii_case("yes");
+            }
+            "message-account" => v.account = Some(val.to_string()),
+            "voice-message" => {
+                // "2/8 (0/2)": new/old (urgent new/urgent old).
+                let counts = val.split_whitespace().next().unwrap_or("");
+                if let Some((n, o)) = counts.split_once('/') {
+                    v.new = n.trim().parse().unwrap_or(0);
+                    v.old = o.trim().parse().unwrap_or(0);
+                }
+            }
+            _ => {}
+        }
+    }
+    seen.then_some(v)
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -230,6 +300,15 @@ pub struct CallView {
     pub recording: bool,
     pub rtp_sent: u64,
     pub rtp_received: u64,
+    /// Our view of the received stream (RFC 3550 counters).
+    pub rx_loss_pct: Option<f64>,
+    pub rx_jitter_ms: Option<f64>,
+    /// What the far end reports about our stream in RTCP, and the round trip.
+    pub remote_loss_pct: Option<f64>,
+    pub remote_jitter_ms: Option<f64>,
+    pub rtt_ms: Option<f64>,
+    pub rtcp_sent: u32,
+    pub rtcp_received: u32,
     pub tx_level: u32,
     pub rx_level: u32,
     pub final_code: Option<u16>,
@@ -237,6 +316,10 @@ pub struct CallView {
     pub ended_by: Option<String>,
     pub dtmf_rx: String,
     pub transfer: Option<String>,
+    /// Outcome of the last call feature used (hold, transfer, DTMF by INFO...),
+    /// with the reason in plain words when the PBX refused it.
+    pub action: Option<String>,
+    pub action_ok: Option<bool>,
     /// Media encrypted with SRTP.
     pub srtp: bool,
     /// How the media is protected, e.g. "SDES AES_CM_128_HMAC_SHA1_80" or
@@ -261,6 +344,16 @@ pub struct HistoryEntry {
     pub reason: Option<String>,
     pub ended_by: Option<String>,
     pub codec: Option<String>,
+    /// Codecs in the SDP offer and answer, filled from the call's capture.
+    #[serde(default)]
+    pub offer_codecs: Vec<String>,
+    #[serde(default)]
+    pub answer_codecs: Vec<String>,
+    /// Worst MOS estimate and worst loss of the call's RTP streams.
+    #[serde(default)]
+    pub mos: Option<f64>,
+    #[serde(default)]
+    pub loss_pct: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -270,6 +363,8 @@ pub struct PhoneState {
     pub calls: Vec<CallView>,
     pub settings: PhoneSettings,
     pub capture_packets: usize,
+    /// The capture holds SRTP that Sidetone decrypted (a decrypted export exists).
+    pub capture_srtp: bool,
     pub audio_device: bool,
 }
 
@@ -337,6 +432,10 @@ pub enum Cmd {
     /// Publish own presence for an account: status and note.
     SetPresence(String, String, String),
     Options(Option<String>, String, Sender<Option<(u16, u64, String)>>),
+    /// SIP MESSAGE (RFC 3428): account, target, text.
+    Message(Option<String>, String, String),
+    /// Redirect a ringing incoming call (302) to a number or URI.
+    Forward(u32, String),
     ClearCapture,
     Shutdown,
 }
@@ -381,6 +480,7 @@ impl Engine {
         accounts: Vec<AccountCfg>,
         audio: Option<AudioIo>,
     ) -> Engine {
+        crate::sipmsg::set_global_codecs(settings.codecs.clone());
         let (tx, rx) = channel();
         let shared = Arc::new(Mutex::new(Shared {
             seq: 0,
@@ -394,6 +494,7 @@ impl Engine {
         }));
         let tap = Tap::new();
         tap.set_enabled(settings.capture);
+        let _ = tap.set_hep(&settings.hep_collector, settings.hep_agent_id);
         let next_line = Arc::new(AtomicU32::new(1));
         let mut core = Core {
             next_line: next_line.clone(),
@@ -495,6 +596,32 @@ impl Engine {
         s.history = h.into_iter().take(MAX_HISTORY).collect();
     }
 
+    /// Fills the offered and answered codecs of a call in the history.
+    pub fn set_history_codecs(&self, call_id: &str, offer: Vec<String>, answer: Vec<String>) {
+        let mut s = self.shared.lock().unwrap();
+        if let Some(h) = s.history.iter_mut().find(|h| h.call_id == call_id) {
+            h.offer_codecs = offer;
+            h.answer_codecs = answer;
+            s.history_dirty = true;
+        }
+    }
+
+    pub fn set_history_quality(&self, call_id: &str, mos: Option<f64>, loss_pct: Option<f64>) {
+        let mut s = self.shared.lock().unwrap();
+        if let Some(h) = s.history.iter_mut().find(|h| h.call_id == call_id) {
+            h.mos = mos;
+            h.loss_pct = loss_pct;
+            s.history_dirty = true;
+        }
+    }
+
+    /// Removes the calls with these Call-IDs from the history.
+    pub fn delete_history(&self, call_ids: &[String]) {
+        let mut s = self.shared.lock().unwrap();
+        s.history.retain(|h| !call_ids.contains(&h.call_id));
+        s.history_dirty = true;
+    }
+
     pub fn clear_history(&self) {
         let mut s = self.shared.lock().unwrap();
         s.history.clear();
@@ -510,6 +637,11 @@ impl Engine {
     /// Everything captured so far as pcapng.
     pub fn capture(&self) -> Vec<u8> {
         self.tap.to_pcapng()
+    }
+
+    /// The capture with SRTP media replaced by the decrypted RTP.
+    pub fn capture_decrypted(&self) -> Vec<u8> {
+        self.tap.to_pcapng_decrypted()
     }
 
     /// Stereo WAV (left sent, right received) of a recorded line.
@@ -574,6 +706,7 @@ struct Acc {
     direct: bool,
     publication: Option<Publication>,
     resync_pending: bool,
+    mwi: Option<MwiView>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -687,6 +820,8 @@ struct Line {
     dtls_client: Option<bool>,
     /// The DTLS outcome was already reported.
     dtls_reported: bool,
+    /// Last feature outcome: text and success.
+    action: Option<(String, bool)>,
 }
 
 #[derive(Debug, Clone)]
@@ -702,6 +837,7 @@ enum Purpose {
     Prack,
     Update,
     Options(u64),
+    Message(String),
     Subscribe(String),
     Publish(usize),
 }
@@ -728,6 +864,9 @@ struct Sub {
     detail: Option<String>,
     next: Option<Instant>,
 }
+
+/// Event package of message waiting (RFC 3842).
+const MWI_EVENT: &str = "message-summary";
 
 /// Busy-lamp state from a dialog-info+xml body.
 fn blf_state(body: &str) -> &'static str {
@@ -991,6 +1130,30 @@ fn with_srtp(sdp: String, crypto: &str, savp: bool) -> String {
     format!("{sdp}a=crypto:{crypto}\r\n")
 }
 
+/// Why the far end refused a call feature, in plain words.
+fn refusal(what: &str, method: &str, code: u16, reason: &str) -> String {
+    let why = match code {
+        405 | 501 => format!("the PBX does not support {method}"),
+        403 => "the PBX does not allow it for this account".into(),
+        488 | 606 => "the PBX refused the new media description (SDP)".into(),
+        491 => "both sides changed the call at the same moment (glare); try again".into(),
+        420 => "it needs a SIP extension the PBX does not have".into(),
+        481 => "the PBX no longer knows this call".into(),
+        408 => "the PBX did not answer".into(),
+        404 => "the target does not exist".into(),
+        486 | 600 => "the target is busy".into(),
+        480 => "the target is not available".into(),
+        603 => "the target declined".into(),
+        500..=599 => "the PBX failed while handling it".into(),
+        _ => String::new(),
+    };
+    if why.is_empty() {
+        format!("{what} failed: {code} {reason}")
+    } else {
+        format!("{what} failed: {why} ({code} {reason})")
+    }
+}
+
 /// DTLS-SRTP media line: UDP/TLS/RTP/SAVP, our certificate fingerprint and
 /// the DTLS role (RFC 5763).
 fn with_dtls(sdp: String, setup: &str) -> String {
@@ -1172,6 +1335,7 @@ impl Core {
                 domain: a.cfg.profile.account.domain.clone(),
                 enabled: a.cfg.enabled,
                 register: a.cfg.register,
+                voicemail: a.cfg.voicemail.clone(),
                 state: a.state.into(),
                 code: a.code,
                 reason: a.reason.clone(),
@@ -1209,6 +1373,7 @@ impl Core {
                     .map(|p| p.note.clone())
                     .filter(|n| !n.is_empty()),
                 presence_error: a.publication.as_ref().and_then(|p| p.error.clone()),
+                mwi: a.mwi.clone(),
             })
             .collect();
         let calls: Vec<CallView> = self
@@ -1230,6 +1395,7 @@ impl Core {
             calls,
             settings: self.settings.clone(),
             capture_packets: self.tap.len(),
+            capture_srtp: self.tap.has_srtp(),
             audio_device: self.audio.is_some(),
         };
     }
@@ -1248,6 +1414,8 @@ impl Core {
             }
             None => (l.rtp_final.0, l.rtp_final.1, 0, 0, None),
         };
+        let rtcp = l.rtp.as_ref().map(|r| r.stats.lock().unwrap().rtcp.clone());
+        let round = |v: f64| (v * 10.0).round() / 10.0;
         let remote = Uri::parse(&l.remote_uri)
             .map(|u| u.short())
             .unwrap_or_else(|| l.remote_uri.clone());
@@ -1275,6 +1443,19 @@ impl Core {
             recording: l.recording,
             rtp_sent: sent,
             rtp_received: recv,
+            rx_loss_pct: rtcp
+                .as_ref()
+                .filter(|r| r.received > 0)
+                .map(|r| round(r.rx_loss_pct)),
+            rx_jitter_ms: rtcp
+                .as_ref()
+                .filter(|r| r.received > 0)
+                .map(|r| round(r.rx_jitter_ms)),
+            remote_loss_pct: rtcp.as_ref().and_then(|r| r.remote_loss_pct).map(round),
+            remote_jitter_ms: rtcp.as_ref().and_then(|r| r.remote_jitter_ms).map(round),
+            rtt_ms: rtcp.as_ref().and_then(|r| r.rtt_ms).map(round),
+            rtcp_sent: rtcp.as_ref().map(|r| r.reports_sent).unwrap_or(0),
+            rtcp_received: rtcp.as_ref().map(|r| r.reports_received).unwrap_or(0),
             tx_level,
             rx_level,
             final_code: l.final_code,
@@ -1282,6 +1463,8 @@ impl Core {
             ended_by: l.ended_by.clone(),
             dtmf_rx: l.dtmf_rx.clone(),
             transfer: l.transfer.clone(),
+            action: l.action.as_ref().map(|a| a.0.clone()),
+            action_ok: l.action.as_ref().map(|a| a.1),
             srtp: l.srtp_on,
             security: if l.dtls_client.is_some() {
                 l.rtp
@@ -1424,6 +1607,7 @@ impl Core {
             direct: false,
             publication: None,
             resync_pending: false,
+            mwi: None,
         }
     }
 
@@ -1902,6 +2086,15 @@ impl Core {
                     }
                 }
                 LState::Incoming => {
+                    let fwd = self.settings.forward_no_answer.trim().to_string();
+                    if !fwd.is_empty()
+                        && l.auto_answer_at.is_none()
+                        && l.created.elapsed()
+                            > Duration::from_secs(self.settings.forward_no_answer_s.max(1))
+                    {
+                        self.forward(id, &fwd, "no answer");
+                        continue;
+                    }
                     if let Some(t) = l.auto_answer_at {
                         if now >= t {
                             self.answer(id);
@@ -2112,11 +2305,21 @@ impl Core {
                 if let Some(l) = self.lines.get_mut(&id) {
                     l.reinvite_pending = false;
                 }
+                if let Some(l) = self.lines.get_mut(&id) {
+                    l.action = Some((
+                        "Hold or resume failed: the PBX did not answer the re-INVITE".into(),
+                        false,
+                    ));
+                }
                 self.event("error", Some(id), None, "re-INVITE timed out");
             }
             Purpose::Refer(id) => {
                 if let Some(l) = self.lines.get_mut(&id) {
                     l.transfer = Some("transfer failed: no response to REFER".into());
+                    l.action = Some((
+                        "Transfer failed: the PBX did not answer the REFER".into(),
+                        false,
+                    ));
                 }
                 self.event("transfer", Some(id), None, "REFER timed out");
             }
@@ -2127,6 +2330,12 @@ impl Core {
                 self.event("diag", None, Some(tx.acc), "OPTIONS: no response");
             }
             Purpose::Info(id) => self.event("dtmf", Some(id), None, "INFO timed out"),
+            Purpose::Message(t) => self.event(
+                "message",
+                None,
+                Some(tx.acc),
+                format!("MESSAGE to {t}: no response"),
+            ),
             Purpose::Subscribe(cid) => {
                 if let Some(x) = self.subs.iter_mut().find(|x| x.call_id == cid) {
                     if x.event == "dialog" {
@@ -2154,7 +2363,19 @@ impl Core {
         match c {
             Cmd::SetAccounts(v) => self.set_accounts(v),
             Cmd::SetSettings(s) => {
+                crate::sipmsg::set_global_codecs(s.codecs.clone());
                 self.tap.set_enabled(s.capture);
+                if s.hep_collector != self.settings.hep_collector
+                    || s.hep_agent_id != self.settings.hep_agent_id
+                {
+                    match self.tap.set_hep(&s.hep_collector, s.hep_agent_id) {
+                        Ok(Some(to)) => {
+                            self.event("info", None, None, format!("HEP copies of SIP go to {to}"))
+                        }
+                        Ok(None) => {}
+                        Err(e) => self.event("error", None, None, format!("HEP collector: {e}")),
+                    }
+                }
                 self.settings = s;
                 self.route_audio();
                 self.dirty = true;
@@ -2225,6 +2446,8 @@ impl Core {
                 }
             }
             Cmd::Options(acc, target, reply) => self.send_options(acc, target, reply),
+            Cmd::Message(acc, target, text) => self.send_message(acc, target, text),
+            Cmd::Forward(id, target) => self.forward(id, &target, "by hand"),
             Cmd::ClearCapture => {
                 self.tap.clear();
                 self.shared.lock().unwrap().trace.clear();
@@ -2291,6 +2514,46 @@ impl Core {
             .unwrap()
             .insert(k, (Instant::now(), reply));
         self.start_tx(ai, "OPTIONS", &branch, text, dest, Purpose::Options(k));
+    }
+
+    fn send_message(&mut self, acc: Option<String>, target: String, text: String) {
+        let Some(ai) = self.acc_index(acc.as_deref()) else {
+            self.event("error", None, None, "MESSAGE: no account");
+            return;
+        };
+        let p = self.accs[ai].cfg.profile.clone();
+        let ruri = sipmsg::target_uri(&p, &target);
+        let dest = match self.dest_for(ai, &ruri) {
+            Ok(d) => d,
+            Err(e) => {
+                self.event(
+                    "message",
+                    None,
+                    Some(ai),
+                    format!("MESSAGE to {target}: {e}"),
+                );
+                return;
+            }
+        };
+        self.direct_local(ai, dest);
+        let branch = new_branch();
+        let a = &self.accs[ai];
+        let req = build_request(
+            &p.behavior,
+            a.local,
+            "MESSAGE",
+            &ruri,
+            &branch,
+            &sipmsg::from_header(&p, &rand_hex(10)),
+            &format!("<{ruri}>"),
+            &format!("{}@{}", rand_hex(16), a.local.ip()),
+            1,
+            "MESSAGE",
+            &[],
+            &[],
+            Some(("text/plain;charset=UTF-8", &text)),
+        );
+        self.start_tx(ai, "MESSAGE", &branch, req, dest, Purpose::Message(target));
     }
 
     /// Direct accounts advertise the interface the OS uses towards `dest`.
@@ -2607,6 +2870,7 @@ impl Core {
             dtls_offer: false,
             dtls_client: None,
             dtls_reported: false,
+            action: None,
         }
     }
 
@@ -3052,6 +3316,46 @@ impl Core {
         );
     }
 
+    /// Redirects a ringing incoming call with 302 Moved Temporarily.
+    fn forward(&mut self, id: u32, target: &str, why: &str) {
+        let Some(l) = self.lines.get(&id) else { return };
+        if l.state != LState::Incoming {
+            return;
+        }
+        let (Some(req), Some(from)) = (l.invite_req.clone(), l.invite_from) else {
+            return;
+        };
+        let ai = l.acc;
+        let tag = l.local_tag.clone();
+        let uri = sipmsg::target_uri(&l.profile, target);
+        let extra = vec![("Contact".to_string(), format!("<{uri}>"))];
+        let text = self.respond(
+            ai,
+            &req,
+            from,
+            302,
+            "Moved Temporarily",
+            Some(&tag),
+            &extra,
+            None,
+        );
+        if let Some(l) = self.lines.get_mut(&id) {
+            l.last_resp = Some(text);
+        }
+        self.event(
+            "incoming",
+            Some(id),
+            Some(ai),
+            format!("forwarded to {target} ({why})"),
+        );
+        self.end_line(
+            id,
+            Some(302),
+            Some(format!("forwarded to {uri} ({why})")),
+            "local",
+        );
+    }
+
     fn end_line(&mut self, id: u32, code: Option<u16>, reason: Option<String>, by: &str) {
         let Some(l) = self.lines.get_mut(&id) else {
             return;
@@ -3105,6 +3409,7 @@ impl Core {
             reason: l.reason.clone(),
             ended_by: l.ended_by.clone(),
             codec: l.codec.map(|c| c.name().to_string()),
+            ..Default::default()
         };
         let text = format!(
             "call ended{}{}",
@@ -3476,12 +3781,24 @@ impl Core {
             .map(|x| x.trim().to_string())
             .filter(|x| !x.is_empty())
             .collect();
-        self.subs
-            .retain(|x| x.acc_id != id || want.contains(&x.label));
-        for (t, event) in want
+        let mwi = a.cfg.mwi && a.cfg.register;
+        self.subs.retain(|x| {
+            x.acc_id != id
+                || if x.event == MWI_EVENT {
+                    mwi
+                } else {
+                    want.contains(&x.label)
+                }
+        });
+        let own = a.cfg.profile.account.user.clone();
+        let mut pairs: Vec<(String, &'static str)> = want
             .iter()
             .flat_map(|t| [(t.clone(), "dialog"), (t.clone(), "presence")])
-        {
+            .collect();
+        if mwi && !own.is_empty() {
+            pairs.push((own, MWI_EVENT));
+        }
+        for (t, event) in pairs {
             if self
                 .subs
                 .iter()
@@ -3529,7 +3846,11 @@ impl Core {
             x.call_id = format!(
                 "{}@{}",
                 rand_hex(16),
-                if x.event == "dialog" { "blf" } else { "pres" }
+                match x.event {
+                    "dialog" => "blf",
+                    MWI_EVENT => "mwi",
+                    _ => "pres",
+                }
             );
             x.local_tag = rand_hex(10);
             x.remote_tag.clear();
@@ -3553,10 +3874,10 @@ impl Core {
             ("Event".to_string(), x.event.to_string()),
             (
                 "Accept".to_string(),
-                if x.event == "dialog" {
-                    "application/dialog-info+xml"
-                } else {
-                    "application/pidf+xml"
+                match x.event {
+                    "dialog" => "application/dialog-info+xml",
+                    MWI_EVENT => "application/simple-message-summary",
+                    _ => "application/pidf+xml",
                 }
                 .to_string(),
             ),
@@ -3618,8 +3939,9 @@ impl Core {
                 .max(30);
             x.next = Some(Instant::now() + Duration::from_secs(exp * 9 / 10));
             x.detail = None;
-        } else if x.event == "presence" {
+        } else if x.event == "presence" || x.event == MWI_EVENT {
             // Many PBXs offer only the dialog package; presence just stays off.
+            // Voicemail may still arrive unsolicited (Asterisk mailbox= on the peer).
             x.call_id.clear();
             x.presence = None;
             if matches!(code, 403 | 404 | 405 | 489 | 501) {
@@ -3655,6 +3977,8 @@ impl Core {
         if !m.body.trim().is_empty() {
             if x.event == "dialog" {
                 x.state = blf_state(&m.body);
+            } else if x.event == MWI_EVENT {
+                // Kept on the account (handled where the NOTIFY arrives).
             } else {
                 let (p, n) = pidf_state(&m.body);
                 x.presence = Some(p);
@@ -4049,6 +4373,15 @@ impl Core {
                         }
                     }
                     let text = format!("{} confirmed", if hold { "hold" } else { "resume" });
+                    if let Some(l) = self.lines.get_mut(&id) {
+                        l.action = Some((
+                            format!(
+                                "{} accepted by the PBX ({code})",
+                                if hold { "Hold" } else { "Resume" }
+                            ),
+                            true,
+                        ));
+                    }
                     self.event("call", Some(id), Some(ai), text);
                 } else {
                     // Revert the local state.
@@ -4059,12 +4392,12 @@ impl Core {
                         }
                     }
                     let rs = reason_of(&m);
-                    self.event(
-                        "error",
-                        Some(id),
-                        Some(ai),
-                        format!("re-INVITE rejected: {code} {rs}"),
-                    );
+                    let what = if hold { "Hold" } else { "Resume" };
+                    let text = refusal(what, "re-INVITE", code, &rs);
+                    if let Some(l) = self.lines.get_mut(&id) {
+                        l.action = Some((text.clone(), false));
+                    }
+                    self.event("error", Some(id), Some(ai), text);
                     if code == 481 || code == 408 {
                         self.end_line(id, Some(code), Some("dialog lost".into()), "remote");
                     }
@@ -4077,6 +4410,9 @@ impl Core {
             Purpose::Info(id) => {
                 if code >= 300 {
                     let rs = reason_of(&m);
+                    if let Some(l) = self.lines.get_mut(&id) {
+                        l.action = Some((refusal("DTMF by SIP INFO", "INFO", code, &rs), false));
+                    }
                     self.event(
                         "dtmf",
                         Some(id),
@@ -4087,13 +4423,22 @@ impl Core {
             }
             Purpose::Refer(id) => {
                 let rs = reason_of(&m);
-                let text = if (200..300).contains(&code) {
+                let ok = (200..300).contains(&code);
+                let text = if ok {
                     format!("REFER accepted ({code}), waiting for NOTIFY")
                 } else {
-                    format!("transfer failed: REFER answered {code} {rs}")
+                    refusal("Transfer", "REFER", code, &rs)
                 };
                 if let Some(l) = self.lines.get_mut(&id) {
                     l.transfer = Some(text.clone());
+                    l.action = Some((
+                        if ok {
+                            format!("Transfer accepted by the PBX ({code}), waiting for the result")
+                        } else {
+                            text.clone()
+                        },
+                        ok,
+                    ));
                 }
                 self.event("transfer", Some(id), Some(ai), text);
             }
@@ -4114,6 +4459,14 @@ impl Core {
                 }
             }
             Purpose::Subscribe(cid) => self.subscribe_result(&cid, &m),
+            Purpose::Message(t) => {
+                let text = if (200..300).contains(&code) {
+                    format!("message to {t} delivered ({code} {})", reason_of(&m))
+                } else {
+                    format!("MESSAGE to {t} refused: {code} {}", reason_of(&m))
+                };
+                self.event("message", None, Some(ai), text);
+            }
             Purpose::Publish(ai) => self.publish_result(ai, &m),
             Purpose::Notify | Purpose::Prack | Purpose::Update => {}
         }
@@ -4794,8 +5147,24 @@ impl Core {
                 self.respond(ai, &m, from, 200, "OK", None, &[], None);
                 let event_hdr = m.header("Event").unwrap_or("");
                 let event = event_hdr.to_ascii_lowercase();
-                if event.starts_with("dialog") || event.starts_with("presence") {
+                if event.starts_with("dialog")
+                    || event.starts_with("presence")
+                    || event.starts_with(MWI_EVENT)
+                {
                     self.blf_notify(&m);
+                }
+                if event.starts_with(MWI_EVENT) {
+                    if let Some(v) = parse_mwi(&m.body) {
+                        if self.accs[ai].mwi.as_ref() != Some(&v) {
+                            let text = if v.waiting {
+                                format!("voicemail: {} new, {} old", v.new, v.old)
+                            } else {
+                                "voicemail: no new messages".to_string()
+                            };
+                            self.accs[ai].mwi = Some(v);
+                            self.event("voicemail", None, Some(ai), text);
+                        }
+                    }
                 }
                 if let (Some(id), true) = (line_id, event.starts_with("refer")) {
                     let frag = m.body.lines().next().unwrap_or("").trim().to_string();
@@ -4813,6 +5182,21 @@ impl Core {
                         } else {
                             text.clone()
                         });
+                        if code >= 200 {
+                            let reason = frag
+                                .split_whitespace()
+                                .skip(2)
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            l.action = Some(if code < 300 {
+                                ("Transfer completed".into(), true)
+                            } else {
+                                (
+                                    refusal("Transfer", "the transfer target", code, &reason),
+                                    false,
+                                )
+                            });
+                        }
                     }
                     self.event("transfer", Some(id), Some(ai), text);
                     if (200..300).contains(&code) {
@@ -5026,6 +5410,22 @@ impl Core {
                     self.reject(id, 481);
                 }
             }
+            return;
+        }
+        let fwd = self.settings.forward_always.trim().to_string();
+        if !fwd.is_empty() {
+            self.forward(id, &fwd, "always");
+            return;
+        }
+        let fwd_busy = self.settings.forward_busy.trim().to_string();
+        let busy =
+            self.settings.dnd || self.active_lines() > self.settings.max_lines.max(1) as usize;
+        if busy && !fwd_busy.is_empty() {
+            self.forward(
+                id,
+                &fwd_busy,
+                if self.settings.dnd { "DND" } else { "busy" },
+            );
             return;
         }
         if self.settings.dnd {
@@ -5367,5 +5767,24 @@ mod presence_tests {
             pidf_state(&pidf_body("sip:a@b", "offline", "")).0,
             "offline"
         );
+    }
+}
+
+#[cfg(test)]
+mod mwi_tests {
+    use super::parse_mwi;
+
+    #[test]
+    fn message_summary_bodies() {
+        let v = parse_mwi(
+            "Messages-Waiting: yes\r\nMessage-Account: sip:*97@pbx\r\nVoice-Message: 2/8 (0/2)\r\n",
+        )
+        .unwrap();
+        assert!(v.waiting);
+        assert_eq!((v.new, v.old), (2, 8));
+        assert_eq!(v.account.as_deref(), Some("sip:*97@pbx"));
+        let v = parse_mwi("Messages-Waiting: no\r\n").unwrap();
+        assert!(!v.waiting && v.new == 0);
+        assert!(parse_mwi("").is_none());
     }
 }

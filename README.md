@@ -55,7 +55,7 @@
   <tr>
     <td width="25%" valign="top">
       <h3>A real softphone</h3>
-      Several accounts and lines, hold, mute, blind and attended transfer, DTMF three ways, DND and auto answer, microphone and speaker. SIP over UDP from the desktop, or over WebSocket with WebRTC from the browser.
+      Several accounts and lines, hold, mute, blind and attended transfer, DTMF three ways, DND and auto answer, call forwarding, a voicemail lamp, SIP MESSAGE, microphone and speaker. SIP over UDP from the desktop, or over WebSocket with WebRTC from the browser.
     </td>
     <td width="25%" valign="top">
       <h3>It explains the call</h3>
@@ -111,7 +111,7 @@ are in the dark theme (the Theme button, or your system setting).
       <br>
       <sub>Both directions of a bad call: loss, jitter, a 1.5 s gap and MOS below 3.</sub>
       <h3>Media you can measure</h3>
-      Each RTP stream is tied to its call through the SDP: codec, packets, loss, RFC 3550 jitter, the longest gap, ptime, RFC 4733 digits and an ITU-T G.107 E-model MOS estimate.
+      Each RTP stream is tied to its call through the SDP: codec, packets, loss, RFC 3550 jitter, the longest gap, ptime, RFC 4733 digits and an ITU-T G.107 E-model MOS estimate. Per-second charts show jitter, loss and MOS over the call with the SIP events marked; RTCP sender and receiver reports (RFC 3550), RTCP XR VoIP metrics (RFC 3611) and vq-rtcpxr PUBLISH reports (RFC 6035) add what the far end measured, including round trip time; G.711 streams also get level, silence and clipping. Calls of the same session on both sides of an SBC or B2BUA are linked by X-CID, Session-ID and similar headers. MOS is also worked out through a fixed 50 ms, a fixed 200 ms and an adaptive jitter buffer, where a packet that arrives too late counts as lost. HEP (Homer) packets in a capture are unwrapped, the phone can send a HEPv3 copy of every SIP message to a Homer collector, and SRTP calls can be saved with the media decrypted. The ladder can show time since the start, since the row above or as clock time, and fold retransmissions into the arrow they repeat.
     </td>
   </tr>
   <tr>
@@ -167,7 +167,7 @@ are in the dark theme (the Theme button, or your system setting).
   <tr>
     <td width="33%" valign="top">
       <h4>About 40 diagnostic rules</h4>
-      INVITE without response &middot; failure codes explained &middot; 200 OK retransmitted &middot; no ACK &middot; drop at 32 s &middot; session timer expiry &middot; credentials rejected &middot; challenge not answered &middot; 481 in dialog &middot; glare &middot; slow first response &middot; post-dial delay &middot; private SDP or Contact behind a public source &middot; wrong interface on an unanswered REGISTER &middot; no common codec &middot; answer with codecs not offered &middot; SRTP vs RTP &middot; missing crypto or fingerprint &middot; DTLS role conflict &middot; DTMF not negotiated &middot; ptime mismatch &middot; hold &middot; one-way audio &middot; no RTP &middot; asymmetric RTP &middot; loss &middot; jitter &middot; gaps &middot; SSRC change &middot; unnegotiated payload types &middot; low MOS &middot; Q.850 Reason causes &middot; missing mandatory headers &middot; Content-Length errors &middot; Max-Forwards near zero
+      INVITE without response &middot; failure codes explained &middot; 200 OK retransmitted &middot; no ACK &middot; drop at 32 s &middot; session timer expiry &middot; credentials rejected &middot; challenge not answered &middot; 481 in dialog &middot; glare &middot; slow first response &middot; post-dial delay &middot; private SDP or Contact behind a public source &middot; wrong interface on an unanswered REGISTER &middot; no common codec &middot; answer with codecs not offered &middot; SRTP vs RTP &middot; missing crypto or fingerprint &middot; DTLS role conflict &middot; DTMF not negotiated &middot; ptime mismatch &middot; hold &middot; one-way audio &middot; no RTP &middot; asymmetric RTP &middot; loss &middot; jitter &middot; gaps &middot; SSRC change &middot; unnegotiated payload types &middot; low MOS &middot; far-end loss, round trip and MOS from RTCP and vq-rtcpxr &middot; RTP that carries only silence &middot; clipping &middot; Q.850 Reason causes &middot; missing mandatory headers &middot; Content-Length errors &middot; Max-Forwards near zero
     </td>
     <td width="33%" valign="top">
       <h4>Captures in and out</h4>
@@ -175,11 +175,15 @@ are in the dark theme (the Theme button, or your system setting).
       <br><br>
       Read: pcap and pcapng (Ethernet, VLAN, Linux cooked v1 and v2, raw IP, loopback, Wireshark exported PDUs), IPv4 and IPv6, SIP over UDP, TCP and decrypted TLS, TLS key logs from pcapng.
       <br><br>
+      Search: Wireshark-style display filters over SIP and SDP (<code>ip.addr == 10.0.0.5 &amp;&amp; sip.status &gt;= 400</code>, <code>sdp.codec == PCMA</code>, <code>sip.from contains "2001"</code>) in the trace and in Analysis.
+      <br><br>
+      Listen: pick any RTP stream, hear it and see its waveform with a playhead (G.711 and Opus), save it as WAV.
+      <br><br>
       Write: the phone's own traffic as it travelled (SIP over TCP as TCP, over TLS as decrypted exported PDUs, like Wireshark's Export PDUs); annotated pcapng with findings as packet comments and TLS keys kept; redacted pcapng for sharing; one call or the whole capture; ladder as SVG; report as JSON; stereo WAV of each test call (left sent, right received).
     </td>
     <td width="33%" valign="top">
       <h4>The phone</h4>
-      Several accounts with re-registration at 90% of the expiry and retry on failure &middot; SIP over UDP, TCP and TLS (certificate check on or off per account) &middot; SRTP with SDES keys or DTLS-SRTP (certificate checked against a=fingerprint), AES_CM_128_HMAC_SHA1_80 and _32 and AEAD_AES_128/256_GCM, optional or mandatory &middot; digest auth (MD5, qop auth) &middot; several lines with automatic hold &middot; hold and resume by re-INVITE &middot; mute &middot; blind transfer (REFER) and attended transfer (REFER with Replaces), and being transferred &middot; three-way conference mixed locally &middot; BLF (SUBSCRIBE to the dialog event package) showing idle, ringing and busy, with presence (PIDF) when the server offers it, and your own presence published with PUBLISH &middot; DTMF as RFC 4733, SIP INFO or inband tones, and received digits shown &middot; DND and auto answer with the reject code you choose &middot; intercom answer (Call-Info, Alert-Info) &middot; PRACK, UPDATE, session timers, late offer &middot; ringback and ring tones &middot; per-call WAV recording &middot; DNS SRV and outbound proxy &middot; direct, unregistered calls to any SIP URI (anonymous From, for testing URI dialing) &middot; dial strings with headers and post-answer DTMF (<code>600?Subject=x,,123#</code>) &middot; G.711 &mu;-law and A-law, and wideband Opus (16 kHz audio path, in-band FEC) &middot; interface in English, Portuguese (Brazil), Spanish and German, with built-in help &middot; WebRTC with Opus, ICE and DTLS-SRTP in the browser, with several lines, attended transfer and conference
+      Several accounts with re-registration at 90% of the expiry and retry on failure &middot; SIP over UDP, TCP and TLS (certificate check on or off per account) &middot; SRTP with SDES keys or DTLS-SRTP (certificate checked against a=fingerprint), AES_CM_128_HMAC_SHA1_80 and _32 and AEAD_AES_128/256_GCM, optional or mandatory &middot; digest auth (MD5, qop auth) &middot; several lines with automatic hold &middot; hold and resume by re-INVITE &middot; mute &middot; blind transfer (REFER) and attended transfer (REFER with Replaces), and being transferred &middot; three-way conference mixed locally &middot; BLF (SUBSCRIBE to the dialog event package) showing idle, ringing and busy, with presence (PIDF) when the server offers it, and your own presence published with PUBLISH &middot; DTMF as RFC 4733, SIP INFO or inband tones, and received digits shown &middot; DND and auto answer with the reject code you choose &middot; intercom answer (Call-Info, Alert-Info) &middot; PRACK, UPDATE, session timers, late offer &middot; ringback and ring tones &middot; per-call WAV recording &middot; DNS SRV and outbound proxy &middot; direct, unregistered calls to any SIP URI (anonymous From, for testing URI dialing) &middot; dial strings with headers and post-answer DTMF (<code>600?Subject=x,,123#</code>) &middot; 16 codecs, each tested against Asterisk: G.711 &mu;-law and A-law, G.722, Opus (16 kHz audio path, in-band FEC), G.729A, iLBC (20 and 30 ms), Speex narrowband and wideband, GSM 06.10, G.726-16/24/32/40 (RFC 3551 or AAL2 bit order), linear PCM at 8, 16 and 44.1 kHz; a global list in order of preference, a list per account and a list per call &middot; configuration import and export as one JSON file (in the app and with <code>sidetone config export|import</code>), passwords optional, also loaded from an HTTP(S) provisioning URL &middot; call forwarding (always, busy, no answer) with 302 &middot; voicemail lamp from message-summary (RFC 3842) &middot; SIP MESSAGE (RFC 3428) sent and received &middot; HEPv3 copies of every SIP message to a Homer collector &middot; live call table with duration, codec, transport, RTP counters and the result of the last action (hold, transfer or DTMF refused, unsupported or unanswered, with the reason) &middot; phone-only mode that turns the desktop window into a compact softphone &middot; interface in English, Portuguese (Brazil), Spanish and German, with built-in help &middot; WebRTC with Opus, ICE and DTLS-SRTP in the browser, with several lines, attended transfer and conference
     </td>
   </tr>
   <tr>
@@ -214,6 +218,10 @@ sidetone analyze trace.pcapng --json > report.json
 # Share it: findings as Wireshark comments, or masked for a vendor ticket
 sidetone export trace.pcapng -o annotated.pcapng
 sidetone export trace.pcapng -o share.pcapng --call 3 --redact
+
+# Be a Homer collector: receive HEPv3 from Kamailio, OpenSIPS, FreeSWITCH
+# or heplify, save it, and analyze it like any capture
+sidetone hep --listen 0.0.0.0:9060 -o hep.pcapng
 
 # Place calls from a script, then read what happened
 sidetone call 600 --domain pbx.lab:5060 --user 2001 --password "$PW" \
@@ -372,16 +380,25 @@ until you reload the page (unless you save with remember enabled in Settings).
 
 Each version gets a release with installers for every platform: take the
 [latest release](https://github.com/igtoth/sidetone/releases/latest), or
-pick a file below (version 0.1.5).
+pick a file below (version 0.1.21).
 
-| Platform | Desktop app | Command line |
-|---|---|---|
-| Windows 10/11 (x64) | [Installer (.exe)](https://github.com/igtoth/sidetone/releases/download/v0.1.5/Sidetone_0.1.5_x64-setup.exe) &middot; [MSI](https://github.com/igtoth/sidetone/releases/download/v0.1.5/Sidetone_0.1.5_x64_en-US.msi) | [sidetone-v0.1.5-x86_64-pc-windows-msvc.zip](https://github.com/igtoth/sidetone/releases/download/v0.1.5/sidetone-v0.1.5-x86_64-pc-windows-msvc.zip) |
-| macOS 11+ (Apple silicon) | [Sidetone_0.1.5_aarch64.dmg](https://github.com/igtoth/sidetone/releases/download/v0.1.5/Sidetone_0.1.5_aarch64.dmg) | [sidetone-v0.1.5-aarch64-apple-darwin.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.5/sidetone-v0.1.5-aarch64-apple-darwin.tar.gz) |
-| macOS 11+ (Intel) | [Sidetone_0.1.5_x64.dmg](https://github.com/igtoth/sidetone/releases/download/v0.1.5/Sidetone_0.1.5_x64.dmg) | [sidetone-v0.1.5-x86_64-apple-darwin.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.5/sidetone-v0.1.5-x86_64-apple-darwin.tar.gz) |
-| Linux (x86_64) | [AppImage](https://github.com/igtoth/sidetone/releases/download/v0.1.5/Sidetone_0.1.5_amd64.AppImage) &middot; [.deb](https://github.com/igtoth/sidetone/releases/download/v0.1.5/Sidetone_0.1.5_amd64.deb) &middot; [.rpm](https://github.com/igtoth/sidetone/releases/download/v0.1.5/Sidetone-0.1.5-1.x86_64.rpm) | [sidetone-v0.1.5-x86_64-unknown-linux-gnu.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.5/sidetone-v0.1.5-x86_64-unknown-linux-gnu.tar.gz) |
-| Linux (arm64) | | [sidetone-v0.1.5-aarch64-unknown-linux-gnu.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.5/sidetone-v0.1.5-aarch64-unknown-linux-gnu.tar.gz) |
-| Web | no download: [open it in the browser](https://igtoth.github.io/sidetone/) | |
+| Platform | Install | Portable (no install) | Command line (also standalone) |
+|---|---|---|---|
+| Windows 10/11 (x64) | [Installer (.exe)](https://github.com/igtoth/sidetone/releases/download/v0.1.21/Sidetone_0.1.21_x64-setup.exe) &middot; [MSI](https://github.com/igtoth/sidetone/releases/download/v0.1.21/Sidetone_0.1.21_x64_en-US.msi) | [Sidetone_0.1.21_x64_portable.zip](https://github.com/igtoth/sidetone/releases/download/v0.1.21/Sidetone_0.1.21_x64_portable.zip) | [sidetone-v0.1.21-x86_64-pc-windows-msvc.zip](https://github.com/igtoth/sidetone/releases/download/v0.1.21/sidetone-v0.1.21-x86_64-pc-windows-msvc.zip) |
+| macOS 11+ (Apple silicon) | [Sidetone_0.1.21_aarch64.dmg](https://github.com/igtoth/sidetone/releases/download/v0.1.21/Sidetone_0.1.21_aarch64.dmg) | [Sidetone_aarch64.app.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.21/Sidetone_aarch64.app.tar.gz) | [sidetone-v0.1.21-aarch64-apple-darwin.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.21/sidetone-v0.1.21-aarch64-apple-darwin.tar.gz) |
+| macOS 11+ (Intel) | [Sidetone_0.1.21_x64.dmg](https://github.com/igtoth/sidetone/releases/download/v0.1.21/Sidetone_0.1.21_x64.dmg) | [Sidetone_x64.app.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.21/Sidetone_x64.app.tar.gz) | [sidetone-v0.1.21-x86_64-apple-darwin.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.21/sidetone-v0.1.21-x86_64-apple-darwin.tar.gz) |
+| Linux (x86_64) | [.deb](https://github.com/igtoth/sidetone/releases/download/v0.1.21/Sidetone_0.1.21_amd64.deb) &middot; [.rpm](https://github.com/igtoth/sidetone/releases/download/v0.1.21/Sidetone-0.1.21-1.x86_64.rpm) | [AppImage](https://github.com/igtoth/sidetone/releases/download/v0.1.21/Sidetone_0.1.21_amd64.AppImage) | [sidetone-v0.1.21-x86_64-unknown-linux-gnu.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.21/sidetone-v0.1.21-x86_64-unknown-linux-gnu.tar.gz) |
+| Linux (arm64) | | | [sidetone-v0.1.21-aarch64-unknown-linux-gnu.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.21/sidetone-v0.1.21-aarch64-unknown-linux-gnu.tar.gz) |
+| Web | no download: [open it in the browser](https://igtoth.github.io/sidetone/) | | |
+
+**Portable and standalone.** Nothing has to be installed:
+
+- **Windows:** unzip `Sidetone_..._portable.zip` anywhere (a USB stick works) and run `Sidetone.exe`. It uses the WebView2 that comes with Windows 10 and 11.
+- **macOS:** unpack `Sidetone_....app.tar.gz` and open `Sidetone.app` from any folder.
+- **Linux:** `chmod +x` the AppImage and run it. On distributions without FUSE 2, run it with `--appimage-extract-and-run`.
+- **Command line, any platform:** a single executable with the interface built in. Double click `sidetone` (or run it with no arguments) and the full app opens in your browser, with no WebView or system library needed. Closing its window stops it. `sidetone serve --open` does the same from a terminal.
+
+Settings, accounts and history live in your user configuration folder in every form, so you can switch between them. To keep everything with the program instead (a USB stick, say), create a folder named `sidetone-data` next to the executable, or set `SIDETONE_CONFIG_DIR`.
 
 ### Install
 
@@ -395,17 +412,17 @@ not signed yet, so the first time right-click it and choose Open (or run
 `xattr -dr com.apple.quarantine /Applications/Sidetone.app`). macOS asks
 for microphone access on the first call.
 
-**Linux.** Debian and Ubuntu: `sudo apt install ./Sidetone_0.1.5_amd64.deb`.
-Fedora and openSUSE: `sudo dnf install ./Sidetone-0.1.5-1.x86_64.rpm`.
-Anywhere else: `chmod +x Sidetone_0.1.5_amd64.AppImage` and run it. The
+**Linux.** Debian and Ubuntu: `sudo apt install ./Sidetone_0.1.21_amd64.deb`.
+Fedora and openSUSE: `sudo dnf install ./Sidetone-0.1.21-1.x86_64.rpm`.
+Anywhere else: `chmod +x Sidetone_0.1.21_amd64.AppImage` and run it. The
 desktop app needs WebKitGTK 4.1 (present on current distributions).
 
 **Command line.** Unpack the archive and put `sidetone` on your `PATH`:
 
 ```sh
-tar xzf sidetone-v0.1.5-x86_64-unknown-linux-gnu.tar.gz
-sudo install sidetone-v0.1.5-x86_64-unknown-linux-gnu/sidetone /usr/local/bin/
-sidetone serve        # the full app in your browser at http://127.0.0.1:8640
+tar xzf sidetone-v0.1.21-x86_64-unknown-linux-gnu.tar.gz
+sudo install sidetone-v0.1.21-x86_64-unknown-linux-gnu/sidetone /usr/local/bin/
+sidetone              # the full app in your browser (same as sidetone serve --open)
 ```
 
 On macOS remove the quarantine flag first
@@ -443,6 +460,14 @@ Copyright &copy; 2026 Ighor Toth.
 
 Written by Ighor Toth with Claude Code, Anthropic's AI coding assistant,
 as co-author: commits it helped write carry a `Co-Authored-By` line.
+
+Codecs: G.722 from libg722 (Steve Underwood, public domain, and CMU) through
+the ezk-g722 translation (MIT); G.726 from soundkit-g726 (MIT); GSM 06.10 from
+libgsm (Jutta Degener and Carsten Bormann, TU Berlin); Speex from libspeex
+(Xiph.Org, BSD) and iLBC from WebRTC (BSD), both bundled in
+`crates/sidetone-ua/native` with their licences; G.729 from the g729-sys crate,
+which describes itself as MIT but is a port of bcg729 (GPL-3.0): builds that
+must avoid GPL code can leave it out.
 
 The interface uses IBM Plex Sans and IBM Plex Mono (SIL Open Font License),
 loaded from Google Fonts. Every capture in the screenshots and samples was

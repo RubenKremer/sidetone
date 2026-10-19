@@ -336,6 +336,20 @@ fn transports_srtp_blf_conference() {
     });
     let c = e.state().calls.into_iter().find(|c| c.line == ls).unwrap();
     assert_eq!(c.srtp_failed, 0, "no SRTP authentication failures");
+    // The decrypted export carries the tone in clear RTP; the wire one does not.
+    assert!(e.state().capture_srtp);
+    let share = |bytes: &[u8]| {
+        let r = sidetone_core::analyze_bytes(bytes).unwrap();
+        r.streams
+            .iter()
+            .filter(|s| s.codec.starts_with("PCM"))
+            .filter_map(|s| sidetone_core::audio::stream_audio(bytes, s.id).ok())
+            .map(|a| pcm_tone_share(&a.pcm, a.rate as f64, 440.0))
+            .fold(0.0, f64::max)
+    };
+    let (dec, wire) = (share(&e.capture_decrypted()), share(&e.capture()));
+    println!("440 Hz share: decrypted {dec:.2}, on the wire {wire:.2}");
+    assert!(dec > 0.5 && wire < 0.3, "decrypted {dec}, wire {wire}");
     e.cmd(Cmd::Hangup(ls));
 
     // BLF on 3001 follows idle, ringing and busy while a calls b (over TCP).
@@ -644,4 +658,352 @@ fn dtls_srtp() {
     );
     println!("incoming: {:?}", call(&e, li).unwrap().security);
     e.cmd(Cmd::HangupAll);
+}
+
+/// Share of the right channel (received audio) of a stereo recording that is
+/// a tone at `hz`, by the Goertzel algorithm (1.0 = pure tone).
+fn pcm_tone_share(pcm: &[i16], rate: f64, hz: f64) -> f64 {
+    let x: Vec<f64> = pcm.iter().map(|v| *v as f64).collect();
+    if x.is_empty() {
+        return 0.0;
+    }
+    let w = 2.0 * std::f64::consts::PI * hz / rate;
+    let (mut s1, mut s2) = (0.0f64, 0.0f64);
+    for v in &x {
+        let s0 = v + 2.0 * w.cos() * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    let p = s1 * s1 + s2 * s2 - 2.0 * w.cos() * s1 * s2;
+    let e: f64 = x.iter().map(|v| v * v).sum();
+    (2.0 * p / (e * x.len() as f64).max(1.0)).min(1.0)
+}
+
+fn tone_share(wav: &[u8], hz: f64) -> f64 {
+    let rate = u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]) as f64;
+    let data = &wav[44..];
+    let right: Vec<f64> = data
+        .chunks_exact(4)
+        .map(|f| i16::from_le_bytes([f[2], f[3]]) as f64)
+        .collect();
+    // Skip the start (ringing, jitter buffer filling) and the end.
+    let n = right.len();
+    let x = &right[n / 4..n * 3 / 4];
+    if x.is_empty() {
+        return 0.0;
+    }
+    let total: f64 = x.iter().map(|v| v * v).sum::<f64>();
+    let w = 2.0 * std::f64::consts::PI * hz / rate;
+    let (mut s1, mut s2) = (0.0, 0.0);
+    for v in x {
+        let s0 = v + 2.0 * w.cos() * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    let power = s1 * s1 + s2 * s2 - 2.0 * w.cos() * s1 * s2;
+    // A pure sine of amplitude A over N samples: Goertzel power N²A²/4, energy N·A²/2.
+    if total < 1.0 {
+        return 0.0;
+    }
+    (2.0 * power / (x.len() as f64 * total)).min(1.0)
+}
+
+#[test]
+#[ignore]
+fn codecs_interop() {
+    let settings = PhoneSettings {
+        audio_source: "tone".into(),
+        tone_hz: 1000.0,
+        auto_hold: false,
+        auto_answer: true,
+        auto_answer_delay_ms: 0,
+        record_calls: true,
+        ..Default::default()
+    };
+    let a = acc("a", "2001", "secret2001", DtmfMode::Rfc4733);
+    let b = acc("b", "3001", "secret3001", DtmfMode::Rfc4733);
+    let e = Engine::start(settings, vec![a, b], None);
+    wait_for(&e, "registered", 10, |e| {
+        let st = e.state();
+        st.accounts.len() == 2 && st.accounts.iter().all(|a| a.state == "registered")
+    });
+    // Through 700 Asterisk transcodes between the codec and G.711 (3001), so both
+    // our encoder and our decoder meet an independent implementation. G.729 and
+    // iLBC have no transcoder in the lab, so they go through the echo (600).
+    let cases: &[(&str, &str, &str)] = &[
+        ("PCMA", "700", "PCMA"),
+        ("G722", "700", "G722"),
+        ("opus", "700", "opus"),
+        ("GSM", "700", "GSM"),
+        ("G726-32", "700", "G726-32"),
+        ("AAL2-G726-32", "700", "AAL2-G726-32"),
+        ("speex/8000", "700", "speex"),
+        ("speex/16000", "700", "speex"),
+        ("L16/8000", "700", "L16"),
+        ("L16/16000", "700", "L16"),
+        ("G729", "600", "G729"),
+        ("iLBC", "600", "iLBC"),
+    ];
+    let mut bad = Vec::new();
+    let only = std::env::var("SIDETONE_CODECS").unwrap_or_default();
+    // A codec gets up to three tries: Asterisk may start its encoder before
+    // the first RTP packet goes out, and Speex on a pure tone then diverges.
+    let runs: Vec<&(&str, &str, &str)> = cases.iter().flat_map(|c| [c, c, c]).collect();
+    let mut passed: Vec<&str> = Vec::new();
+    for (codec, target, expect) in runs {
+        if !only.is_empty() && !only.split(',').any(|c| c == *codec) {
+            continue;
+        }
+        if passed.contains(codec) {
+            continue;
+        }
+        let before: Vec<u32> = e.state().calls.iter().map(|c| c.line).collect();
+        let l = e.call(CallRequest {
+            account: Some("a".into()),
+            target: (*target).into(),
+            overrides: Some(serde_json::json!({ "codecs": [codec] })),
+            ..Default::default()
+        });
+        wait_for(&e, &format!("{codec} connected"), 10, |e| {
+            line_state(e, l) == "connected"
+        });
+        std::thread::sleep(Duration::from_millis(3500));
+        let st = e.state();
+        let me = st.calls.iter().find(|c| c.line == l).unwrap();
+        let used = me.codec.clone().unwrap_or_default();
+        println!(
+            "  rtp sent {} received {} rx level {}",
+            me.rtp_sent, me.rtp_received, me.rx_level
+        );
+        let other = st
+            .calls
+            .iter()
+            .find(|c| c.line != l && !before.contains(&c.line) && c.direction == "in")
+            .map(|c| c.line);
+        e.cmd(Cmd::HangupAll);
+        wait_for(&e, "ended", 8, |e| {
+            e.state().calls.iter().all(|c| c.state == "ended")
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        let mine = e
+            .recording(l)
+            .map(|w| tone_share(&w, 1000.0))
+            .unwrap_or(0.0);
+        let theirs = other
+            .and_then(|o| e.recording(o))
+            .map(|w| tone_share(&w, 1000.0));
+        println!(
+            "codec {codec:>13}: negotiated {used:<13} decoded tone {mine:.2}{}",
+            theirs
+                .map(|t| format!(", G.711 side hears our encoder {t:.2}"))
+                .unwrap_or_default()
+        );
+        if !used.eq_ignore_ascii_case(expect) || mine < 0.5 || theirs.is_some_and(|t| t < 0.5) {
+            bad.push(format!("{codec}: {used} {mine:.2} {theirs:?}"));
+        } else {
+            passed.push(codec);
+            bad.retain(|b| !b.starts_with(&format!("{codec}:")));
+        }
+        // Lines linger 40 s after the end; let the next call get fresh ones.
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    e.cmd(Cmd::HangupAll);
+    if let Ok(p) = std::env::var("SIDETONE_CODECS_PCAP") {
+        std::fs::write(p, e.capture()).ok();
+    }
+    assert!(bad.is_empty(), "codecs failing: {bad:?}");
+}
+
+#[test]
+#[ignore]
+fn rtcp_reports_with_asterisk() {
+    let settings = PhoneSettings {
+        audio_source: "tone".into(),
+        auto_hold: false,
+        ..Default::default()
+    };
+    let a = acc("a", "2001", "secret2001", DtmfMode::Rfc4733);
+    let e = Engine::start(settings, vec![a], None);
+    wait_for(&e, "registered", 10, |e| {
+        e.state().accounts.iter().all(|a| a.state == "registered")
+    });
+    let l = e.call(CallRequest {
+        account: Some("a".into()),
+        target: "600".into(),
+        overrides: Some(serde_json::json!({ "codecs": ["PCMU"] })),
+        ..Default::default()
+    });
+    wait_for(&e, "connected", 10, |e| line_state(e, l) == "connected");
+    wait_for(&e, "RTCP both ways with a round trip", 20, |e| {
+        e.state()
+            .calls
+            .iter()
+            .any(|c| c.line == l && c.rtcp_sent >= 2 && c.rtcp_received >= 1 && c.rtt_ms.is_some())
+    });
+    let c = e.state().calls.into_iter().find(|c| c.line == l).unwrap();
+    println!(
+        "rtcp sent {} received {} rtt {:?} remote loss {:?} jitter {:?}, our rx loss {:?} jitter {:?}",
+        c.rtcp_sent, c.rtcp_received, c.rtt_ms, c.remote_loss_pct, c.remote_jitter_ms, c.rx_loss_pct, c.rx_jitter_ms
+    );
+    assert!(c.rtt_ms.unwrap() < 50.0, "loopback round trip");
+    // The capture holds the RTCP and the analysis puts it on the streams.
+    let r = sidetone_core::analyze_bytes(&e.capture()).unwrap();
+    assert!(r.summary.rtcp_packets >= 3);
+    assert!(
+        r.streams.iter().any(|s| !s.rtcp.is_empty()),
+        "RTCP attached to a stream"
+    );
+    e.cmd(Cmd::HangupAll);
+}
+
+#[test]
+#[ignore]
+fn hep_copies_to_a_collector() {
+    let rx = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    rx.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let settings = PhoneSettings {
+        audio_source: "tone".into(),
+        hep_collector: rx.local_addr().unwrap().to_string(),
+        hep_agent_id: 77,
+        ..Default::default()
+    };
+    let a = acc("a", "2001", "secret2001", DtmfMode::Rfc4733);
+    let e = Engine::start(settings, vec![a], None);
+    wait_for(&e, "registered", 10, |e| {
+        e.state().accounts.iter().all(|a| a.state == "registered")
+    });
+    // The HEP copies, unwrapped, make a capture the analysis reads like any other.
+    let mut methods = Vec::new();
+    let mut buf = [0u8; 65536];
+    while let Ok(n) = rx.recv(&mut buf) {
+        let d = sidetone_core::net::decode_hep(&buf[..n]).expect("HEPv3");
+        let line = String::from_utf8_lossy(d.payload)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        methods.push(line);
+        if methods.iter().any(|m| m.starts_with("SIP/2.0 200")) {
+            break;
+        }
+    }
+    println!("HEP: {methods:?}");
+    assert!(methods.iter().any(|m| m.starts_with("REGISTER")));
+    assert!(methods.iter().any(|m| m.starts_with("SIP/2.0 200")));
+}
+
+#[test]
+#[ignore]
+fn voicemail_lamp() {
+    // The lab Asterisk polls mailbox 2001 every second; a message file
+    // dropped into its spool turns the lamp on.
+    let spool = std::env::var("SIDETONE_LAB_DIR").unwrap_or_else(|_| "/tmp/stlab".into());
+    let inbox = std::path::Path::new(&spool).join("spool/voicemail/default/2001/INBOX");
+    let _ = std::fs::remove_dir_all(&inbox);
+    let settings = PhoneSettings {
+        audio_source: "tone".into(),
+        ..Default::default()
+    };
+    let a = acc("a", "2001", "secret2001", DtmfMode::Rfc4733);
+    let e = Engine::start(settings, vec![a], None);
+    let mwi = |e: &Engine| e.state().accounts.first().and_then(|a| a.mwi.clone());
+    wait_for(&e, "voicemail state known", 15, |e| mwi(e).is_some());
+    assert!(!mwi(&e).unwrap().waiting);
+    if std::fs::create_dir_all(&inbox).is_err() {
+        println!(
+            "no access to {}, skipping the new message part",
+            inbox.display()
+        );
+        return;
+    }
+    std::fs::write(
+        inbox.join("msg0000.txt"),
+        "[message]\norigmailbox=2001\ncontext=test\nmacrocontext=\nexten=2001\ncallerid=\"Lab\" <3001>\norigdate=Mon Jan 1 00:00:00 AM UTC 2026\norigtime=1767225600\ncategory=\nflag=\nduration=3\n",
+    )
+    .unwrap();
+    std::fs::write(inbox.join("msg0000.wav"), [0u8; 44]).unwrap();
+    wait_for(&e, "voicemail lamp on", 15, |e| {
+        mwi(e).is_some_and(|m| m.waiting && m.new == 1)
+    });
+    println!("mwi: {:?}", mwi(&e));
+    let _ = std::fs::remove_dir_all(&inbox);
+    wait_for(&e, "voicemail lamp off", 15, |e| {
+        mwi(e).is_some_and(|m| !m.waiting)
+    });
+}
+
+#[test]
+#[ignore]
+fn call_forwarding() {
+    // 3001 forwards everything to the echo test; a call to it (700) ends up there.
+    let fwd = Engine::start(
+        PhoneSettings {
+            audio_source: "tone".into(),
+            forward_always: "600".into(),
+            ..Default::default()
+        },
+        vec![acc("b", "3001", "secret3001", DtmfMode::Rfc4733)],
+        None,
+    );
+    let caller = Engine::start(
+        PhoneSettings {
+            audio_source: "tone".into(),
+            auto_hold: false,
+            ..Default::default()
+        },
+        vec![acc("a", "2001", "secret2001", DtmfMode::Rfc4733)],
+        None,
+    );
+    for e in [&fwd, &caller] {
+        wait_for(e, "registered", 10, |e| {
+            e.state().accounts.iter().all(|a| a.state == "registered")
+        });
+    }
+    let l = caller.call(CallRequest {
+        account: Some("a".into()),
+        target: "700".into(),
+        ..Default::default()
+    });
+    wait_for(&caller, "forwarded call connected to the echo", 15, |e| {
+        e.state()
+            .calls
+            .iter()
+            .any(|c| c.line == l && c.state == "connected" && c.rtp_received > 20)
+    });
+    assert!(fwd
+        .events_since(0)
+        .iter()
+        .any(|ev| ev.text.contains("forwarded to 600")));
+    caller.cmd(Cmd::Hangup(l));
+}
+
+#[test]
+#[ignore]
+fn sip_message_between_phones() {
+    let settings = PhoneSettings {
+        audio_source: "tone".into(),
+        ..Default::default()
+    };
+    let a = acc("a", "2001", "secret2001", DtmfMode::Rfc4733);
+    let b = acc("b", "3001", "secret3001", DtmfMode::Rfc4733);
+    let e = Engine::start(settings, vec![a, b], None);
+    wait_for(&e, "registered", 10, |e| {
+        let st = e.state();
+        st.accounts.len() == 2 && st.accounts.iter().all(|a| a.state == "registered")
+    });
+    e.cmd(Cmd::Message(
+        Some("a".into()),
+        "3001".into(),
+        "hello from 2001".into(),
+    ));
+    wait_for(&e, "MESSAGE delivered and received", 10, |e| {
+        let ev = e.events_since(0);
+        ev.iter()
+            .any(|x| x.kind == "message" && x.text.contains("delivered"))
+            && ev.iter().any(|x| {
+                x.kind == "message"
+                    && x.account.as_deref() == Some("b")
+                    && x.text.contains("hello from 2001")
+            })
+    });
 }

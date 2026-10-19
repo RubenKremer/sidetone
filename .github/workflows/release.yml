@@ -42,7 +42,7 @@ jobs:
           name: Sidetone ${{ steps.t.outputs.tag }}
           prerelease: false
           body: |
-            Alpha build of Sidetone. Desktop app: the installer for your system (.msi or -setup.exe on Windows, .dmg on macOS, .AppImage, .deb or .rpm on Linux). Command line: the sidetone-* archive for your platform.
+            Alpha build of Sidetone. Desktop app: the installer for your system (.msi or -setup.exe on Windows, .dmg on macOS, .deb or .rpm on Linux), or a portable copy that needs no install (_portable.zip on Windows, .app.tar.gz on macOS, .AppImage on Linux). Command line: the sidetone-* archive for your platform; run sidetone with no arguments and the full app opens in the browser.
 
             The installers are not signed yet: on Windows choose "More info, Run anyway"; on macOS right-click the app and choose Open the first time.
 
@@ -136,3 +136,22 @@ jobs:
           releaseName: Sidetone ${{ needs.meta.outputs.tag }}
           releaseDraft: false
           prerelease: false
+      # Portable Windows app: the same executable the installers carry, in a
+      # zip to unpack and run without installing (WebView2 comes with Windows 10/11).
+      - name: Portable Windows app
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          exe=$(ls target/release/sidetone-desktop.exe app/src-tauri/target/release/sidetone-desktop.exe target/release/Sidetone.exe 2>/dev/null | head -1)
+          test -n "$exe" || { echo "desktop executable not found"; exit 1; }
+          v="${{ needs.meta.outputs.tag }}"
+          mkdir -p portable/Sidetone
+          cp "$exe" portable/Sidetone/Sidetone.exe
+          cp README.md LICENSE portable/Sidetone/
+          cd portable && 7z a "Sidetone_${v#v}_x64_portable.zip" Sidetone > /dev/null
+      - uses: softprops/action-gh-release@v2
+        if: runner.os == 'Windows'
+        with:
+          tag_name: ${{ needs.meta.outputs.tag }}
+          prerelease: false
+          files: portable/*.zip

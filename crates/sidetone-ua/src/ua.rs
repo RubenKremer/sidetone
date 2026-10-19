@@ -630,18 +630,7 @@ impl Ua {
     }
 
     fn profile_codecs(&self) -> Vec<Codec> {
-        let v: Vec<Codec> = self
-            .profile
-            .behavior
-            .codecs
-            .iter()
-            .filter_map(|c| Codec::from_name(c))
-            .collect();
-        if v.is_empty() {
-            vec![Codec::Pcmu, Codec::Pcma]
-        } else {
-            v
-        }
+        crate::sipmsg::profile_codecs(&self.profile.behavior)
     }
 
     fn dialog_request(

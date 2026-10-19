@@ -20,12 +20,39 @@ use std::time::Duration;
     about = "SIP softphone and call analyzer for troubleshooting"
 )]
 struct Cli {
+    /// Without a command (e.g. a double click), the app starts and opens in the browser.
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Write the configuration (accounts, settings, codecs) as sidetone-config JSON.
+    Export {
+        /// Output file (standard output when left out).
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// Include account passwords.
+        #[arg(long)]
+        secrets: bool,
+    },
+    /// Load a sidetone-config JSON file exported by the app or by this command,
+    /// from a path or an http(s) URL (provisioning).
+    Import {
+        file: PathBuf,
+        /// Add the accounts to the current ones instead of replacing everything.
+        #[arg(long)]
+        merge: bool,
+    },
 }
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Export or import the phone configuration (the same file as Settings, Import and export).
+    Config {
+        #[command(subcommand)]
+        action: ConfigCmd,
+    },
     /// Analyze a pcap/pcapng capture: calls, ladder, RTP quality, findings.
     Analyze {
         file: PathBuf,
@@ -70,6 +97,19 @@ enum Cmd {
         /// Print the prompt instead of calling the provider.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Receive HEPv3 from Kamailio, OpenSIPS, FreeSWITCH, Asterisk or heplify
+    /// (acting as a Homer collector) and save it as pcapng for analysis.
+    Hep {
+        /// Address to listen on (UDP).
+        #[arg(long, default_value = "0.0.0.0:9060")]
+        listen: String,
+        /// Where to write the capture.
+        #[arg(short, long, default_value = "hep.pcapng")]
+        out: PathBuf,
+        /// Stop after this many seconds (default: until Ctrl-C).
+        #[arg(long)]
+        seconds: Option<u64>,
     },
     /// Write the built-in synthetic sample captures to a directory.
     Samples { dir: PathBuf },
@@ -174,6 +214,9 @@ enum Cmd {
         /// Disable the API access token (only on trusted networks).
         #[arg(long)]
         no_token: bool,
+        /// Open the interface in the default browser.
+        #[arg(long)]
+        open: bool,
     },
 }
 
@@ -352,7 +395,21 @@ fn audio_source(a: Audio, wav: &Option<PathBuf>) -> Result<AudioSource> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    match cli.cmd {
+    // No command: run as an app. Port 8640 when free, any free port otherwise.
+    let cmd = cli.cmd.unwrap_or_else(|| {
+        let listen = if std::net::TcpListener::bind("127.0.0.1:8640").is_ok() {
+            "127.0.0.1:8640"
+        } else {
+            "127.0.0.1:0"
+        };
+        Cmd::Serve {
+            listen: listen.into(),
+            web: None,
+            no_token: false,
+            open: true,
+        }
+    });
+    match cmd {
         Cmd::Analyze {
             file,
             call,
@@ -430,6 +487,38 @@ fn main() -> Result<()> {
             let text = aihttp::ask(&cfg, &prompt)?;
             println!("{text}");
         }
+        Cmd::Config { action } => match action {
+            ConfigCmd::Export { out, secrets } => {
+                let v = sidetone_cli::phone::export_config(secrets)?;
+                let text = serde_json::to_string_pretty(&v)?;
+                match out {
+                    Some(p) => {
+                        std::fs::write(&p, text)?;
+                        eprintln!("wrote {}", p.display());
+                    }
+                    None => println!("{text}"),
+                }
+            }
+            ConfigCmd::Import { file, merge } => {
+                let src = file.to_string_lossy();
+                let v: serde_json::Value =
+                    if src.starts_with("http://") || src.starts_with("https://") {
+                        sidetone_cli::aihttp::fetch_config(&src)?
+                    } else {
+                        serde_json::from_slice(&std::fs::read(&file)?)?
+                    };
+                let n = sidetone_cli::phone::import_config(&v, merge)?;
+                eprintln!(
+                    "imported {n} account(s){}",
+                    if merge { " (merged)" } else { "" }
+                );
+            }
+        },
+        Cmd::Hep {
+            listen,
+            out,
+            seconds,
+        } => hep_collect(&listen, &out, seconds)?,
         Cmd::Samples { dir } => {
             std::fs::create_dir_all(&dir)?;
             for (name, desc) in sidetone_core::synth::SCENARIOS {
@@ -567,7 +656,87 @@ fn main() -> Result<()> {
             listen,
             web,
             no_token,
-        } => serve::run(&listen, web, !no_token)?,
+            open,
+        } => serve::run(&listen, web, !no_token, open)?,
     }
+    Ok(())
+}
+
+/// Receives HEP datagrams and writes them, still wrapped, into a pcapng:
+/// the analysis unwraps HEP, so the file opens in Sidetone and in Wireshark.
+fn hep_collect(listen: &str, out: &std::path::Path, seconds: Option<u64>) -> Result<()> {
+    use sidetone_core::pcap::{write_pcapng, OutPacket, PcapngOptions, LINKTYPE_RAW};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let sock = std::net::UdpSocket::bind(listen).map_err(|e| anyhow!("{listen}: {e}"))?;
+    let local = sock.local_addr()?;
+    sock.set_read_timeout(Some(std::time::Duration::from_millis(250)))?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let s2 = stop.clone();
+    let _ = ctrlc::set_handler(move || s2.store(true, Ordering::SeqCst));
+    eprintln!(
+        "Listening for HEP on {local} (UDP). Ctrl-C to stop and save {}.",
+        out.display()
+    );
+    let until = seconds.map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
+    let mut pkts: Vec<(i64, Vec<u8>)> = Vec::new();
+    let mut buf = vec![0u8; 65536];
+    while !stop.load(Ordering::SeqCst) && until.is_none_or(|u| std::time::Instant::now() < u) {
+        let Ok((n, from)) = sock.recv_from(&mut buf) else {
+            continue;
+        };
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        if let Some(d) = sidetone_core::net::decode_hep(&buf[..n]) {
+            let first = d
+                .payload
+                .split(|b| *b == b'\r' || *b == b'\n')
+                .next()
+                .unwrap_or_default();
+            println!(
+                "{} -> {}  {}",
+                d.src,
+                d.dst,
+                String::from_utf8_lossy(&first[..first.len().min(100)])
+            );
+        } else {
+            eprintln!("{from}: not HEPv3 ({n} bytes), kept anyway");
+        }
+        pkts.push((
+            ts,
+            sidetone_core::net::build_udp_packet(from, local, &buf[..n]),
+        ));
+    }
+    let list: Vec<OutPacket> = pkts
+        .iter()
+        .map(|(t, d)| OutPacket {
+            ts_ns: *t,
+            linktype: LINKTYPE_RAW,
+            data: d,
+            orig_len: d.len() as u32,
+            comment: None,
+        })
+        .collect();
+    std::fs::write(
+        out,
+        write_pcapng(
+            &list,
+            &PcapngOptions {
+                user_appl: Some(format!(
+                    "Sidetone {} HEP collector",
+                    env!("CARGO_PKG_VERSION")
+                )),
+                ..Default::default()
+            },
+        ),
+    )?;
+    eprintln!(
+        "{} HEP packets saved to {}. Open it with: sidetone analyze {}",
+        pkts.len(),
+        out.display(),
+        out.display()
+    );
     Ok(())
 }

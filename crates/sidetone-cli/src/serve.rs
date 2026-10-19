@@ -24,6 +24,10 @@ const WEBPHONE_JS: &str = include_str!("../../../web/webphone.js");
 const CONTROLLERS_JS: &str = include_str!("../../../web/controllers.js");
 const I18N_JS: &str = include_str!("../../../web/i18n.js");
 const HELP_JS: &str = include_str!("../../../web/help.js");
+const EXPLAIN_JS: &str = include_str!("../../../web/explain.js");
+const FILTER_JS: &str = include_str!("../../../web/filter.js");
+const FINDINGS_I18N_JS: &str = include_str!("../../../web/findings-i18n.js");
+const FILTER_SUGGEST_JS: &str = include_str!("../../../web/filter-suggest.js");
 
 fn header(k: &str, v: &str) -> Header {
     Header::from_bytes(k.as_bytes(), v.as_bytes()).expect("valid header")
@@ -139,6 +143,11 @@ fn ua_from(v: &Value) -> Result<Ua> {
 /// Native "save as" hook supplied by the desktop app: (suggested name, bytes) -> saved path.
 pub type SaveHook = std::sync::Arc<dyn Fn(&str, &[u8]) -> Result<Option<PathBuf>> + Send + Sync>;
 
+/// Window hook supplied by the desktop app: "phone" makes the window compact,
+/// "full" restores the troubleshooting layout.
+pub type WindowHook = Box<dyn Fn(&str) + Send + Sync>;
+pub static WINDOW_HOOK: std::sync::OnceLock<WindowHook> = std::sync::OnceLock::new();
+
 fn handle(
     req: &mut Request,
     web: &Option<PathBuf>,
@@ -175,8 +184,18 @@ fn handle(
             if save.is_some() {
                 features.push("native-save");
             }
+            if WINDOW_HOOK.get().is_some() {
+                features.push("window");
+            }
             ok_bytes(json!({"mode": "server", "version": env!("CARGO_PKG_VERSION"), "features": features}).to_string().into_bytes(), "application/json")
         }
+        (Method::Post, "/api/window") => match WINDOW_HOOK.get() {
+            Some(f) => {
+                f(q.get("mode").map(|s| s.as_str()).unwrap_or("full"));
+                json_resp(json!({"ok": true}))
+            }
+            None => err(404, "no window to resize"),
+        },
         (Method::Post, "/api/save") => match save {
             Some(f) => match f(
                 q.get("name").map(|s| s.as_str()).unwrap_or("sidetone.bin"),
@@ -216,6 +235,18 @@ fn handle(
             Ok(r) => ok_bytes(r.to_json().into_bytes(), "application/json"),
             Err(e) => err(422, e),
         },
+        (Method::Post, "/api/rtp_audio") => {
+            let id = q
+                .get("stream")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
+            match rtp_wav(&body, id) {
+                Ok((wav, info)) => Response::from_data(wav)
+                    .with_header(header("Content-Type", "audio/wav"))
+                    .with_header(header("X-Sidetone-Audio", &info)),
+                Err(e) => err(422, e),
+            }
+        }
         (Method::Post, "/api/ladder") => match analyze(&body) {
             Ok(r) => {
                 let c = call_param(&r, &q);
@@ -224,6 +255,18 @@ fn handle(
                         &r,
                         &LadderOptions {
                             call: c,
+                            // calls=0,2,5: several dialogs (call legs) in one ladder.
+                            calls: q
+                                .get("calls")
+                                .map(|v| {
+                                    v.split(',').filter_map(|x| x.trim().parse().ok()).collect()
+                                })
+                                .unwrap_or_default(),
+                            rtp_at_end: q.get("rtp").map(|v| v == "end").unwrap_or(false),
+                            collapse_retransmissions: q.get("retx").is_some_and(|v| v == "fold"),
+                            time: sidetone_core::ladder::TimeMode::parse(
+                                q.get("time").map(String::as_str).unwrap_or(""),
+                            ),
                             ..Default::default()
                         },
                     )
@@ -358,7 +401,8 @@ fn handle(
         (m, p)
             if p.starts_with("/api/phone/")
                 || p.starts_with("/api/audio/")
-                || p.starts_with("/api/diag/") =>
+                || p.starts_with("/api/diag/")
+                || p.starts_with("/api/config/") =>
         {
             phone_api(&m, p, &q, &body)
         }
@@ -384,6 +428,14 @@ fn handle(
                 "controllers.js" => ok_bytes(CONTROLLERS_JS.as_bytes().to_vec(), "text/javascript"),
                 "i18n.js" => ok_bytes(I18N_JS.as_bytes().to_vec(), "text/javascript"),
                 "help.js" => ok_bytes(HELP_JS.as_bytes().to_vec(), "text/javascript"),
+                "explain.js" => ok_bytes(EXPLAIN_JS.as_bytes().to_vec(), "text/javascript"),
+                "filter.js" => ok_bytes(FILTER_JS.as_bytes().to_vec(), "text/javascript"),
+                "findings-i18n.js" => {
+                    ok_bytes(FINDINGS_I18N_JS.as_bytes().to_vec(), "text/javascript")
+                }
+                "filter-suggest.js" => {
+                    ok_bytes(FILTER_SUGGEST_JS.as_bytes().to_vec(), "text/javascript")
+                }
                 _ => err(404, "not found"),
             }
         }
@@ -465,13 +517,41 @@ fn phone_api(m: &Method, path: &str, q: &HashMap<String, String>, body: &[u8]) -
                 Err(e) => err(400, e),
             }
         }
-        (Method::Get, "/api/phone/history") => json_resp(json!(phone::get().engine.history())),
+        (Method::Get, "/api/phone/history") => json_resp(json!(phone::get().history_view())),
+        (Method::Get, "/api/phone/history/capture") => {
+            match phone::get().call_capture(q.get("call_id").map(|s| s.as_str()).unwrap_or("")) {
+                Some(b) => ok_bytes(b, "application/vnd.tcpdump.pcap"),
+                None => err(404, "no saved capture for this call"),
+            }
+        }
+        (Method::Post, "/api/phone/history/delete") => {
+            let ids: Vec<String> = serde_json::from_slice::<Value>(&body)
+                .ok()
+                .and_then(|v| v.get("call_ids").cloned())
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default();
+            phone::get().delete_history(&ids);
+            json_resp(json!({"ok": true, "deleted": ids.len()}))
+        }
         (Method::Post, "/api/phone/history/clear") => {
             phone::get().clear_history();
             json_resp(json!({"ok": true}))
         }
+        // Provisioning: fetch a sidetone-config file from a URL for the
+        // Import screen (from here, so the page has no CORS limits).
+        (Method::Get, "/api/config/fetch") => {
+            match crate::aihttp::fetch_config(q.get("url").map(String::as_str).unwrap_or("")) {
+                Ok(v) => json_resp(v),
+                Err(e) => err(502, e.to_string()),
+            }
+        }
         (Method::Get, "/api/phone/capture") => {
-            let b = phone::get().engine.capture();
+            let e = &phone::get().engine;
+            let b = if q.get("decrypted").is_some_and(|v| v == "1") {
+                e.capture_decrypted()
+            } else {
+                e.capture()
+            };
             ok_bytes(b, "application/octet-stream")
         }
         (Method::Get, "/api/phone/recording") => {
@@ -489,6 +569,33 @@ fn phone_api(m: &Method, path: &str, q: &HashMap<String, String>, body: &[u8]) -
             json_resp(json!({"devices": d, "audio": st}))
         }
         (Method::Get, "/api/audio/status") => json_resp(phone::get().audio_status()),
+        (Method::Post, "/api/audio/tone") => {
+            let v = match body_json(body) {
+                Ok(v) => v,
+                Err(r) => return r,
+            };
+            let hz = v.get("hz").and_then(|x| x.as_f64()).unwrap_or(440.0) as f32;
+            let ms = v
+                .get("ms")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(1500)
+                .min(10_000);
+            match phone::get().audio_tone(hz.clamp(50.0, 7000.0), ms) {
+                Ok(()) => json_resp(json!({"ok": true})),
+                Err(e) => err(409, e),
+            }
+        }
+        (Method::Post, "/api/audio/record_test") => {
+            let v = match body_json(body) {
+                Ok(v) => v,
+                Err(r) => return r,
+            };
+            let secs = v.get("seconds").and_then(|x| x.as_u64()).unwrap_or(4);
+            match phone::get().audio_record_test(secs) {
+                Ok(()) => json_resp(json!({"ok": true})),
+                Err(e) => err(409, e),
+            }
+        }
         (Method::Post, "/api/audio/loopback") => {
             let v = match body_json(body) {
                 Ok(v) => v,
@@ -548,6 +655,55 @@ fn phone_api(m: &Method, path: &str, q: &HashMap<String, String>, body: &[u8]) -
         }
         _ => err(404, "unknown phone endpoint"),
     }
+}
+
+/// One RTP stream of a capture as a WAV: G.711 decoded by the core, Opus by
+/// libopus. The second value is a short JSON with codec, packets and gaps.
+fn rtp_wav(bytes: &[u8], id: usize) -> std::result::Result<(Vec<u8>, String), String> {
+    use sidetone_core::audio::{stream_audio, wav_mono};
+    let a = stream_audio(bytes, id)?;
+    let info = |a: &sidetone_core::audio::StreamAudio| serde_json::to_string(a).unwrap_or_default();
+    if !a.pcm.is_empty() {
+        return Ok((wav_mono(&a.pcm, a.rate), info(&a)));
+    }
+    // Every codec the phone speaks: decode with the engine's decoders to 16 kHz.
+    if let Some(codec) = codec_for(&a.codec, a.clock_rate) {
+        if !a.frames.is_empty() {
+            use sidetone_ua::media::{Decoder, AUDIO_RATE};
+            let mut dec = Decoder::new(codec);
+            let mut pcm: Vec<i16> = Vec::new();
+            for (pos, f) in &a.frames {
+                // Place each payload where its RTP timestamp says.
+                let at = (*pos as u64 * AUDIO_RATE as u64 / codec.clock().max(1) as u64) as usize;
+                if pcm.len() < at {
+                    pcm.resize(at, 0);
+                }
+                if let Some(d) = dec.decode(codec.pt(), f) {
+                    pcm.extend_from_slice(&d);
+                }
+            }
+            return Ok((wav_mono(&pcm, AUDIO_RATE), info(&a)));
+        }
+    }
+    Err(a
+        .note
+        .unwrap_or_else(|| format!("{} cannot be played", a.codec)))
+}
+
+/// The engine codec for an RTP stream's codec name and clock rate.
+fn codec_for(name: &str, clock: u32) -> Option<sidetone_ua::media::Codec> {
+    use sidetone_ua::media::Codec;
+    let n = name.to_ascii_uppercase();
+    let key = match n.as_str() {
+        "SPEEX" => format!("speex/{clock}"),
+        "L16" => format!("L16/{clock}"),
+        _ => name.to_string(),
+    };
+    Codec::from_name(&key).or_else(|| {
+        n.strip_prefix("AAL2-")
+            .and_then(Codec::from_name)
+            .map(|c| c.with_aal2(true))
+    })
 }
 
 /// Passive capture on a network interface (libpcap / Npcap loaded at run time).
@@ -661,16 +817,35 @@ pub fn spawn(
     Ok((url, h))
 }
 
-pub fn run(listen: &str, web: Option<PathBuf>, use_token: bool) -> Result<()> {
+pub fn run(listen: &str, web: Option<PathBuf>, use_token: bool, open: bool) -> Result<()> {
     let (url, h) = spawn(listen, web, use_token, None)?;
+    if open {
+        open_browser(&url);
+    }
     // Ctrl+C or SIGTERM: hang up and unregister before leaving.
     let _ = ctrlc::set_handler(|| {
         phone::shutdown();
         std::process::exit(0);
     });
     eprintln!(
-        "Sidetone UI: {url}\n(the token protects the API from other local pages; Ctrl+C to stop)"
+        "Sidetone UI: {url}\n(the token protects the API from other local pages; Ctrl+C or closing this window stops Sidetone)"
     );
     let _ = h.join();
     Ok(())
+}
+
+/// Opens `url` in the default browser; failure only leaves the printed URL.
+fn open_browser(url: &str) {
+    let r = if cfg!(target_os = "windows") {
+        std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
+            .spawn()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(url).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(url).spawn()
+    };
+    if let Err(e) = r {
+        eprintln!("could not open a browser ({e}); open the address above by hand");
+    }
 }

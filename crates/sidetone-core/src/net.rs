@@ -20,6 +20,8 @@ pub struct Decoded<'a> {
     pub payload: &'a [u8],
     /// TCP sequence number (for ordering stream reassembly), 0 for UDP.
     pub tcp_seq: u32,
+    /// Unwrapped from a HEP (Homer) packet: the payload is one whole message.
+    pub hep: bool,
 }
 
 /// Decodes a captured frame down to its UDP/TCP payload.
@@ -66,11 +68,153 @@ pub fn decode(linktype: u32, data: &[u8]) -> Option<Decoded<'_>> {
         }
         _ => return None,
     };
-    match ethertype {
+    let d = match ethertype {
         0x0800 => decode_ipv4(ip),
         0x86dd => decode_ipv6(ip),
         _ => None,
+    }?;
+    // A Homer/HEP capture agent wraps the original packet: report that one.
+    if d.payload.starts_with(b"HEP3") {
+        if let Some(inner) = decode_hep(d.payload) {
+            return Some(inner);
+        }
     }
+    Some(d)
+}
+
+// HEPv3 chunk types (generic vendor 0).
+const HEP_IP_FAMILY: u16 = 1;
+const HEP_PROTO: u16 = 2;
+const HEP_SRC_V4: u16 = 3;
+const HEP_DST_V4: u16 = 4;
+const HEP_SRC_V6: u16 = 5;
+const HEP_DST_V6: u16 = 6;
+const HEP_SRC_PORT: u16 = 7;
+const HEP_DST_PORT: u16 = 8;
+const HEP_TS_SEC: u16 = 9;
+const HEP_TS_USEC: u16 = 10;
+const HEP_PAYLOAD_TYPE: u16 = 11;
+const HEP_AGENT_ID: u16 = 12;
+const HEP_PAYLOAD: u16 = 15;
+const HEP_CORRELATION: u16 = 17;
+
+/// HEP payload types.
+pub const HEP_TYPE_SIP: u8 = 1;
+pub const HEP_TYPE_RTCP: u8 = 5;
+
+/// Unwraps a HEPv3 packet (Homer, Kamailio, OpenSIPS, FreeSWITCH, heplify)
+/// into the packet it carries.
+pub fn decode_hep(b: &[u8]) -> Option<Decoded<'_>> {
+    if !b.starts_with(b"HEP3") || b.len() < 6 {
+        return None;
+    }
+    let total = (u16::from_be_bytes([b[4], b[5]]) as usize).min(b.len());
+    let (mut off, mut proto) = (6usize, 17u8);
+    let (mut sip, mut dip): (Option<IpAddr>, Option<IpAddr>) = (None, None);
+    let (mut sp, mut dp) = (0u16, 0u16);
+    let mut payload: Option<&[u8]> = None;
+    while off + 6 <= total {
+        let vendor = u16::from_be_bytes([b[off], b[off + 1]]);
+        let kind = u16::from_be_bytes([b[off + 2], b[off + 3]]);
+        let len = u16::from_be_bytes([b[off + 4], b[off + 5]]) as usize;
+        if len < 6 || off + len > total {
+            return None;
+        }
+        let v = &b[off + 6..off + len];
+        off += len;
+        if vendor != 0 {
+            continue;
+        }
+        match kind {
+            HEP_PROTO if !v.is_empty() => proto = v[0],
+            HEP_SRC_V4 if v.len() >= 4 => {
+                sip = Some(IpAddr::V4(Ipv4Addr::new(v[0], v[1], v[2], v[3])))
+            }
+            HEP_DST_V4 if v.len() >= 4 => {
+                dip = Some(IpAddr::V4(Ipv4Addr::new(v[0], v[1], v[2], v[3])))
+            }
+            HEP_SRC_V6 if v.len() >= 16 => {
+                sip = Some(IpAddr::V6(Ipv6Addr::from(
+                    <[u8; 16]>::try_from(&v[..16]).ok()?,
+                )))
+            }
+            HEP_DST_V6 if v.len() >= 16 => {
+                dip = Some(IpAddr::V6(Ipv6Addr::from(
+                    <[u8; 16]>::try_from(&v[..16]).ok()?,
+                )))
+            }
+            HEP_SRC_PORT if v.len() >= 2 => sp = u16::from_be_bytes([v[0], v[1]]),
+            HEP_DST_PORT if v.len() >= 2 => dp = u16::from_be_bytes([v[0], v[1]]),
+            HEP_PAYLOAD => payload = Some(v),
+            _ => {}
+        }
+    }
+    Some(Decoded {
+        src: SocketAddr::new(sip?, sp),
+        dst: SocketAddr::new(dip?, dp),
+        transport: if proto == 6 {
+            Transport::Tcp
+        } else {
+            Transport::Udp
+        },
+        payload: payload?,
+        tcp_seq: 0,
+        hep: true,
+    })
+}
+
+/// Builds a HEPv3 packet for a Homer collector.
+#[allow(clippy::too_many_arguments)]
+pub fn build_hep(
+    src: SocketAddr,
+    dst: SocketAddr,
+    tcp: bool,
+    ts_ns: i64,
+    payload_type: u8,
+    agent_id: u32,
+    correlation: Option<&str>,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut out = b"HEP3\0\0".to_vec();
+    let mut chunk = |kind: u16, v: &[u8]| {
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&kind.to_be_bytes());
+        out.extend_from_slice(&((v.len() + 6) as u16).to_be_bytes());
+        out.extend_from_slice(v);
+    };
+    match (src.ip(), dst.ip()) {
+        (IpAddr::V4(s), IpAddr::V4(d)) => {
+            chunk(HEP_IP_FAMILY, &[2]);
+            chunk(HEP_SRC_V4, &s.octets());
+            chunk(HEP_DST_V4, &d.octets());
+        }
+        (s, d) => {
+            let v6 = |a: IpAddr| match a {
+                IpAddr::V6(x) => x,
+                IpAddr::V4(x) => x.to_ipv6_mapped(),
+            };
+            chunk(HEP_IP_FAMILY, &[10]);
+            chunk(HEP_SRC_V6, &v6(s).octets());
+            chunk(HEP_DST_V6, &v6(d).octets());
+        }
+    }
+    chunk(HEP_PROTO, &[if tcp { 6 } else { 17 }]);
+    chunk(HEP_SRC_PORT, &src.port().to_be_bytes());
+    chunk(HEP_DST_PORT, &dst.port().to_be_bytes());
+    chunk(HEP_TS_SEC, &((ts_ns / 1_000_000_000) as u32).to_be_bytes());
+    chunk(
+        HEP_TS_USEC,
+        &(((ts_ns % 1_000_000_000) / 1000) as u32).to_be_bytes(),
+    );
+    chunk(HEP_PAYLOAD_TYPE, &[payload_type]);
+    chunk(HEP_AGENT_ID, &agent_id.to_be_bytes());
+    if let Some(c) = correlation {
+        chunk(HEP_CORRELATION, c.as_bytes());
+    }
+    chunk(HEP_PAYLOAD, payload);
+    let n = out.len() as u16;
+    out[4..6].copy_from_slice(&n.to_be_bytes());
+    out
 }
 
 // Wireshark exported PDU tags (epan/exported_pdu.h).
@@ -144,6 +288,7 @@ fn decode_exported_pdu(data: &[u8]) -> Option<Decoded<'_>> {
         transport: Transport::Tls,
         payload: &data[off..],
         tcp_seq: 0,
+        hep: false,
     })
 }
 
@@ -274,6 +419,7 @@ fn decode_l4(proto: u8, src: IpAddr, dst: IpAddr, l4: &[u8]) -> Option<Decoded<'
                 transport: Transport::Udp,
                 payload: &l4[8..end],
                 tcp_seq: 0,
+                hep: false,
             })
         }
         6 => {
@@ -293,6 +439,7 @@ fn decode_l4(proto: u8, src: IpAddr, dst: IpAddr, l4: &[u8]) -> Option<Decoded<'
                 transport: Transport::Tcp,
                 payload: &l4[doff..],
                 tcp_seq: seq,
+                hep: false,
             })
         }
         _ => None,
@@ -511,6 +658,30 @@ mod tests {
         let pkt = build_udp_packet(a6, b6, b"x");
         let d = decode(LINKTYPE_RAW, &pkt).unwrap();
         assert_eq!(d.dst, b6);
+    }
+
+    #[test]
+    fn hep_wraps_and_unwraps() {
+        let a: SocketAddr = "10.0.0.1:5060".parse().unwrap();
+        let b: SocketAddr = "[2001:db8::2]:5080".parse().unwrap();
+        let hep = build_hep(
+            a,
+            b,
+            true,
+            1_700_000_000_123_456_000,
+            HEP_TYPE_SIP,
+            7,
+            Some("cid"),
+            b"OPTIONS sip:x SIP/2.0\r\n\r\n",
+        );
+        let collector: SocketAddr = "192.0.2.9:9060".parse().unwrap();
+        let pkt = build_udp_packet(a, collector, &hep);
+        let d = decode(LINKTYPE_RAW, &pkt).unwrap();
+        assert!(d.hep);
+        assert_eq!(d.transport, Transport::Tcp);
+        assert_eq!(d.src, "[::ffff:10.0.0.1]:5060".parse().unwrap());
+        assert_eq!(d.dst, b);
+        assert!(d.payload.starts_with(b"OPTIONS"));
     }
 
     #[test]

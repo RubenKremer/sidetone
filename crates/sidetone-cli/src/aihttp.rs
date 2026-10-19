@@ -80,3 +80,20 @@ mod tests {
         ));
     }
 }
+
+/// Downloads a provisioning file (sidetone-config JSON) over HTTP(S).
+pub fn fetch_config(url: &str) -> Result<serde_json::Value> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(anyhow!("the address must start with http:// or https://"));
+    }
+    let agent = ureq::AgentBuilder::new()
+        .try_proxy_from_env(use_proxy(url))
+        .timeout(std::time::Duration::from_secs(20))
+        .build();
+    let body = match agent.get(url).set("Accept", "application/json").call() {
+        Ok(r) => r.into_string()?,
+        Err(ureq::Error::Status(code, _)) => return Err(anyhow!("{url} returned HTTP {code}")),
+        Err(e) => return Err(anyhow!("{url}: {e}")),
+    };
+    serde_json::from_str(&body).map_err(|e| anyhow!("{url} is not JSON: {e}"))
+}

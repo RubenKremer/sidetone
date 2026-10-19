@@ -6,7 +6,7 @@ use sidetone_core::ai::{
     build_prompt, build_request, parse_response, system_prompt, AiConfig, Provider,
 };
 use sidetone_core::export::{export_pcapng, ExportOptions};
-use sidetone_core::ladder::{render_svg, LadderOptions};
+use sidetone_core::ladder::{render_svg, LadderOptions, TimeMode};
 use sidetone_core::redact::RedactOptions;
 use sidetone_core::{analyze_bytes, Report};
 use std::cell::RefCell;
@@ -71,6 +71,106 @@ pub fn ladder_svg(bytes: &[u8], call: i32) -> Result<String, JsError> {
             },
         )
     })
+}
+
+/// Ladder SVG for several calls at once (call legs), `calls` like "0,2,5".
+#[wasm_bindgen]
+pub fn ladder_svg_calls(bytes: &[u8], calls: &str) -> Result<String, JsError> {
+    with_report(bytes, |r| {
+        render_svg(
+            r,
+            &LadderOptions {
+                calls: calls
+                    .split(',')
+                    .filter_map(|x| x.trim().parse().ok())
+                    .filter(|c: &usize| *c < r.calls.len())
+                    .collect(),
+                ..Default::default()
+            },
+        )
+    })
+}
+
+/// Ladder SVG with options: one call (-1 = all) or several ("0,2,5"), and
+/// RTP streams in time order or after the SIP.
+#[wasm_bindgen]
+pub fn ladder_svg_opts(
+    bytes: &[u8],
+    call: i32,
+    calls: &str,
+    rtp_at_end: bool,
+) -> Result<String, JsError> {
+    with_report(bytes, |r| {
+        render_svg(
+            r,
+            &LadderOptions {
+                call: call_opt(r, call),
+                calls: calls
+                    .split(',')
+                    .filter_map(|x| x.trim().parse().ok())
+                    .filter(|c: &usize| *c < r.calls.len())
+                    .collect(),
+                rtp_at_end,
+                ..Default::default()
+            },
+        )
+    })
+}
+
+/// Ladder SVG with every view option as bit flags: 1 RTP after the SIP,
+/// 2 fold retransmissions, 4 time since the row above, 8 clock time.
+#[wasm_bindgen]
+pub fn ladder_svg_flags(
+    bytes: &[u8],
+    call: i32,
+    calls: &str,
+    flags: u32,
+) -> Result<String, JsError> {
+    with_report(bytes, |r| {
+        render_svg(
+            r,
+            &LadderOptions {
+                call: call_opt(r, call),
+                calls: calls
+                    .split(',')
+                    .filter_map(|x| x.trim().parse().ok())
+                    .filter(|c: &usize| *c < r.calls.len())
+                    .collect(),
+                rtp_at_end: flags & 1 != 0,
+                collapse_retransmissions: flags & 2 != 0,
+                time: if flags & 8 != 0 {
+                    TimeMode::Absolute
+                } else if flags & 4 != 0 {
+                    TimeMode::Delta
+                } else {
+                    TimeMode::Relative
+                },
+                ..Default::default()
+            },
+        )
+    })
+}
+
+/// One RTP stream as a WAV when it is G.711; otherwise an error whose
+/// message is JSON {"codec", "frames": [[ts_offset, base64], ...]} for
+/// decoding in the page (Opus through WebCodecs).
+#[wasm_bindgen]
+pub fn rtp_audio(bytes: &[u8], stream: u32) -> Result<Vec<u8>, JsError> {
+    use base64::Engine as _;
+    let a =
+        sidetone_core::audio::stream_audio(bytes, stream as usize).map_err(|e| JsError::new(&e))?;
+    if !a.pcm.is_empty() {
+        return Ok(sidetone_core::audio::wav_mono(&a.pcm, a.rate));
+    }
+    let frames: Vec<serde_json::Value> = a
+        .frames
+        .iter()
+        .map(|(t, f)| json!([t, base64::engine::general_purpose::STANDARD.encode(f)]))
+        .collect();
+    Err(JsError::new(
+        &json!({"codec": a.codec, "clock": a.clock_rate, "frames": frames, "note": a.note})
+            .to_string(),
+    ))
 }
 
 /// Annotated pcapng. `opts_json`: {"annotate":true,"redact":bool,"call":n|null,"sip_only":bool}

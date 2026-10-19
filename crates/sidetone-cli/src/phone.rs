@@ -9,7 +9,7 @@ use sidetone_ua::audio::{self, Audio};
 use sidetone_ua::engine::{AccountCfg, CallRequest, Cmd, Engine, HistoryEntry, PhoneSettings};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,16 +42,27 @@ pub struct Phone {
     pub engine: Engine,
     audio: Mutex<Option<Audio>>,
     audio_error: Mutex<Option<String>>,
+    /// Sound card self-test in progress: "recording", "playing" or "tone".
+    audio_test: Arc<Mutex<Option<String>>>,
     config: Mutex<PhoneConfig>,
     dir: Option<PathBuf>,
 }
 
-/// Per-user configuration directory (SIDETONE_CONFIG_DIR overrides it).
+/// Per-user configuration directory. SIDETONE_CONFIG_DIR overrides it, and a
+/// `sidetone-data` folder next to the executable makes a portable copy keep
+/// everything there (on a USB stick, say).
 pub fn config_dir() -> Option<PathBuf> {
     if let Ok(d) = std::env::var("SIDETONE_CONFIG_DIR") {
         if !d.is_empty() {
             return Some(PathBuf::from(d));
         }
+    }
+    if let Some(d) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|p| p.join("sidetone-data")))
+        .filter(|d| d.is_dir())
+    {
+        return Some(d);
     }
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
     let home = PathBuf::from(home);
@@ -150,13 +161,38 @@ impl Phone {
             engine,
             audio: Mutex::new(aud),
             audio_error: Mutex::new(aerr),
+            audio_test: Arc::new(Mutex::new(None)),
             config: Mutex::new(cfg),
             dir,
         };
-        // Persist history in the background as calls end.
-        std::thread::spawn(|| loop {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            if let Some(p) = PHONE.get() {
+        // Persist history in the background as calls end, and keep each
+        // call's own capture next to it a few seconds after it ends (so the
+        // final BYE/200 and the last RTP are in).
+        std::thread::spawn(|| {
+            let mut tried: std::collections::HashSet<String> = Default::default();
+            let mut pending: Vec<(String, std::time::Instant)> = Vec::new();
+            let mut first = true;
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let Some(p) = PHONE.get() else { continue };
+                for h in p.engine.history() {
+                    if tried.insert(h.call_id.clone())
+                        && !first
+                        && p.call_capture_path(&h.call_id).is_some_and(|f| !f.exists())
+                    {
+                        pending.push((h.call_id, std::time::Instant::now()));
+                    }
+                }
+                first = false;
+                let due: Vec<String> = pending
+                    .iter()
+                    .filter(|(_, t)| t.elapsed() > std::time::Duration::from_secs(3))
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                pending.retain(|(id, _)| !due.contains(id));
+                for id in due {
+                    p.save_call_capture(&id);
+                }
                 if p.engine.take_history_dirty() {
                     p.save_history();
                 }
@@ -183,6 +219,93 @@ impl Phone {
         if let Some(d) = &self.dir {
             if let Ok(b) = serde_json::to_vec_pretty(c) {
                 let _ = write_private(&d.join("phone.json"), &b);
+            }
+        }
+    }
+
+    /// Where the capture of one call from the history is kept.
+    pub fn call_capture_path(&self, call_id: &str) -> Option<PathBuf> {
+        let safe: String = call_id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || "._-".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .take(120)
+            .collect();
+        if safe.is_empty() {
+            return None;
+        }
+        self.dir
+            .as_ref()
+            .map(|d| d.join("calls").join(format!("{safe}.pcapng")))
+    }
+
+    /// Saves the SIP and RTP of one call from the session capture, and fills
+    /// the codecs of the history entry from its SDP.
+    fn save_call_capture(&self, call_id: &str) {
+        let Some(path) = self.call_capture_path(call_id) else {
+            return;
+        };
+        let bytes = self.engine.capture();
+        let Ok(report) = sidetone_core::analyze_bytes(&bytes) else {
+            return;
+        };
+        let Some(idx) = report.calls.iter().position(|c| c.call_id == call_id) else {
+            return;
+        };
+        let c = &report.calls[idx];
+        self.engine
+            .set_history_codecs(call_id, c.offer_codecs.clone(), c.answer_codecs.clone());
+        let streams: Vec<&sidetone_core::rtp::RtpStream> = c
+            .streams
+            .iter()
+            .filter_map(|&i| report.streams.get(i))
+            .collect();
+        let mos = streams.iter().filter_map(|s| s.mos).reduce(f64::min);
+        let loss = streams.iter().map(|s| s.loss_pct).reduce(f64::max);
+        self.engine.set_history_quality(call_id, mos, loss);
+        let mut opts = sidetone_core::export::ExportOptions {
+            call: Some(idx),
+            ..Default::default()
+        };
+        let mut out = sidetone_core::export::export_pcapng(&report, &opts);
+        // Very long calls keep the signaling only.
+        if out.len() > 50 * 1024 * 1024 {
+            opts.sip_only = true;
+            out = sidetone_core::export::export_pcapng(&report, &opts);
+        }
+        let _ = write_private(&path, &out);
+    }
+
+    /// The saved capture of a call from the history.
+    pub fn call_capture(&self, call_id: &str) -> Option<Vec<u8>> {
+        std::fs::read(self.call_capture_path(call_id)?).ok()
+    }
+
+    /// History with a flag telling which calls have a saved capture.
+    pub fn history_view(&self) -> Vec<Value> {
+        self.engine
+            .history()
+            .into_iter()
+            .map(|h| {
+                let has = self
+                    .call_capture_path(&h.call_id)
+                    .is_some_and(|f| f.exists());
+                let mut v = json!(h);
+                v["capture"] = json!(has);
+                v
+            })
+            .collect()
+    }
+
+    fn remove_call_captures(&self, ids: &[String]) {
+        for id in ids {
+            if let Some(f) = self.call_capture_path(id) {
+                let _ = std::fs::remove_file(f);
             }
         }
     }
@@ -280,6 +403,8 @@ impl Phone {
                 register: next.register,
                 retry_s: next.retry_s,
                 blf: next.blf,
+                mwi: stored.mwi,
+                voicemail: stored.voicemail.clone(),
                 profile: sidetone_ua::Profile {
                     name: stored.profile.name.clone(),
                     account: next.profile.account,
@@ -494,6 +619,7 @@ impl Phone {
         let st = g.as_ref().map(|a| a.status());
         json!({
             "status": st,
+            "test": self.audio_test.lock().unwrap().clone(),
             "error": self.audio_error.lock().unwrap().clone(),
             "prefs": self.config.lock().unwrap().audio,
         })
@@ -509,7 +635,100 @@ impl Phone {
         }
     }
 
+    /// Plays a tone on the speaker: checks the output device and its volume.
+    pub fn audio_tone(&self, hz: f32, ms: u64) -> Result<()> {
+        let io = self.sound_io()?;
+        let state = self.audio_test.clone();
+        *state.lock().unwrap() = Some("tone".into());
+        std::thread::spawn(move || {
+            let rate = sidetone_ua::media::AUDIO_RATE as f32;
+            let chunk = sidetone_ua::media::SPMS * 20;
+            let total = (ms as usize * sidetone_ua::media::SPMS).max(chunk);
+            let mut n = 0usize;
+            let start = std::time::Instant::now();
+            while n < total {
+                let buf: Vec<i16> = (n..(n + chunk).min(total))
+                    .map(|i| {
+                        // Short fades avoid clicks at both ends.
+                        let fade = (i.min(total - i) as f32 / (rate * 0.01)).min(1.0);
+                        ((i as f32 * 2.0 * std::f32::consts::PI * hz / rate).sin() * 9000.0 * fade)
+                            as i16
+                    })
+                    .collect();
+                io.speaker.push(&buf);
+                n += buf.len();
+                let due =
+                    start + std::time::Duration::from_millis((n / sidetone_ua::media::SPMS) as u64);
+                if let Some(d) = due.checked_duration_since(std::time::Instant::now()) {
+                    std::thread::sleep(d.saturating_sub(std::time::Duration::from_millis(60)));
+                }
+            }
+            *state.lock().unwrap() = None;
+        });
+        Ok(())
+    }
+
+    /// Records the microphone for a few seconds, then plays it back: the
+    /// quickest way to hear what the far end will hear.
+    pub fn audio_record_test(&self, secs: u64) -> Result<()> {
+        if self.engine.state().calls.iter().any(|c| c.state != "ended") {
+            return Err(anyhow!("hang up first: a call is using the microphone"));
+        }
+        let io = self.sound_io()?;
+        let state = self.audio_test.clone();
+        if state.lock().unwrap().is_some() {
+            return Err(anyhow!("a test is already running"));
+        }
+        *state.lock().unwrap() = Some("recording".into());
+        std::thread::spawn(move || {
+            let ms = sidetone_ua::media::SPMS;
+            let want = secs.clamp(1, 10) as usize * 1000 * ms;
+            let mut rec: Vec<i16> = Vec::with_capacity(want);
+            io.mic.clear();
+            let mut buf = vec![0i16; ms * 20];
+            while rec.len() < want {
+                let n = io.mic.pop_into(&mut buf);
+                rec.extend_from_slice(&buf[..n]);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            *state.lock().unwrap() = Some("playing".into());
+            let start = std::time::Instant::now();
+            for (k, c) in rec.chunks(ms * 20).enumerate() {
+                io.speaker.push(c);
+                let due = start + std::time::Duration::from_millis(20 * (k as u64 + 1));
+                if let Some(d) = due.checked_duration_since(std::time::Instant::now()) {
+                    std::thread::sleep(d.saturating_sub(std::time::Duration::from_millis(60)));
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            *state.lock().unwrap() = None;
+        });
+        Ok(())
+    }
+
+    fn sound_io(&self) -> Result<sidetone_ua::engine::AudioIo> {
+        match self.audio.lock().unwrap().as_ref() {
+            Some(a) => Ok(a.io.clone()),
+            None => Err(anyhow!(
+                "no sound card is open: tick Use the sound card in Settings, Audio"
+            )),
+        }
+    }
+
+    pub fn delete_history(&self, call_ids: &[String]) {
+        self.engine.delete_history(call_ids);
+        self.remove_call_captures(call_ids);
+        self.save_history();
+    }
+
     pub fn clear_history(&self) {
+        let ids: Vec<String> = self
+            .engine
+            .history()
+            .into_iter()
+            .map(|h| h.call_id)
+            .collect();
+        self.remove_call_captures(&ids);
         self.engine.clear_history();
         self.save_history();
     }
@@ -573,6 +792,14 @@ impl Phone {
                 }
                 self.set_config(&json!({"settings": c.settings}))?;
             }
+            "message" => {
+                if s("target").trim().is_empty() || s("text").is_empty() {
+                    return Err(anyhow!("missing target or text"));
+                }
+                let acc = Some(s("account")).filter(|a| !a.is_empty());
+                e.cmd(Cmd::Message(acc, s("target"), s("text")))
+            }
+            "forward" => e.cmd(Cmd::Forward(line()?, s("target"))),
             "clear_capture" => e.cmd(Cmd::ClearCapture),
             other => return Err(anyhow!("unknown command {other:?}")),
         }
@@ -586,4 +813,95 @@ pub fn shutdown() {
         p.engine.shutdown(std::time::Duration::from_millis(1500));
         p.save_history();
     }
+}
+
+/// The configuration file as sidetone-config JSON (what Settings, Import and
+/// export writes), without passwords unless asked.
+pub fn export_config(secrets: bool) -> Result<Value> {
+    let dir = config_dir().ok_or_else(|| anyhow!("no configuration directory"))?;
+    let mut cfg: PhoneConfig = std::fs::read(dir.join("phone.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    if !secrets {
+        for a in &mut cfg.accounts {
+            a.profile.account.password = None;
+        }
+    }
+    Ok(json!({
+        "format": "sidetone-config",
+        "version": 1,
+        "exported_at": chrono_now(),
+        "app_version": env!("CARGO_PKG_VERSION"),
+        "engine": "native",
+        "secrets": secrets,
+        "phone": cfg,
+        "ui": {},
+    }))
+}
+
+/// Loads a sidetone-config file into the configuration directory. Returns the
+/// number of accounts imported. A running phone picks it up on its next start.
+pub fn import_config(v: &Value, merge: bool) -> Result<usize> {
+    if v.get("format").and_then(|x| x.as_str()) != Some("sidetone-config") {
+        return Err(anyhow!("not a sidetone-config file"));
+    }
+    if v.get("version").and_then(|x| x.as_u64()).unwrap_or(1) > 1 {
+        return Err(anyhow!("made by a newer Sidetone; update to import it"));
+    }
+    if v.get("engine").and_then(|x| x.as_str()) == Some("web") {
+        return Err(anyhow!("this file comes from the browser version; import it in the app (Settings, Import and export)"));
+    }
+    let new: PhoneConfig = serde_json::from_value(v.get("phone").cloned().unwrap_or_default())
+        .map_err(|e| anyhow!("bad configuration: {e}"))?;
+    let dir = config_dir().ok_or_else(|| anyhow!("no configuration directory"))?;
+    let path = dir.join("phone.json");
+    let n = new.accounts.len();
+    let out = if merge {
+        let mut cur: PhoneConfig = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        for mut a in new.accounts {
+            let mut id = a.id.clone();
+            let mut k = 2;
+            while cur.accounts.iter().any(|x| x.id == id) {
+                id = format!("{}-{k}", a.id);
+                k += 1;
+            }
+            a.id = id;
+            cur.accounts.push(a);
+        }
+        cur
+    } else {
+        new
+    };
+    write_private(&path, &serde_json::to_vec_pretty(&out)?)?;
+    Ok(n)
+}
+
+fn chrono_now() -> String {
+    // RFC 3339 in UTC without extra dependencies.
+    let s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64;
+    let (days, rem) = (s.div_euclid(86400), s.rem_euclid(86400));
+    // Civil date from days since 1970-01-01 (H. Hinnant's algorithm).
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }

@@ -279,25 +279,34 @@ pub fn sdp_body(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| rtp.ip().to_string());
     let fam = if ip.contains(':') { "IP6" } else { "IP4" };
-    // telephone-event uses the clock of the audio codec: offer it at 8000 for
-    // G.711 and at 48000 for Opus, each with its own payload type.
+    // telephone-event uses the clock of the audio codec: one per distinct
+    // clock (8000 for G.711/G.722, 16000 for wideband L16/Speex, 48000 for
+    // Opus), the first with the configured payload type.
     let mut events: Vec<(u8, u32)> = Vec::new();
     if let Some(p) = dtmf_pt {
-        let narrow = codecs.iter().any(|c| c.clock() == 8000);
-        let wide = codecs.iter().any(|c| c.clock() == 48000);
-        if narrow || !wide {
-            events.push((p, 8000));
+        let mut clocks: Vec<u32> = Vec::new();
+        for c in codecs {
+            if !clocks.contains(&c.clock()) {
+                clocks.push(c.clock());
+            }
         }
-        if wide {
-            let p2 = if narrow {
-                (96..=127u8)
-                    .rev()
-                    .find(|x| *x != p && !codecs.iter().any(|c| c.pt() == *x))
-                    .unwrap_or(p)
-            } else {
+        if clocks.is_empty() {
+            clocks.push(8000);
+        }
+        // The configured type goes with 8000 when present, otherwise with the first clock.
+        clocks.sort_by_key(|c| (*c != 8000) as u8);
+        let mut used: Vec<u8> = codecs.iter().map(|c| c.pt()).collect();
+        for (i, clock) in clocks.into_iter().enumerate() {
+            let pt = if i == 0 {
                 p
+            } else {
+                match (96..=127u8).rev().find(|x| *x != p && !used.contains(x)) {
+                    Some(x) => x,
+                    None => continue,
+                }
             };
-            events.push((p2, 48000));
+            used.push(pt);
+            events.push((pt, clock));
         }
     }
     let mut pts: Vec<String> = codecs.iter().map(|c| c.pt().to_string()).collect();
@@ -309,8 +318,8 @@ pub fn sdp_body(
     );
     for c in codecs {
         s.push_str(&format!("a=rtpmap:{} {}\r\n", c.pt(), c.rtpmap()));
-        if let Codec::Opus(pt) = c {
-            s.push_str(&format!("a=fmtp:{pt} useinbandfec=1\r\n"));
+        if let Some(f) = c.fmtp() {
+            s.push_str(&format!("a=fmtp:{} {f}\r\n", c.pt()));
         }
     }
     for (p, rate) in events {
@@ -325,13 +334,35 @@ pub fn sdp_body(
     s
 }
 
-/// Codecs of the profile in preference order (PCMU, PCMA, Opus).
+/// Global codec list (Settings), used by accounts that keep "use the global list".
+static GLOBAL_CODECS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+pub fn set_global_codecs(v: Vec<String>) {
+    *GLOBAL_CODECS.write().unwrap() = v;
+}
+
+/// Codecs of the profile in preference order: the account's own list, else
+/// the global list, else the defaults.
 pub fn profile_codecs(b: &Behavior) -> Vec<Codec> {
-    let v: Vec<Codec> = b
-        .codecs
-        .iter()
-        .filter_map(|c| Codec::from_name(c))
-        .collect();
+    let names: Vec<String> = if !b.codecs.is_empty() {
+        b.codecs.clone()
+    } else {
+        let g = GLOBAL_CODECS.read().unwrap().clone();
+        if g.is_empty() {
+            crate::media::default_codecs()
+        } else {
+            g
+        }
+    };
+    let mut v: Vec<Codec> = Vec::new();
+    for n in &names {
+        if let Some(c) = Codec::from_name(n) {
+            let c = if b.g726_aal2 { c.with_aal2(true) } else { c };
+            if !v.contains(&c) {
+                v.push(c);
+            }
+        }
+    }
     if v.is_empty() {
         vec![Codec::Pcmu, Codec::Pcma]
     } else {

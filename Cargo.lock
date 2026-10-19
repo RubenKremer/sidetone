@@ -1716,6 +1716,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "g729-sys"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ada2c88832812e768f344731c1e21d082ea59836d398d62a2f57d13fee154e0d"
+
+[[package]]
 name = "gdk"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1974,6 +1980,16 @@ dependencies = [
  "ff",
  "rand_core 0.6.4",
  "subtle",
+]
+
+[[package]]
+name = "gsm-sys"
+version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1563848f92f081879d3d4b9d18f01d45b9d207fcd64774d5687a8e8df9148d4"
+dependencies = [
+ "cc",
+ "libc",
 ]
 
 [[package]]
@@ -4280,11 +4296,12 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sidetone-cli"
-version = "0.1.5"
+version = "0.1.21"
 dependencies = [
  "anyhow",
  "clap",
  "ctrlc",
+ "opus",
  "serde",
  "serde_json",
  "sidetone-core",
@@ -4295,7 +4312,7 @@ dependencies = [
 
 [[package]]
 name = "sidetone-core"
-version = "0.1.5"
+version = "0.1.21"
 dependencies = [
  "quick-xml 0.41.0",
  "serde",
@@ -4304,7 +4321,7 @@ dependencies = [
 
 [[package]]
 name = "sidetone-desktop"
-version = "0.1.5"
+version = "0.1.21"
 dependencies = [
  "anyhow",
  "rfd",
@@ -4315,14 +4332,17 @@ dependencies = [
 
 [[package]]
 name = "sidetone-ua"
-version = "0.1.5"
+version = "0.1.21"
 dependencies = [
  "aes",
  "aes-gcm",
  "base64 0.22.1",
+ "cc",
  "cpal",
  "ctr",
  "dimpl",
+ "g729-sys",
+ "gsm-sys",
  "hickory-resolver",
  "hmac",
  "libloading 0.8.9",
@@ -4341,8 +4361,9 @@ dependencies = [
 
 [[package]]
 name = "sidetone-wasm"
-version = "0.1.5"
+version = "0.1.21"
 dependencies = [
+ "base64 0.22.1",
  "serde_json",
  "sidetone-core",
  "wasm-bindgen",

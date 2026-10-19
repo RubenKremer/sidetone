@@ -3,12 +3,14 @@
 
 pub mod ai;
 pub mod analysis;
+pub mod audio;
 pub mod export;
 pub mod ladder;
 pub mod net;
 pub mod pcap;
 pub mod provision;
 pub mod redact;
+pub mod rtcp;
 pub mod rtp;
 pub mod rules;
 pub mod sdp;

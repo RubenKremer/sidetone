@@ -14,6 +14,9 @@ const store = {
   set(k, v) {
     try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* storage unavailable */ }
   },
+  del(k) {
+    try { localStorage.removeItem(k); } catch { /* storage unavailable */ }
+  },
 };
 
 class Emitter {
@@ -89,7 +92,17 @@ export class NativeController extends Emitter {
   }
   async history() { return (await this.http.get("api/phone/history")).json(); }
   async clearHistory() { await this.http.post("api/phone/history/clear", "", "application/json"); }
-  async capture() { return new Uint8Array(await (await this.http.get("api/phone/capture")).arrayBuffer()); }
+  async historyCapture(callId) {
+    try {
+      return new Uint8Array(await (await this.http.get(`api/phone/history/capture?call_id=${encodeURIComponent(callId)}`)).arrayBuffer());
+    } catch {
+      return null;
+    }
+  }
+  async deleteHistory(ids) { await this.http.post("api/phone/history/delete", JSON.stringify({ call_ids: ids }), "application/json"); }
+  // SRTP is decrypted for analysis and playback unless the wire form is asked for.
+  async fetchConfig(url) { return (await this.http.get(`api/config/fetch?url=${encodeURIComponent(url)}`)).json(); }
+  async capture(be, { wire = false } = {}) { return new Uint8Array(await (await this.http.get(`api/phone/capture${wire ? "" : "?decrypted=1"}`)).arrayBuffer()); }
   async clearCapture() { return this.cmd({ cmd: "clear_capture" }); }
   async recording(line) { return new Uint8Array(await (await this.http.get(`api/phone/recording?line=${line}`)).arrayBuffer()); }
   async dns(host) { return (await this.http.get(`api/diag/dns?host=${encodeURIComponent(host)}`)).json(); }
@@ -107,13 +120,22 @@ export class NativeController extends Emitter {
   async sniffPcap() { return new Uint8Array(await (await this.http.get("api/sniff/pcap")).arrayBuffer()); }
   async audioStatus() { return (await this.http.get("api/audio/status")).json(); }
   async loopback(on) { return (await this.http.post("api/audio/loopback", JSON.stringify({ on }), "application/json")).json(); }
-
   async provision(url, tlsVerify) {
     const r = await this.http.post("api/phone/provision", JSON.stringify({ url, tls_verify: tlsVerify !== false }), "application/json");
     const j = await r.json();
     if (j.error) throw new Error(j.error);
     if (!j.ok) throw new Error(j.error || "Provisioning failed");
     return j.account;
+  }
+  async audioTone(hz, ms) {
+    const j = await (await this.http.post("api/audio/tone", JSON.stringify({ hz, ms }), "application/json")).json();
+    if (j.error) throw new Error(j.error);
+    return j;
+  }
+  async audioRecordTest(seconds) {
+    const j = await (await this.http.post("api/audio/record_test", JSON.stringify({ seconds }), "application/json")).json();
+    if (j.error) throw new Error(j.error);
+    return j;
   }
 }
 
@@ -142,6 +164,13 @@ function webProvisionSnapshot(a, passwords) {
     expires: Number(a.expires) || 300,
     rememberPassword: !!a.rememberPassword,
   });
+}
+
+/// Why the far end refused a call feature, in plain words (as the native engine says it).
+function refusal(what, method, code) {
+  const why = { 405: `the PBX does not support ${method}`, 501: `the PBX does not support ${method}`, 403: "the PBX does not allow it for this account", 488: "the PBX refused the new media description (SDP)", 491: "both sides changed the call at the same moment (glare); try again", 420: "it needs a SIP extension the PBX does not have", 481: "the PBX no longer knows this call" }[code];
+  if (code == null) return `${what} failed: the PBX did not answer`;
+  return why ? `${what} failed: ${why} (${code})` : `${what} failed: ${code}`;
 }
 
 export class WebController extends Emitter {
@@ -246,7 +275,7 @@ export class WebController extends Emitter {
     this.publish();
     if (!a.enabled) { this.acc.state = "off"; return this.publish(); }
     if (!a.ws || !a.domain || !a.user) {
-      this.acc = this.accView(a, "error", { error: "Fill in the WebSocket URL, domain and user in Settings" });
+      this.acc = this.accView(a, "error", { error: !a.ws ? "Fill in the WebSocket URL in Settings, Server and registration" : "Fill in the domain and user in Settings" });
       return this.publish();
     }
     const pw = a.password || this.passwords[a.id] || "";
@@ -408,6 +437,9 @@ export class WebController extends Emitter {
         });
         this.histList = this.histList.slice(0, 300);
         store.set("sidetone.web.history", this.histList);
+        // Keep this call's SIP (with its SDP codecs) for the history, once the BYE/200 is in.
+        const cid = l.call_id;
+        setTimeout(() => this.saveCallLog(cid), 3000);
         this.publish();
         this.afterCallsIdleProvision();
       },
@@ -615,10 +647,17 @@ export class WebController extends Emitter {
           if (!o.on) await this.holdOthers(l.line);
           if (o.on && l.conference) await this.cmd({ cmd: "conference", line: l.line, to_line: l.conference, on: false });
           const st = await p.hold(c, !!o.on);
+          const what = o.on ? "Hold" : "Resume";
           if (st >= 200 && st < 300) {
             l.held = !!o.on;
+            l.action = `${what} accepted by the PBX (${st})`;
+            l.action_ok = true;
             this.event("call", o.on ? "hold confirmed" : "resume confirmed", l.line);
-          } else this.event("error", `re-INVITE answered ${st ?? "nothing"}`, l.line);
+          } else {
+            l.action = refusal(what, "re-INVITE", st);
+            l.action_ok = false;
+            this.event("error", l.action, l.line);
+          }
         }
         break;
       case "mute":
@@ -637,7 +676,9 @@ export class WebController extends Emitter {
         if (p && c) {
           l.transfer = `blind transfer to ${o.target}: REFER sent`;
           const st = await p.refer(c, o.target);
-          l.transfer = st >= 200 && st < 300 ? `REFER accepted (${st}), waiting for NOTIFY` : `transfer failed: REFER answered ${st ?? "nothing"}`;
+          l.transfer = st >= 200 && st < 300 ? `REFER accepted (${st}), waiting for NOTIFY` : refusal("Transfer", "REFER", st);
+          l.action = st >= 200 && st < 300 ? `Transfer accepted by the PBX (${st}), waiting for the result` : l.transfer;
+          l.action_ok = st >= 200 && st < 300;
           this.event("transfer", l.transfer, l.line);
         }
         break;
@@ -722,11 +763,56 @@ export class WebController extends Emitter {
   }
 
   async history() { return this.histList; }
-  async clearHistory() { this.histList = []; store.set("sidetone.web.history", []); }
+  async clearHistory() {
+    const ids = this.histList.map((h) => h.call_id);
+    this.histList = [];
+    store.set("sidetone.web.history", []);
+    for (const id of ids) store.del(`sidetone.web.cap.${id}`);
+  }
+  async deleteHistory(ids) {
+    this.histList = this.histList.filter((h) => !ids.includes(h.call_id));
+    store.set("sidetone.web.history", this.histList);
+    for (const id of ids) store.del(`sidetone.web.cap.${id}`);
+  }
+
+  /// Saves the SIP of one call (browser storage) and its offered/answered codecs.
+  saveCallLog(callId) {
+    if (!this.phone || !callId) return;
+    const re = new RegExp(`^(Call-ID|i)\\s*:\\s*${callId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "mi");
+    const log = this.phone.captureLog();
+    const entries = log.entries.filter((e) => re.test(e.text));
+    if (!entries.length) return;
+    store.set(`sidetone.web.cap.${callId}`, { ...log, entries });
+    const sdpCodecs = (t) => [...t.matchAll(/^a=rtpmap:\d+ ([^/\s]+)/gm)].map((m) => m[1]);
+    const withSdp = entries.filter((e) => /\r?\n\r?\nv=0/.test(e.text));
+    const offer = withSdp[0];
+    const answer = offer && withSdp.find((e) => e !== offer && e.out !== offer.out);
+    const h = this.histList.find((x) => x.call_id === callId);
+    if (h) {
+      h.offer_codecs = offer ? sdpCodecs(offer.text) : [];
+      h.answer_codecs = answer ? sdpCodecs(answer.text) : [];
+      h.capture = true;
+      store.set("sidetone.web.history", this.histList);
+    }
+    // Keep the saved logs to the calls still in the history.
+    const keep = new Set(this.histList.map((x) => `sidetone.web.cap.${x.call_id}`));
+    try {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith("sidetone.web.cap.") && !keep.has(k)) localStorage.removeItem(k);
+      }
+    } catch { /* storage unavailable */ }
+  }
+
+  async historyCapture(callId, be) {
+    const log = store.get(`sidetone.web.cap.${callId}`, null);
+    if (!log) return null;
+    return be.captureFromLog(log);
+  }
 
   /// The capture of a browser call is rebuilt from the SIP log (media is DTLS-SRTP).
   async capture(be) {
-    if (!this.phone || !this.phone.log.length) throw new Error("Nothing captured yet");
+    if (!this.phone || !this.phone.log.length) throw new Error("Nothing captured yet: no SIP was sent or received");
     return be.captureFromLog(this.phone.captureLog());
   }
   async clearCapture() { return this.cmd({ cmd: "clear_capture" }); }

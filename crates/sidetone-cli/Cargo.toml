@@ -21,3 +21,4 @@ ureq = { version = "2", default-features = false, features = ["tls"] }
 tiny_http = "0.12"
 anyhow = "1"
 ctrlc = { version = "3", features = ["termination"] }
+opus = "0.4"

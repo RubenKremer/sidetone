@@ -7,17 +7,70 @@ use std::fmt::Write;
 pub struct LadderOptions {
     /// Restrict to one call; `None` draws every SIP message.
     pub call: Option<usize>,
+    /// Several calls in one diagram (call legs side by side); when not
+    /// empty it takes precedence over `call`.
+    pub calls: Vec<usize>,
     /// Columns per IP instead of per IP:port. `None` picks automatically.
     pub group_by_ip: Option<bool>,
     pub include_rtp: bool,
+    /// RTP streams in a block after the SIP instead of at the moment they start.
+    pub rtp_at_end: bool,
+    /// Hide retransmissions; the original arrow shows how many there were.
+    pub collapse_retransmissions: bool,
+    /// How the time column reads.
+    pub time: TimeMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimeMode {
+    /// Seconds since the first message drawn.
+    #[default]
+    Relative,
+    /// Seconds since the row above.
+    Delta,
+    /// Time of day (UTC) of the capture.
+    Absolute,
+}
+
+impl TimeMode {
+    pub fn parse(s: &str) -> TimeMode {
+        match s {
+            "delta" => TimeMode::Delta,
+            "abs" | "absolute" => TimeMode::Absolute,
+            _ => TimeMode::Relative,
+        }
+    }
+}
+
+/// The time column for a row at `ts`, `t0` being the first row and `prev` the one above.
+fn time_label(mode: TimeMode, ts: i64, t0: i64, prev: i64) -> String {
+    match mode {
+        TimeMode::Relative => format!("+{:.3}s", (ts - t0) as f64 / 1e9),
+        TimeMode::Delta => format!("Δ{:.3}s", (ts - prev).max(0) as f64 / 1e9),
+        TimeMode::Absolute => {
+            let ms = ts.div_euclid(1_000_000);
+            let day = ms.rem_euclid(86_400_000);
+            format!(
+                "{:02}:{:02}:{:02}.{:03}",
+                day / 3_600_000,
+                day / 60_000 % 60,
+                day / 1000 % 60,
+                day % 1000
+            )
+        }
+    }
 }
 
 impl Default for LadderOptions {
     fn default() -> Self {
         LadderOptions {
             call: None,
+            calls: Vec::new(),
             group_by_ip: None,
             include_rtp: true,
+            rtp_at_end: false,
+            collapse_retransmissions: false,
+            time: TimeMode::Relative,
         }
     }
 }
@@ -100,7 +153,33 @@ fn color_for(method: Option<&str>, status: Option<u16>) -> &'static str {
     }
 }
 
+/// Messages of several calls, in capture order.
+pub fn ladder_messages_of(r: &Report, calls: &[usize]) -> Vec<usize> {
+    let mut v: Vec<usize> = calls
+        .iter()
+        .filter_map(|c| r.calls.get(*c))
+        .flat_map(|c| c.messages.iter().copied())
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
 pub fn render_svg(r: &Report, opt: &LadderOptions) -> String {
+    if !opt.calls.is_empty() {
+        let mut streams: Vec<usize> = if opt.include_rtp {
+            opt.calls
+                .iter()
+                .filter_map(|c| r.calls.get(*c))
+                .flat_map(|c| c.streams.iter().copied())
+                .collect()
+        } else {
+            vec![]
+        };
+        streams.sort_unstable();
+        streams.dedup();
+        return render_with(r, ladder_messages_of(r, &opt.calls), streams, opt);
+    }
     let msgs = ladder_messages(r, opt.call);
     let streams: Vec<usize> = if opt.include_rtp {
         match opt.call {
@@ -114,18 +193,67 @@ pub fn render_svg(r: &Report, opt: &LadderOptions) -> String {
     } else {
         vec![]
     };
+    render_with(r, msgs, streams, opt)
+}
+
+fn render_with(r: &Report, msgs: Vec<usize>, streams: Vec<usize>, opt: &LadderOptions) -> String {
+    // Retransmissions folded into the arrow they repeat: same direction and
+    // label as the closest earlier original.
+    let mut retx_count: std::collections::HashMap<usize, usize> = Default::default();
+    let msgs: Vec<usize> = if opt.collapse_retransmissions {
+        let mut kept: Vec<usize> = Vec::new();
+        for &i in &msgs {
+            let m = &r.messages[i];
+            if m.retransmission {
+                if let Some(&o) = kept.iter().rev().find(|&&o| {
+                    let x = &r.messages[o];
+                    x.src == m.src && x.dst == m.dst && x.label == m.label
+                }) {
+                    *retx_count.entry(o).or_default() += 1;
+                    continue;
+                }
+            }
+            kept.push(i);
+        }
+        kept
+    } else {
+        msgs
+    };
     let by_ip = decide_by_ip(r, &msgs, opt.group_by_ip);
     let cols = columns(r, &msgs, &streams, by_ip);
     let col_w = 210.0;
     let left = 96.0;
     let top = 64.0;
     let row_h = 30.0;
-    let n_rows = msgs.len()
-        + if streams.is_empty() {
-            0
-        } else {
-            streams.len() + 1
-        };
+    // Rows in drawing order: by default each RTP stream sits where it starts
+    // among the SIP messages (after the 200 OK/ACK, before the BYE); optionally
+    // all streams go in a block after the signaling.
+    enum Row {
+        Msg(usize),
+        Stream(usize),
+        RtpHeader,
+    }
+    let mut rows: Vec<Row> = Vec::new();
+    if opt.rtp_at_end || streams.is_empty() {
+        rows.extend(msgs.iter().map(|&m| Row::Msg(m)));
+        if !streams.is_empty() {
+            rows.push(Row::RtpHeader);
+            rows.extend(streams.iter().map(|&st| Row::Stream(st)));
+        }
+    } else {
+        let mut ss: Vec<usize> = streams.clone();
+        ss.sort_by_key(|&i| r.streams[i].start_ns);
+        let mut k = 0;
+        for &m in &msgs {
+            while k < ss.len() && r.streams[ss[k]].start_ns < r.messages[m].ts_ns {
+                rows.push(Row::Stream(ss[k]));
+                k += 1;
+            }
+            rows.push(Row::Msg(m));
+        }
+        rows.extend(ss[k..].iter().map(|&st| Row::Stream(st)));
+    }
+    let n_rows = rows.len();
     let width = left + col_w * cols.len().max(1) as f64 + 20.0;
     let height = top + row_h * n_rows as f64 + 30.0;
     let x_of = |addr: &str| -> f64 {
@@ -174,8 +302,8 @@ pub fn render_svg(r: &Report, opt: &LadderOptions) -> String {
 .st-ladder .lbl{stroke:none;font-weight:600}
 .st-ladder .retx line{stroke-dasharray:5 4;opacity:.6}
 .st-ladder .retx text{opacity:.7}
-.st-ladder .msg{cursor:pointer}
-.st-ladder .msg:hover .hit{fill:var(--grid);fill-opacity:.35}
+.st-ladder .msg,.st-ladder .stream{cursor:pointer}
+.st-ladder .msg:hover .hit,.st-ladder .stream:hover .hit{fill:var(--grid);fill-opacity:.35}
 .st-ladder .hit{fill:transparent}
 .st-ladder .sev-error{fill:var(--err)}
 .st-ladder .sev-warning{fill:var(--warn)}
@@ -212,9 +340,37 @@ pub fn render_svg(r: &Report, opt: &LadderOptions) -> String {
         .first()
         .map(|&i| r.messages[i].ts_ns)
         .unwrap_or(r.summary.start_ns);
-    for (row, &mi) in msgs.iter().enumerate() {
-        let m = &r.messages[mi];
+    let mut prev_ts = t0;
+    for (row, item) in rows.iter().enumerate() {
         let y = top + row_h * row as f64 + 14.0;
+        let row_ts = match item {
+            Row::Msg(mi) => r.messages[*mi].ts_ns,
+            Row::Stream(si) => r.streams[*si].start_ns,
+            Row::RtpHeader => prev_ts,
+        };
+        let tl = time_label(opt.time, row_ts, t0, prev_ts);
+        let fs = if opt.time == TimeMode::Absolute {
+            10
+        } else {
+            11
+        };
+        prev_ts = row_ts;
+        let mi = match item {
+            Row::Msg(mi) => *mi,
+            Row::RtpHeader => {
+                let _ = write!(
+                    s,
+                    r#"<text class="t" x="8" y="{:.1}" font-size="11">RTP</text>"#,
+                    y + 4.0
+                );
+                continue;
+            }
+            Row::Stream(si) => {
+                stream_row(&mut s, r, *si, y, row_h, width, &tl, &x_of);
+                continue;
+            }
+        };
+        let m = &r.messages[mi];
         let x1 = x_of(&m.src);
         let x2 = x_of(&m.dst);
         let cls = color_for(m.method.as_deref(), m.status);
@@ -233,10 +389,9 @@ pub fn render_svg(r: &Report, opt: &LadderOptions) -> String {
             r#"<rect class="hit" x="0" y="{:.1}" width="{width:.0}" height="{row_h:.0}"/>"#,
             y - 18.0
         );
-        let rel = (m.ts_ns - t0) as f64 / 1e9;
         let _ = write!(
             s,
-            r#"<text class="t" x="8" y="{:.1}" font-size="11">+{rel:.3}s</text>"#,
+            r#"<text class="t" x="6" y="{:.1}" font-size="{fs}">{tl}</text>"#,
             y + 4.0
         );
         if let Some((sv, title)) = sev.get(&mi) {
@@ -247,15 +402,19 @@ pub fn render_svg(r: &Report, opt: &LadderOptions) -> String {
             };
             let _ = write!(
                 s,
-                r#"<circle class="{c}" cx="84" cy="{:.1}" r="5"><title>{}</title></circle>"#,
+                r#"<circle class="{c}" cx="90" cy="{:.1}" r="5"><title>{}</title></circle>"#,
                 y,
                 esc(title)
             );
         }
         let label = format!(
-            "{}{}",
+            "{}{}{}",
             truncate(&m.label, 30),
-            if m.retransmission { " ↻" } else { "" }
+            if m.retransmission { " ↻" } else { "" },
+            match retx_count.get(&mi) {
+                Some(n) => format!(" ↻×{n}"),
+                None => String::new(),
+            }
         );
         if (x1 - x2).abs() < 1.0 {
             // Self message: small loop.
@@ -280,54 +439,57 @@ pub fn render_svg(r: &Report, opt: &LadderOptions) -> String {
         s.push_str("</g>");
     }
 
-    if !streams.is_empty() {
-        let base = top + row_h * msgs.len() as f64 + 10.0;
-        let _ = write!(
-            s,
-            r#"<text class="t" x="8" y="{:.1}" font-size="11">RTP</text>"#,
-            base + 4.0
-        );
-        for (k, &si) in streams.iter().enumerate() {
-            let st = &r.streams[si];
-            let y = base + row_h * (k + 1) as f64;
-            let x1 = x_of(&st.src);
-            let x2 = x_of(&st.dst);
-            let mos = st.mos.map(|m| format!(" MOS {m:.1}")).unwrap_or_default();
-            let label = format!(
-                "{} {} pkts loss {:.1}% jit {:.0}ms{mos}",
-                st.codec, st.packets, st.loss_pct, st.jitter_ms
-            );
-            let rel = (st.start_ns - t0) as f64 / 1e9;
-            let _ = write!(
-                s,
-                r#"<g class="stream" data-stream="{si}"><title>{} → {} SSRC {}</title><text class="t" x="8" y="{:.1}" font-size="11">+{rel:.3}s</text>"#,
-                esc(&st.src),
-                esc(&st.dst),
-                esc(&st.ssrc),
-                y + 4.0
-            );
-            if (x1 - x2).abs() < 1.0 {
-                let _ = write!(
-                    s,
-                    r#"<g class="st-rtp"><text class="lbl st-rtp" x="{:.1}" y="{y:.1}">⟲ {}</text></g>"#,
-                    x1 + 6.0,
-                    esc(&label)
-                );
-            } else {
-                let mid = (x1 + x2) / 2.0;
-                let _ = write!(
-                    s,
-                    r#"<g class="st-rtp"><line x1="{x1:.1}" y1="{y:.1}" x2="{:.1}" y2="{y:.1}" stroke-width="3" stroke-dasharray="10 5" marker-end="url(#ahr)"/><text class="lbl st-rtp" x="{mid:.1}" y="{:.1}" text-anchor="middle" font-size="11">{}</text></g>"#,
-                    if x2 > x1 { x2 - 2.0 } else { x2 + 2.0 },
-                    y - 8.0,
-                    esc(&label)
-                );
-            }
-            s.push_str("</g>");
-        }
-    }
     s.push_str("</svg>");
     s
+}
+
+/// One RTP stream as a dashed arrow with its quality summary.
+#[allow(clippy::too_many_arguments)]
+fn stream_row(
+    s: &mut String,
+    r: &Report,
+    si: usize,
+    y: f64,
+    row_h: f64,
+    width: f64,
+    tl: &str,
+    x_of: &dyn Fn(&str) -> f64,
+) {
+    let st = &r.streams[si];
+    let x1 = x_of(&st.src);
+    let x2 = x_of(&st.dst);
+    let mos = st.mos.map(|m| format!(" MOS {m:.1}")).unwrap_or_default();
+    let label = format!(
+        "{} {} pkts loss {:.1}% jit {:.0}ms{mos}",
+        st.codec, st.packets, st.loss_pct, st.jitter_ms
+    );
+    let _ = write!(
+        s,
+        r#"<g class="stream" data-stream="{si}"><title>RTP {} → {} SSRC {}</title><rect class="hit" x="0" y="{:.1}" width="{width:.0}" height="{row_h:.0}"/><text class="t" x="6" y="{:.1}" font-size="10.5">{tl}</text>"#,
+        esc(&st.src),
+        esc(&st.dst),
+        esc(&st.ssrc),
+        y - 18.0,
+        y + 4.0
+    );
+    if (x1 - x2).abs() < 1.0 {
+        let _ = write!(
+            s,
+            r#"<g class="st-rtp"><text class="lbl st-rtp" x="{:.1}" y="{y:.1}">⟲ {}</text></g>"#,
+            x1 + 6.0,
+            esc(&label)
+        );
+    } else {
+        let mid = (x1 + x2) / 2.0;
+        let _ = write!(
+            s,
+            r#"<g class="st-rtp"><line x1="{x1:.1}" y1="{y:.1}" x2="{:.1}" y2="{y:.1}" stroke-width="3" stroke-dasharray="10 5" marker-end="url(#ahr)"/><text class="lbl st-rtp" x="{mid:.1}" y="{:.1}" text-anchor="middle" font-size="11">{}</text></g>"#,
+            if x2 > x1 { x2 - 2.0 } else { x2 + 2.0 },
+            y - 5.0,
+            esc(&label)
+        );
+    }
+    s.push_str("</g>");
 }
 
 fn ua_for(r: &Report, msgs: &[usize], col: &str, by_ip: bool) -> Option<String> {
@@ -391,4 +553,38 @@ pub fn render_text(r: &Report, call: Option<usize>) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collapse_retransmissions_and_time_modes() {
+        let bytes = crate::synth::generate("register-timeout").unwrap();
+        let r = crate::analyze_bytes(&bytes).unwrap();
+        let arrows = |svg: &str| svg.matches(r#"<g class="msg"#).count();
+        let full = render_svg(&r, &LadderOptions::default());
+        let folded = render_svg(
+            &r,
+            &LadderOptions {
+                collapse_retransmissions: true,
+                time: TimeMode::Delta,
+                ..Default::default()
+            },
+        );
+        assert!(
+            arrows(&folded) < arrows(&full),
+            "{} vs {}",
+            arrows(&folded),
+            arrows(&full)
+        );
+        assert!(folded.contains("↻×"));
+        assert!(folded.contains("Δ0.000s"));
+        assert!(full.contains("+0.000s"));
+        assert_eq!(
+            time_label(TimeMode::Absolute, 3_723_456_000_000, 0, 0),
+            "01:02:03.456"
+        );
+    }
 }

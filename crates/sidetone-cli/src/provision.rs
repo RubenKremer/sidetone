@@ -190,6 +190,8 @@ pub(crate) fn account_from_provision_json(stored: &AccountCfg, parsed: Value) ->
         register: p.register,
         retry_s: p.retry_s,
         blf: p.blf,
+        mwi: stored.mwi,
+        voicemail: stored.voicemail.clone(),
         profile: Profile {
             name: stored.profile.name.clone(),
             account: p.profile.account,

@@ -32,6 +32,10 @@
     <symbol id="i-spk" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5v14l-4.5-4.5H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></symbol>
     <symbol id="i-in" viewBox="0 0 24 24"><path d="M18 6L7 17M7 9v8h8"/></symbol>
     <symbol id="i-out" viewBox="0 0 24 24"><path d="M6 18L17 7M9 7h8v8"/></symbol>
+    <symbol id="i-history" viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 1 0 2.5-6M3.5 4v4.5H8"/><path d="M12 7.5V12l3 2"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></symbol>
+    <symbol id="i-expand" viewBox="0 0 24 24"><path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
     <symbol id="i-missed" viewBox="0 0 24 24"><path d="M4 8l6 6 4-4 6 6"/><path d="M15 16h5v-5"/></symbol>
   </defs>
 </svg>
@@ -50,8 +54,14 @@
     <button type="button" role="tab" data-ws="help">Help</button>
   </nav>
   <div class="bar-right">
+    <button type="button" class="icon-btn compact-only" id="c-back" title="Back to the phone"><svg><use href="#i-back"/></svg></button>
+    <button type="button" class="icon-btn compact-only" id="c-calls" title="Calls and history"><svg><use href="#i-history"/></svg></button>
+    <button type="button" class="icon-btn compact-only" id="c-settings" title="Settings"><svg><use href="#i-gear"/></svg></button>
+    <button type="button" class="icon-btn compact-only" id="c-full" title="Troubleshooting mode: trace, analysis and diagnostics"><svg><use href="#i-expand"/></svg></button>
     <button type="button" class="btn small ai-btn" id="ai-toggle" aria-expanded="false"><svg><use href="#i-ai"/></svg>Ask AI</button>
     <label class="btn small" for="file">Open capture<input id="file" type="file" accept=".pcap,.pcapng,.cap" hidden></label>
+    <button class="btn small ghost" type="button" id="explain-toggle" aria-pressed="true" title="Show or hide the explanations (Explanation tab, SDP line by line, header help)">Explanations</button>
+    <button class="btn small ghost" type="button" id="mode" title="Troubleshooting shows the trace, analysis and diagnostics; Phone only keeps the calling features">Mode</button>
     <button class="btn small ghost" type="button" id="theme" title="Switch light or dark">Theme</button>
   </div>
 </header>
@@ -78,6 +88,8 @@
       <input id="my-pres-note" placeholder="Note" aria-label="Presence note" spellcheck="false">
     </div>
     <div class="hint pres-err" id="pres-err" hidden></div>
+    <div class="hint fwd-note" id="fwd-note" hidden></div>
+    <button type="button" class="vm-btn" id="vm-btn" hidden title="Call voicemail"><svg viewBox="0 0 24 24"><circle cx="6.5" cy="12" r="3.5"/><circle cx="17.5" cy="12" r="3.5"/><path d="M6.5 15.5h11"/></svg><span id="vm-text"></span></button>
 
     <div class="dial">
       <input id="dial" list="dial-history" placeholder="Number or SIP URI" autocomplete="off" spellcheck="false" aria-label="Destination">
@@ -87,8 +99,11 @@
     <div class="opts" id="opts" hidden>
       <label>Extra headers for the next call <span class="hint">one per line, Name: value</span>
         <textarea id="opt-headers" rows="2" spellcheck="false" placeholder="X-Test-Case: 42"></textarea></label>
+      <div data-native><span class="opt-h">Codecs for the next call</span><div id="opt-codecs-box"></div></div>
       <label>Profile overrides (JSON) <span class="hint" data-native>any account knob, e.g. codecs or dtmf_mode</span>
         <textarea id="opt-overrides" rows="2" spellcheck="false" placeholder='{"codecs": ["PCMA"], "dtmf_mode": "info"}'></textarea></label>
+      <div class="msg-row" data-native><span class="opt-h">SIP MESSAGE to the number above</span>
+        <div class="row"><input id="msg-text" placeholder="Text" spellcheck="true" aria-label="Message text"><button type="button" class="btn small" id="msg-send">Send</button></div></div>
       <p class="hint">Dial string shortcuts: <code>600?Subject=test</code> adds headers, <code>600,,1234#</code> sends DTMF after answer (each comma waits 1 s).</p>
     </div>
     <div class="callbar">
@@ -162,10 +177,14 @@
       <div class="page-head">
         <h1>Calls</h1>
         <div class="row">
-          <input id="hist-filter" placeholder="Filter history" spellcheck="false" aria-label="Filter history">
           <button type="button" class="btn small" id="hist-clear">Clear history</button>
         </div>
       </div>
+      <section class="card active-card">
+        <div class="sect-head"><h2>Calls now <b id="active-count"></b></h2><button type="button" class="linklike" id="active-clear" hidden>Clear ended calls</button></div>
+        <div class="active-regs" id="active-regs"></div>
+        <div id="active-body"></div>
+      </section>
       <div class="calls-grid">
         <section class="card" id="call-detail">
           <h2>Current call</h2>
@@ -177,13 +196,35 @@
         </section>
       </div>
       <section class="card">
-        <h2>History</h2>
+        <div class="sect-head"><h2>History <b id="hist-count"></b></h2></div>
+        <div class="hist-tools">
+          <input id="hist-filter" placeholder="Number, name, code or Call-ID" spellcheck="false" aria-label="Filter history">
+          <label class="hf">From date <input type="date" id="hist-from"></label>
+          <label class="hf">To date <input type="date" id="hist-to"></label>
+          <select id="hist-dir" aria-label="Direction">
+            <option value="">All directions</option>
+            <option value="out">Outgoing</option>
+            <option value="in">Incoming</option>
+            <option value="missed">Missed</option>
+          </select>
+          <select id="hist-res" aria-label="Result">
+            <option value="">Any result</option>
+            <option value="answered">Answered</option>
+            <option value="failed">Not answered or failed</option>
+          </select>
+          <button type="button" class="linklike" id="hist-reset">Reset filters</button>
+          <span class="grow"></span>
+          <button type="button" class="btn small" id="hist-del" disabled>Delete selected</button>
+          <button type="button" class="btn small" id="hist-csv">Export CSV</button>
+        </div>
         <table class="hist">
-          <thead><tr><th></th><th>Remote</th><th>Started</th><th>Duration</th><th>Result</th><th>Account</th><th></th></tr></thead>
+          <thead><tr><th><input type="checkbox" id="hist-all" aria-label="Select all"></th><th></th><th>Remote</th><th>Started</th><th>Duration</th><th>Result</th><th>Codec</th><th title="Worst MOS estimate of the call's RTP">MOS</th><th>Account</th><th></th></tr></thead>
           <tbody id="hist"></tbody>
         </table>
         <p class="empty-note" id="hist-empty">No calls yet.</p>
+        <p class="hint">Click a call to see its full SIP, ladder, findings and explanation; double-click opens it in Analysis.</p>
       </section>
+      <section class="card hist-detail" id="hist-detail" hidden></section>
     </section>
 
     <!-- SIP trace -->
@@ -191,12 +232,15 @@
       <div class="page-head">
         <h1>SIP trace</h1>
         <div class="row">
-          <input id="tr-filter" placeholder="Filter: method, number, Call-ID, address" spellcheck="false" aria-label="Filter trace">
+          <select id="tr-call" aria-label="Show messages of"><option value="">All messages</option></select>
+          <label class="check" title="Calls joined by a transfer (Replaces, Refer-To) are shown together"><input type="checkbox" id="tr-legs" checked> Related legs</label>
+          <input id="tr-filter" class="dfilter" placeholder="Filter: text, or ip.addr==10.0.0.5 && sip.status>=400" spellcheck="false" aria-label="Filter trace">
           <label class="check"><input type="checkbox" id="tr-hide-reg" checked> Hide REGISTER</label>
           <label class="check"><input type="checkbox" id="tr-hide-opt" checked> Hide OPTIONS and NOTIFY</label>
           <button type="button" class="btn small" id="tr-pause" aria-pressed="false">Pause</button>
           <button type="button" class="btn small" id="tr-clear">Clear</button>
           <button type="button" class="btn small" id="tr-save">Save pcapng</button>
+          <button type="button" class="btn small" id="tr-save-dec" hidden title="SRTP media replaced by the RTP Sidetone decrypted, each packet commented">Save with SRTP decrypted</button>
           <button type="button" class="btn small primary" id="tr-analyze">Analyze capture</button>
         </div>
       </div>
@@ -215,6 +259,7 @@
       </div>
       <div class="an" id="an" hidden>
         <div class="an-bar">
+          <span class="live-tag" id="an-live" hidden><i class="live-dot"></i><span id="an-live-text">Live</span> <button type="button" class="linklike" id="an-live-stop">Stop following</button></span>
           <span class="capinfo" id="capinfo"></span>
           <div class="menu" data-menu="export">
             <button class="btn small" type="button" aria-haspopup="true" id="btn-export">Export</button>
@@ -233,22 +278,30 @@
         </div>
         <div class="an-grid">
           <aside class="calls" aria-label="Calls in the capture">
-            <div class="calls-head"><h2>Dialogs</h2><span id="calls-count"></span></div>
+            <div class="calls-head"><h2>Dialogs</h2><span class="grow"></span><button type="button" class="linklike" id="calls-clear" hidden>Clear selection</button><span id="calls-count"></span></div>
+            <div class="an-filter"><input id="an-filter" class="dfilter" placeholder="Filter: ip.addr==10.0.0.5, sip.method==INVITE, sip.status>=400, text" spellcheck="false" aria-label="Filter messages"><span class="hint" id="an-filter-info"></span></div>
+            <p class="calls-hint hint">Tick two or more to see the call legs in one ladder.</p>
             <ol id="calls"></ol>
           </aside>
           <section class="ladder-wrap" aria-label="Ladder diagram">
             <div class="call-head" id="call-head"></div>
+            <div class="ladder-bar">
+              <label>Time <select id="lad-time"><option value="rel">Since the first message</option><option value="delta">Since the row above</option><option value="abs">Clock (UTC)</option></select></label>
+              <label class="check"><input type="checkbox" id="lad-retx"> Fold retransmissions</label>
+            </div>
             <div class="ladder" id="ladder"></div>
           </section>
           <section class="detail" aria-label="Details">
             <div class="tabs" role="tablist">
-              <button role="tab" data-tab="findings" aria-selected="true">Findings <b id="n-findings"></b></button>
+              <button role="tab" data-tab="explain" aria-selected="true">Explanation</button>
+              <button role="tab" data-tab="findings">Findings <b id="n-findings"></b></button>
               <button role="tab" data-tab="message">Message</button>
               <button role="tab" data-tab="media">Media <b id="n-media"></b></button>
               <button role="tab" data-tab="log">Trace log</button>
               <button role="tab" data-tab="ai">Ask AI</button>
             </div>
-            <div class="tab-body" id="tab-findings"></div>
+            <div class="tab-body" id="tab-explain"></div>
+            <div class="tab-body" id="tab-findings" hidden></div>
             <div class="tab-body" id="tab-message" hidden></div>
             <div class="tab-body" id="tab-media" hidden></div>
             <div class="tab-body" id="tab-log" hidden></div>
@@ -345,6 +398,7 @@
             <li><button type="button" data-set="ai">AI</button></li>
             <li><button type="button" data-set="keys">Keyboard</button></li>
             <li><button type="button" data-set="lang">Language</button></li>
+            <li><button type="button" data-set="backup">Import and export</button></li>
           </ol>
         </nav>
         <div class="set-body" id="set-body"></div>
