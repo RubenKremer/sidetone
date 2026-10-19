@@ -72,6 +72,7 @@
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body { height: 100%; }
+html { overflow: hidden; }
 body {
   margin: 0;
   background: var(--paper);
@@ -79,7 +80,8 @@ body {
   font: 14px/1.45 var(--sans);
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  position: fixed;
+  inset: 0;
   overflow: hidden;
 }
 h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
@@ -180,7 +182,7 @@ p.hint { margin: 6px 0 0; }
 .menu-list small { display: block; color: var(--muted); }
 
 /* ---------- shell ---------- */
-.shell { flex: 1; display: flex; min-height: 0; }
+.shell { flex: 1; display: flex; min-height: 0; min-width: 0; overflow: hidden; }
 .ws { flex: 1; min-width: 0; overflow: auto; position: relative; }
 .ws-page { padding: 18px 22px 28px; }
 .page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
@@ -582,7 +584,8 @@ body.web-mode [data-native] { display: none !important; }
   .brand { width: auto; }
 }
 @media (max-width: 860px) {
-  body { height: auto; overflow: auto; }
+  html { height: auto; overflow: auto; }
+  body { position: static; inset: auto; height: auto; overflow: auto; }
   .bar { height: auto; flex-wrap: wrap; padding: 8px 12px; gap: 8px; }
   .ws-tabs { order: 3; flex-basis: 100%; }
   .ws-tabs button { padding: 8px 10px; }
