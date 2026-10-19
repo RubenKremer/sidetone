@@ -52,6 +52,7 @@
   <div class="bar-right">
     <button type="button" class="btn small ai-btn" id="ai-toggle" aria-expanded="false"><svg><use href="#i-ai"/></svg>Ask AI</button>
     <label class="btn small" for="file">Open capture<input id="file" type="file" accept=".pcap,.pcapng,.cap" hidden></label>
+    <button class="btn small ghost" type="button" id="mode" title="Troubleshooting shows the trace, analysis and diagnostics; Phone only keeps the calling features">Mode</button>
     <button class="btn small ghost" type="button" id="theme" title="Switch light or dark">Theme</button>
   </div>
 </header>
@@ -249,13 +250,15 @@
           </section>
           <section class="detail" aria-label="Details">
             <div class="tabs" role="tablist">
-              <button role="tab" data-tab="findings" aria-selected="true">Findings <b id="n-findings"></b></button>
+              <button role="tab" data-tab="explain" aria-selected="true">Explanation</button>
+              <button role="tab" data-tab="findings">Findings <b id="n-findings"></b></button>
               <button role="tab" data-tab="message">Message</button>
               <button role="tab" data-tab="media">Media <b id="n-media"></b></button>
               <button role="tab" data-tab="log">Trace log</button>
               <button role="tab" data-tab="ai">Ask AI</button>
             </div>
-            <div class="tab-body" id="tab-findings"></div>
+            <div class="tab-body" id="tab-explain"></div>
+            <div class="tab-body" id="tab-findings" hidden></div>
             <div class="tab-body" id="tab-message" hidden></div>
             <div class="tab-body" id="tab-media" hidden></div>
             <div class="tab-body" id="tab-log" hidden></div>

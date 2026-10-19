@@ -23,6 +23,7 @@ const WEBPHONE_JS: &str = include_str!("../../../web/webphone.js");
 const CONTROLLERS_JS: &str = include_str!("../../../web/controllers.js");
 const I18N_JS: &str = include_str!("../../../web/i18n.js");
 const HELP_JS: &str = include_str!("../../../web/help.js");
+const EXPLAIN_JS: &str = include_str!("../../../web/explain.js");
 
 fn header(k: &str, v: &str) -> Header {
     Header::from_bytes(k.as_bytes(), v.as_bytes()).expect("valid header")
@@ -390,6 +391,7 @@ fn handle(
                 "controllers.js" => ok_bytes(CONTROLLERS_JS.as_bytes().to_vec(), "text/javascript"),
                 "i18n.js" => ok_bytes(I18N_JS.as_bytes().to_vec(), "text/javascript"),
                 "help.js" => ok_bytes(HELP_JS.as_bytes().to_vec(), "text/javascript"),
+                "explain.js" => ok_bytes(EXPLAIN_JS.as_bytes().to_vec(), "text/javascript"),
                 _ => err(404, "not found"),
             }
         }

@@ -731,3 +731,28 @@ table.hist.active tr.ended td { color: var(--muted); }
 
 .notice { border: 1px solid var(--rule); border-left: 3px solid var(--mark); background: var(--mark-soft); border-radius: 6px; padding: 9px 12px; margin: 0 0 12px; font-size: 13.5px; }
 .notice a { font-weight: 600; margin-left: 4px; }
+
+/* Phone only mode hides the troubleshooting workspaces */
+body.phone-mode [data-ws="trace"], body.phone-mode [data-ws="analysis"], body.phone-mode [data-ws="diag"],
+body.phone-mode #ai-toggle, body.phone-mode label[for="file"], body.phone-mode .tool[data-tool="analyze"],
+body.phone-mode #cd-analyze, body.phone-mode #cd-explain, body.phone-mode #cd-trace, body.phone-mode .events-card,
+body.phone-mode #st-net, body.phone-mode #ar-trace, body.phone-mode #ar-an { display: none !important; }
+body.phone-mode .calls-grid { grid-template-columns: 1fr; }
+
+/* Explanations */
+.explain { display: grid; gap: 14px; max-width: 1100px; }
+.explain section h3 { margin: 0 0 6px; font-size: 14px; }
+.explain .kv { grid-template-columns: minmax(130px, max-content) 1fr; }
+.explain .kv dd { word-break: break-word; }
+.x-problems ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.x-problems li.error { color: var(--bad); }
+.x-problems li.warning { color: var(--warn); }
+.x-leg { font-size: 14px; margin: 14px 0 6px; }
+.sdp-explained { margin: 0 0 12px; }
+.sdp-explained summary { cursor: pointer; font-weight: 600; margin-bottom: 6px; }
+table.sdp-x { border-collapse: collapse; width: 100%; max-width: 1100px; font-size: 12.5px; }
+table.sdp-x td { border-bottom: 1px solid var(--rule); padding: 3px 10px 3px 0; vertical-align: top; }
+table.sdp-x td:first-child { white-space: nowrap; width: 1%; padding-right: 18px; }
+.status-help { margin: 0 0 10px; font-size: 13.5px; }
+.sipmsg .hn.has-help { text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }
+.sipmsg .sl[title] { cursor: help; }

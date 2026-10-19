@@ -6,6 +6,7 @@
 import { NativeController, WebController, webAccountDefaults } from "./controllers.js";
 import { initI18n, currentLang, setLang, LANGS, t } from "./i18n.js";
 import { renderHelp } from "./help.js";
+import { renderExplain, sdpTable, headerHelp, statusHelp } from "./explain.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -909,11 +910,16 @@ function renderCallDetail() {
       ["Ended by", esc(l.ended_by || "")],
     ])}
     <div class="row">
+      <button type="button" class="btn small primary" id="cd-explain">${esc(t("Explain this call"))}</button>
       <button type="button" class="btn small" id="cd-analyze">Analyze this call</button>
       <button type="button" class="btn small" id="cd-trace">${esc(t("Show in SIP trace"))}</button>
       ${l.recording && S.ctl.features.record ? `<button type="button" class="btn small" id="cd-rec">Download recording</button>` : ""}
     </div>`;
   $("#cd-analyze").addEventListener("click", () => analyzeLine(l.call_id));
+  $("#cd-explain").addEventListener("click", async () => {
+    await analyzeLine(l.call_id);
+    showTab("explain");
+  });
   $("#cd-trace").addEventListener("click", () => {
     showWs("trace");
     const sel = $("#tr-call");
@@ -1265,7 +1271,18 @@ async function selectCall(i) {
   renderFindings();
   renderMedia();
   renderLog();
+  renderExplainTab();
   $("#tab-message").innerHTML = `<p class="empty-note">Click an arrow in the ladder to see the full message.</p>`;
+}
+
+function renderExplainTab() {
+  const p = pickedCalls();
+  const box = $("#tab-explain");
+  if (p.length > 1) {
+    box.innerHTML = p.map((k) => `<h2 class="x-leg">${esc(S.report.calls[k].kind)} <span class="mono">${esc(S.report.calls[k].call_id)}</span></h2>${renderExplain(S.report, k, S.report.findings)}`).join("");
+    return;
+  }
+  box.innerHTML = renderExplain(S.report, S.call, S.report.findings);
 }
 
 function callFindings() {
@@ -1297,10 +1314,12 @@ function highlightSip(raw) {
   const head = sep >= 0 ? raw.slice(0, sep) : raw;
   const body = sep >= 0 ? raw.slice(sep).replace(/^\r?\n\r?\n/, "") : "";
   const ls = head.split(/\r?\n/);
-  const out = [`<span class="sl">${esc(ls[0])}</span>`];
+  const code = +((ls[0].match(/^SIP\/2\.0 (\d{3})/) || [])[1] || 0);
+  const out = [`<span class="sl"${code ? ` title="${esc(statusHelp(code))}"` : ""}>${esc(ls[0])}</span>`];
   for (const l of ls.slice(1)) {
     const i = l.indexOf(":");
-    out.push(i > 0 ? `<span class="hn">${esc(l.slice(0, i))}</span>${esc(l.slice(i))}` : esc(l));
+    const help = i > 0 ? headerHelp(l.slice(0, i)) : "";
+    out.push(i > 0 ? `<span class="hn${help ? " has-help" : ""}"${help ? ` title="${esc(help)}"` : ""}>${esc(l.slice(0, i))}</span>${esc(l.slice(i))}` : esc(l));
   }
   return out.join("\n") + (body ? `\n\n<span class="sdp">${esc(body)}</span>` : "");
 }
@@ -1364,6 +1383,13 @@ function messageSummary(m) {
   return `<section class="msg-sum">${kv(rows)}</section>`;
 }
 
+/// The SDP body of a message, if it has one.
+function sdpOf(m) {
+  const i = m.raw.search(/\r?\n\r?\n/);
+  const body = i >= 0 ? m.raw.slice(i).trim() : "";
+  return /^v=0/m.test(body) ? body : "";
+}
+
 function selectMessage(idx, switchTab = true) {
   S.msg = idx;
   $$("#ladder .msg").forEach((g) => g.classList.toggle("sel", +g.dataset.msg === idx));
@@ -1375,6 +1401,8 @@ function selectMessage(idx, switchTab = true) {
     <div class="msg-meta"><span>#${m.index}</span><span>frame ${m.frame}</span><span>+${m.rel_s.toFixed(3)} s</span><span>${esc(m.src)} → ${esc(m.dst)}</span><span>${m.transport}</span>${m.retransmission ? "<span>retransmission</span>" : ""}</div>
     ${m.parse_notes.length ? `<p class="msg-notes">${esc(m.parse_notes.join("; "))}</p>` : ""}
     ${messageSummary(m)}
+    ${m.status ? `<p class="status-help"><b>${m.status}</b> ${esc(statusHelp(m.status))}</p>` : ""}
+    ${sdpOf(m) ? `<details class="sdp-explained" open><summary>${esc(t("SDP explained line by line"))}</summary>${sdpTable(sdpOf(m))}</details>` : ""}
     ${related.length ? `<ul class="findings" style="margin-bottom:10px">${related.map((f) => `<li class="${f.severity}"><span class="f-title">${esc(f.title)}</span><div class="f-detail">${esc(f.detail)}</div></li>`).join("")}</ul>` : ""}
     <pre class="sipmsg">${highlightSip(m.raw)}</pre>`;
   if (switchTab) showTab("message");
@@ -2851,6 +2879,19 @@ function bindChrome() {
     mode = modes[(modes.indexOf(mode) + 1) % modes.length];
     store.set("sidetone.theme", mode);
     applyTheme(mode);
+  });
+  // Troubleshooting (everything) or Phone only (calls, history, settings, help).
+  const applyMode = (m) => {
+    document.body.classList.toggle("phone-mode", m === "phone");
+    $("#mode").textContent = t(m === "phone" ? "Mode: phone only" : "Mode: troubleshooting");
+    if (m === "phone" && ["trace", "analysis", "diag"].includes(S.page)) showWs("calls");
+  };
+  applyMode(store.get("sidetone.mode", "troubleshoot"));
+  $("#mode").addEventListener("click", () => {
+    const m = store.get("sidetone.mode", "troubleshoot") === "phone" ? "troubleshoot" : "phone";
+    store.set("sidetone.mode", m);
+    applyMode(m);
+    toast(t(m === "phone" ? "Phone only: the trace, analysis and diagnostics are hidden. Click Mode to bring them back." : "Troubleshooting: trace, analysis and diagnostics are back."), 4000);
   });
   $("#st-err").addEventListener("click", () => {
     S.errors = 0;
