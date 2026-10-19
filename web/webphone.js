@@ -258,10 +258,14 @@ export class WebPhone {
       case "ACK":
         if (c) c.acked = true;
         break;
-      case "NOTIFY":
+      case "NOTIFY": {
         this.reply(m, 200, "OK");
-        if (c && /refer/i.test(m.h("event") || "") && this.ui.onNotify) this.ui.onNotify(c, m.body.split("\r\n")[0] || m.body);
+        const ev = m.h("event") || "";
+        const token = ev.split(/[;\s]/)[0].toLowerCase();
+        if (this.ui.onResync && (token === "check-sync" || token === "resync")) this.ui.onResync();
+        if (c && /refer/i.test(ev) && this.ui.onNotify) this.ui.onNotify(c, m.body.split("\r\n")[0] || m.body);
         break;
+      }
       case "INFO": {
         this.reply(m, 200, "OK");
         const d = (m.body.match(/Signal\s*=\s*(\S)/) || [])[1];

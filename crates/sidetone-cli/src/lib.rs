@@ -3,6 +3,7 @@
 pub mod aihttp;
 pub mod mcp;
 pub mod phone;
+pub mod provision;
 pub mod serve;
 pub mod testrun;
 

@@ -3,6 +3,7 @@
 
 use crate::aihttp;
 use crate::phone;
+use crate::provision;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use sidetone_core::ai::AiConfig;
@@ -495,6 +496,24 @@ fn phone_api(m: &Method, path: &str, q: &HashMap<String, String>, body: &[u8]) -
             };
             match phone::get().set_config(&v) {
                 Ok(()) => json_resp(json!({"ok": true, "config": phone::get().config()})),
+                Err(e) => err(400, e),
+            }
+        }
+        (Method::Post, "/api/phone/provision") => {
+            let v = match body_json(body) {
+                Ok(v) => v,
+                Err(r) => return r,
+            };
+            let url = match v.get("url").and_then(|x| x.as_str()) {
+                Some(u) if !u.is_empty() => u,
+                _ => return err(400, "missing url"),
+            };
+            let tls_verify = v
+                .get("tls_verify")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(true);
+            match provision::fetch_provision(url, tls_verify) {
+                Ok(account) => json_resp(json!({"ok": true, "account": account})),
                 Err(e) => err(400, e),
             }
         }
