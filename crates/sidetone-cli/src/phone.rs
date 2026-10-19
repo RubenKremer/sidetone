@@ -216,6 +216,14 @@ impl Phone {
         let c = &report.calls[idx];
         self.engine
             .set_history_codecs(call_id, c.offer_codecs.clone(), c.answer_codecs.clone());
+        let streams: Vec<&sidetone_core::rtp::RtpStream> = c
+            .streams
+            .iter()
+            .filter_map(|&i| report.streams.get(i))
+            .collect();
+        let mos = streams.iter().filter_map(|s| s.mos).reduce(f64::min);
+        let loss = streams.iter().map(|s| s.loss_pct).reduce(f64::max);
+        self.engine.set_history_quality(call_id, mos, loss);
         let mut opts = sidetone_core::export::ExportOptions {
             call: Some(idx),
             ..Default::default()

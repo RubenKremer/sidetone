@@ -35,7 +35,8 @@ enum ConfigCmd {
         #[arg(long)]
         secrets: bool,
     },
-    /// Load a sidetone-config JSON file exported by the app or by this command.
+    /// Load a sidetone-config JSON file exported by the app or by this command,
+    /// from a path or an http(s) URL (provisioning).
     Import {
         file: PathBuf,
         /// Add the accounts to the current ones instead of replacing everything.
@@ -481,7 +482,13 @@ fn main() -> Result<()> {
                 }
             }
             ConfigCmd::Import { file, merge } => {
-                let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&file)?)?;
+                let src = file.to_string_lossy();
+                let v: serde_json::Value =
+                    if src.starts_with("http://") || src.starts_with("https://") {
+                        sidetone_cli::aihttp::fetch_config(&src)?
+                    } else {
+                        serde_json::from_slice(&std::fs::read(&file)?)?
+                    };
                 let n = sidetone_cli::phone::import_config(&v, merge)?;
                 eprintln!(
                     "imported {n} account(s){}",

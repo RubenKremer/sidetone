@@ -1259,6 +1259,7 @@ async function renderHistory() {
         <td class="num">${h.answered ? dur(h.duration_s * 1000) : ""}</td>
         <td class="${h.answered ? "" : "muted"}">${esc(result)}</td>
         <td>${codecCell(h)}</td>
+        <td class="num ${h.mos == null ? "" : h.mos < 3.1 ? "bad" : h.mos < 3.6 ? "warn" : ""}" title="${h.loss_pct != null ? esc(`${t("loss")} ${h.loss_pct.toFixed(1)}%`) : ""}">${h.mos == null ? "" : h.mos.toFixed(1)}</td>
         <td class="muted">${esc(accName(h.account))}</td>
         <td class="acts"><button type="button" class="linklike" data-redial="${i}">Call</button> <button type="button" class="linklike" data-han="${i}">Analyze</button> <button type="button" class="linklike del" data-hdel="${i}" title="${esc(t("Delete from history"))}">✕</button></td>
       </tr>`;
@@ -1366,6 +1367,7 @@ function renderHistoryDetail(h, ci, fromSession) {
       [t("Duration"), h.answered ? esc(dur(h.duration_s * 1000)) : ""],
       [t("Result"), `${esc(result)}${h.final_code ? ` <span class="mono">${h.final_code}</span>` : ""}${h.ended_by ? ` <span class="muted">(${esc(t("ended by"))} ${esc(t(/remote|callee|far/i.test(h.ended_by) ? "the other side" : "this phone"))})</span>` : ""}`],
       [t("Codecs"), codecCell(h)],
+      ...(h.mos != null ? [["MOS", `${h.mos.toFixed(2)}${h.loss_pct != null ? ` <span class="muted">(${esc(t("loss"))} ${h.loss_pct.toFixed(1)}%)</span>` : ""}`]] : []),
       [t("Account"), esc(accName(h.account))],
       ["Call-ID", `<span class="mono">${esc(h.call_id)}</span>`],
       [t("Capture"), c ? esc(t(fromSession ? "from this session's trace" : "saved with the history")) + `, ${c.messages.length} SIP, ${c.streams.length} RTP` : `<span class="muted">${esc(t("not available"))}</span>`],
@@ -1391,8 +1393,8 @@ function renderHistoryDetail(h, ci, fromSession) {
 
 function historyCsv() {
   const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-  const head = ["started", "direction", "remote", "remote_name", "answered", "duration_s", "final_code", "reason", "ended_by", "codec", "offer_codecs", "answer_codecs", "account", "call_id"];
-  const lines = historyRows().map((h) => [new Date(h.started_ms).toISOString(), h.direction, h.remote, h.remote_name, h.answered, h.duration_s.toFixed(1), h.final_code, h.reason, h.ended_by, h.codec, (h.offer_codecs || []).join(" "), (h.answer_codecs || []).join(" "), accName(h.account), h.call_id].map(q).join(","));
+  const head = ["started", "direction", "remote", "remote_name", "answered", "duration_s", "final_code", "reason", "ended_by", "codec", "offer_codecs", "answer_codecs", "mos", "loss_pct", "account", "call_id"];
+  const lines = historyRows().map((h) => [new Date(h.started_ms).toISOString(), h.direction, h.remote, h.remote_name, h.answered, h.duration_s.toFixed(1), h.final_code, h.reason, h.ended_by, h.codec, (h.offer_codecs || []).join(" "), (h.answer_codecs || []).join(" "), h.mos, h.loss_pct, accName(h.account), h.call_id].map(q).join(","));
   return [head.join(","), ...lines].join("\r\n");
 }
 
@@ -3796,6 +3798,8 @@ function renderBackup(body) {
       <section class="card" style="margin-top:14px"><h2>${esc(t("Import"))}</h2>
         <p class="muted">${esc(t("Opens a file exported by Sidetone. Accounts from the desktop app and from the browser are converted to this version."))}</p>
         <label class="btn small">${esc(t("Choose file"))}<input type="file" id="bk-file" accept=".json,application/json" hidden></label>
+        <div class="row bk-url"><input id="bk-url" placeholder="https://provisioning.example.com/sidetone/2001.json" spellcheck="false" aria-label="${esc(t("Provisioning URL"))}"><button type="button" class="btn small" id="bk-fetch">${esc(t("Load from URL"))}</button></div>
+        <p class="hint">${esc(t("Provisioning: a sidetone-config file served over HTTP(S), e.g. one per user from your provisioning server. The command line takes the same URL: sidetone config import https://..."))}</p>
         <div id="bk-preview"></div>
       </section>
     </div>`;
@@ -3808,18 +3812,35 @@ function renderBackup(body) {
       toast(e.message || String(e), 5000);
     }
   });
+  $("#bk-fetch").addEventListener("click", async () => {
+    const url = $("#bk-url").value.trim();
+    if (!url) return;
+    try {
+      const data = S.ctl.fetchConfig ? await S.ctl.fetchConfig(url) : await (await fetch(url)).json();
+      if (data && data.error && !data.format) throw new Error(data.error);
+      showImport(url.split("/").pop() || url, data);
+    } catch (err) {
+      $("#bk-preview").innerHTML = `<p class="bad">${esc(err.message || String(err))}</p>`;
+    }
+  });
   $("#bk-file").addEventListener("change", async (e) => {
     const f = e.target.files[0];
     if (!f) return;
-    let data;
     try {
-      data = JSON.parse(await f.text());
+      showImport(f.name, JSON.parse(await f.text()));
+    } catch (err) {
+      $("#bk-preview").innerHTML = `<p class="bad">${esc(err.message || String(err))}</p>`;
+    }
+  });
+  function showImport(fname, data) {
+    try {
       if (data.format !== BACKUP_FORMAT || !data.phone) throw new Error(t("This is not a Sidetone configuration file."));
       if (data.version > 1) throw new Error(t("This file was made by a newer Sidetone; update to import it."));
     } catch (err) {
       $("#bk-preview").innerHTML = `<p class="bad">${esc(err.message || String(err))}</p>`;
       return;
     }
+    const f = { name: fname };
     const accs = data.phone.accounts || [];
     $("#bk-preview").innerHTML = `<div class="notice" style="margin-top:10px">
       <b>${esc(f.name)}</b>: ${accs.length} ${esc(t("accounts"))}, ${Object.keys(data.ui || {}).length} ${esc(t("interface preferences"))}, ${esc(t("exported"))} ${esc((data.exported_at || "").replace("T", " ").slice(0, 16))}${data.app_version ? `, Sidetone ${esc(data.app_version)}` : ""}${data.secrets ? "" : `<br><span class="muted">${esc(t("The file has no passwords: enter them again after importing."))}</span>`}
@@ -3862,7 +3883,7 @@ function renderBackup(body) {
     };
     $("#bk-replace").addEventListener("click", () => apply(false));
     $("#bk-merge").addEventListener("click", () => apply(true));
-  });
+  }
 }
 
 function bindSettings() {

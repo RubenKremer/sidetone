@@ -400,7 +400,8 @@ fn handle(
         (m, p)
             if p.starts_with("/api/phone/")
                 || p.starts_with("/api/audio/")
-                || p.starts_with("/api/diag/") =>
+                || p.starts_with("/api/diag/")
+                || p.starts_with("/api/config/") =>
         {
             phone_api(&m, p, &q, &body)
         }
@@ -516,6 +517,14 @@ fn phone_api(m: &Method, path: &str, q: &HashMap<String, String>, body: &[u8]) -
         (Method::Post, "/api/phone/history/clear") => {
             phone::get().clear_history();
             json_resp(json!({"ok": true}))
+        }
+        // Provisioning: fetch a sidetone-config file from a URL for the
+        // Import screen (from here, so the page has no CORS limits).
+        (Method::Get, "/api/config/fetch") => {
+            match crate::aihttp::fetch_config(q.get("url").map(String::as_str).unwrap_or("")) {
+                Ok(v) => json_resp(v),
+                Err(e) => err(502, e.to_string()),
+            }
         }
         (Method::Get, "/api/phone/capture") => {
             let e = &phone::get().engine;

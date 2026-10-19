@@ -183,7 +183,7 @@ are in the dark theme (the Theme button, or your system setting).
     </td>
     <td width="33%" valign="top">
       <h4>The phone</h4>
-      Several accounts with re-registration at 90% of the expiry and retry on failure &middot; SIP over UDP, TCP and TLS (certificate check on or off per account) &middot; SRTP with SDES keys or DTLS-SRTP (certificate checked against a=fingerprint), AES_CM_128_HMAC_SHA1_80 and _32 and AEAD_AES_128/256_GCM, optional or mandatory &middot; digest auth (MD5, qop auth) &middot; several lines with automatic hold &middot; hold and resume by re-INVITE &middot; mute &middot; blind transfer (REFER) and attended transfer (REFER with Replaces), and being transferred &middot; three-way conference mixed locally &middot; BLF (SUBSCRIBE to the dialog event package) showing idle, ringing and busy, with presence (PIDF) when the server offers it, and your own presence published with PUBLISH &middot; DTMF as RFC 4733, SIP INFO or inband tones, and received digits shown &middot; DND and auto answer with the reject code you choose &middot; intercom answer (Call-Info, Alert-Info) &middot; PRACK, UPDATE, session timers, late offer &middot; ringback and ring tones &middot; per-call WAV recording &middot; DNS SRV and outbound proxy &middot; direct, unregistered calls to any SIP URI (anonymous From, for testing URI dialing) &middot; dial strings with headers and post-answer DTMF (<code>600?Subject=x,,123#</code>) &middot; 16 codecs, each tested against Asterisk: G.711 &mu;-law and A-law, G.722, Opus (16 kHz audio path, in-band FEC), G.729A, iLBC (20 and 30 ms), Speex narrowband and wideband, GSM 06.10, G.726-16/24/32/40 (RFC 3551 or AAL2 bit order), linear PCM at 8, 16 and 44.1 kHz; a global list in order of preference, a list per account and a list per call &middot; configuration import and export as one JSON file (in the app and with <code>sidetone config export|import</code>), passwords optional &middot; live call table with duration, codec, transport, RTP counters and the result of the last action (hold, transfer or DTMF refused, unsupported or unanswered, with the reason) &middot; phone-only mode that turns the desktop window into a compact softphone &middot; interface in English, Portuguese (Brazil), Spanish and German, with built-in help &middot; WebRTC with Opus, ICE and DTLS-SRTP in the browser, with several lines, attended transfer and conference
+      Several accounts with re-registration at 90% of the expiry and retry on failure &middot; SIP over UDP, TCP and TLS (certificate check on or off per account) &middot; SRTP with SDES keys or DTLS-SRTP (certificate checked against a=fingerprint), AES_CM_128_HMAC_SHA1_80 and _32 and AEAD_AES_128/256_GCM, optional or mandatory &middot; digest auth (MD5, qop auth) &middot; several lines with automatic hold &middot; hold and resume by re-INVITE &middot; mute &middot; blind transfer (REFER) and attended transfer (REFER with Replaces), and being transferred &middot; three-way conference mixed locally &middot; BLF (SUBSCRIBE to the dialog event package) showing idle, ringing and busy, with presence (PIDF) when the server offers it, and your own presence published with PUBLISH &middot; DTMF as RFC 4733, SIP INFO or inband tones, and received digits shown &middot; DND and auto answer with the reject code you choose &middot; intercom answer (Call-Info, Alert-Info) &middot; PRACK, UPDATE, session timers, late offer &middot; ringback and ring tones &middot; per-call WAV recording &middot; DNS SRV and outbound proxy &middot; direct, unregistered calls to any SIP URI (anonymous From, for testing URI dialing) &middot; dial strings with headers and post-answer DTMF (<code>600?Subject=x,,123#</code>) &middot; 16 codecs, each tested against Asterisk: G.711 &mu;-law and A-law, G.722, Opus (16 kHz audio path, in-band FEC), G.729A, iLBC (20 and 30 ms), Speex narrowband and wideband, GSM 06.10, G.726-16/24/32/40 (RFC 3551 or AAL2 bit order), linear PCM at 8, 16 and 44.1 kHz; a global list in order of preference, a list per account and a list per call &middot; configuration import and export as one JSON file (in the app and with <code>sidetone config export|import</code>), passwords optional, also loaded from an HTTP(S) provisioning URL &middot; call forwarding (always, busy, no answer) with 302 &middot; voicemail lamp from message-summary (RFC 3842) &middot; SIP MESSAGE (RFC 3428) sent and received &middot; HEPv3 copies of every SIP message to a Homer collector &middot; live call table with duration, codec, transport, RTP counters and the result of the last action (hold, transfer or DTMF refused, unsupported or unanswered, with the reason) &middot; phone-only mode that turns the desktop window into a compact softphone &middot; interface in English, Portuguese (Brazil), Spanish and German, with built-in help &middot; WebRTC with Opus, ICE and DTLS-SRTP in the browser, with several lines, attended transfer and conference
     </td>
   </tr>
   <tr>
@@ -338,15 +338,15 @@ hints, echo, busy and unallocated numbers).
 
 Each version gets a release with installers for every platform: take the
 [latest release](https://github.com/igtoth/sidetone/releases/latest), or
-pick a file below (version 0.1.19).
+pick a file below (version 0.1.20).
 
 | Platform | Desktop app | Command line |
 |---|---|---|
-| Windows 10/11 (x64) | [Installer (.exe)](https://github.com/igtoth/sidetone/releases/download/v0.1.19/Sidetone_0.1.19_x64-setup.exe) &middot; [MSI](https://github.com/igtoth/sidetone/releases/download/v0.1.19/Sidetone_0.1.19_x64_en-US.msi) | [sidetone-v0.1.19-x86_64-pc-windows-msvc.zip](https://github.com/igtoth/sidetone/releases/download/v0.1.19/sidetone-v0.1.19-x86_64-pc-windows-msvc.zip) |
-| macOS 11+ (Apple silicon) | [Sidetone_0.1.19_aarch64.dmg](https://github.com/igtoth/sidetone/releases/download/v0.1.19/Sidetone_0.1.19_aarch64.dmg) | [sidetone-v0.1.19-aarch64-apple-darwin.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.19/sidetone-v0.1.19-aarch64-apple-darwin.tar.gz) |
-| macOS 11+ (Intel) | [Sidetone_0.1.19_x64.dmg](https://github.com/igtoth/sidetone/releases/download/v0.1.19/Sidetone_0.1.19_x64.dmg) | [sidetone-v0.1.19-x86_64-apple-darwin.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.19/sidetone-v0.1.19-x86_64-apple-darwin.tar.gz) |
-| Linux (x86_64) | [AppImage](https://github.com/igtoth/sidetone/releases/download/v0.1.19/Sidetone_0.1.19_amd64.AppImage) &middot; [.deb](https://github.com/igtoth/sidetone/releases/download/v0.1.19/Sidetone_0.1.19_amd64.deb) &middot; [.rpm](https://github.com/igtoth/sidetone/releases/download/v0.1.19/Sidetone-0.1.19-1.x86_64.rpm) | [sidetone-v0.1.19-x86_64-unknown-linux-gnu.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.19/sidetone-v0.1.19-x86_64-unknown-linux-gnu.tar.gz) |
-| Linux (arm64) | | [sidetone-v0.1.19-aarch64-unknown-linux-gnu.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.19/sidetone-v0.1.19-aarch64-unknown-linux-gnu.tar.gz) |
+| Windows 10/11 (x64) | [Installer (.exe)](https://github.com/igtoth/sidetone/releases/download/v0.1.20/Sidetone_0.1.20_x64-setup.exe) &middot; [MSI](https://github.com/igtoth/sidetone/releases/download/v0.1.20/Sidetone_0.1.20_x64_en-US.msi) | [sidetone-v0.1.20-x86_64-pc-windows-msvc.zip](https://github.com/igtoth/sidetone/releases/download/v0.1.20/sidetone-v0.1.20-x86_64-pc-windows-msvc.zip) |
+| macOS 11+ (Apple silicon) | [Sidetone_0.1.20_aarch64.dmg](https://github.com/igtoth/sidetone/releases/download/v0.1.20/Sidetone_0.1.20_aarch64.dmg) | [sidetone-v0.1.20-aarch64-apple-darwin.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.20/sidetone-v0.1.20-aarch64-apple-darwin.tar.gz) |
+| macOS 11+ (Intel) | [Sidetone_0.1.20_x64.dmg](https://github.com/igtoth/sidetone/releases/download/v0.1.20/Sidetone_0.1.20_x64.dmg) | [sidetone-v0.1.20-x86_64-apple-darwin.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.20/sidetone-v0.1.20-x86_64-apple-darwin.tar.gz) |
+| Linux (x86_64) | [AppImage](https://github.com/igtoth/sidetone/releases/download/v0.1.20/Sidetone_0.1.20_amd64.AppImage) &middot; [.deb](https://github.com/igtoth/sidetone/releases/download/v0.1.20/Sidetone_0.1.20_amd64.deb) &middot; [.rpm](https://github.com/igtoth/sidetone/releases/download/v0.1.20/Sidetone-0.1.20-1.x86_64.rpm) | [sidetone-v0.1.20-x86_64-unknown-linux-gnu.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.20/sidetone-v0.1.20-x86_64-unknown-linux-gnu.tar.gz) |
+| Linux (arm64) | | [sidetone-v0.1.20-aarch64-unknown-linux-gnu.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.20/sidetone-v0.1.20-aarch64-unknown-linux-gnu.tar.gz) |
 | Web | no download: [open it in the browser](https://igtoth.github.io/sidetone/) | |
 
 ### Install
@@ -361,16 +361,16 @@ not signed yet, so the first time right-click it and choose Open (or run
 `xattr -dr com.apple.quarantine /Applications/Sidetone.app`). macOS asks
 for microphone access on the first call.
 
-**Linux.** Debian and Ubuntu: `sudo apt install ./Sidetone_0.1.19_amd64.deb`.
-Fedora and openSUSE: `sudo dnf install ./Sidetone-0.1.19-1.x86_64.rpm`.
-Anywhere else: `chmod +x Sidetone_0.1.19_amd64.AppImage` and run it. The
+**Linux.** Debian and Ubuntu: `sudo apt install ./Sidetone_0.1.20_amd64.deb`.
+Fedora and openSUSE: `sudo dnf install ./Sidetone-0.1.20-1.x86_64.rpm`.
+Anywhere else: `chmod +x Sidetone_0.1.20_amd64.AppImage` and run it. The
 desktop app needs WebKitGTK 4.1 (present on current distributions).
 
 **Command line.** Unpack the archive and put `sidetone` on your `PATH`:
 
 ```sh
-tar xzf sidetone-v0.1.19-x86_64-unknown-linux-gnu.tar.gz
-sudo install sidetone-v0.1.19-x86_64-unknown-linux-gnu/sidetone /usr/local/bin/
+tar xzf sidetone-v0.1.20-x86_64-unknown-linux-gnu.tar.gz
+sudo install sidetone-v0.1.20-x86_64-unknown-linux-gnu/sidetone /usr/local/bin/
 sidetone serve        # the full app in your browser at http://127.0.0.1:8640
 ```
 

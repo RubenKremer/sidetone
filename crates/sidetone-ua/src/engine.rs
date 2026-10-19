@@ -300,6 +300,11 @@ pub struct HistoryEntry {
     pub offer_codecs: Vec<String>,
     #[serde(default)]
     pub answer_codecs: Vec<String>,
+    /// Worst MOS estimate and worst loss of the call's RTP streams.
+    #[serde(default)]
+    pub mos: Option<f64>,
+    #[serde(default)]
+    pub loss_pct: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -532,6 +537,15 @@ impl Engine {
         if let Some(h) = s.history.iter_mut().find(|h| h.call_id == call_id) {
             h.offer_codecs = offer;
             h.answer_codecs = answer;
+            s.history_dirty = true;
+        }
+    }
+
+    pub fn set_history_quality(&self, call_id: &str, mos: Option<f64>, loss_pct: Option<f64>) {
+        let mut s = self.shared.lock().unwrap();
+        if let Some(h) = s.history.iter_mut().find(|h| h.call_id == call_id) {
+            h.mos = mos;
+            h.loss_pct = loss_pct;
             s.history_dirty = true;
         }
     }

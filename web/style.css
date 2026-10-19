@@ -892,3 +892,5 @@ svg.qchart { width: 100%; height: auto; display: block; overflow: visible; strok
 .ladder-bar label { display: inline-flex; gap: 6px; align-items: center; margin: 0; }
 .ladder-bar select { font: inherit; padding: 2px 4px; width: auto; }
 .ladder-bar .check { display: inline-flex; gap: 6px; align-items: center; }
+.bk-url { display: flex; gap: 6px; margin-top: 10px; }
+.bk-url input { flex: 1; min-width: 0; }
