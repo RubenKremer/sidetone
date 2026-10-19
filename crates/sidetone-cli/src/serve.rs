@@ -489,6 +489,15 @@ fn phone_api(m: &Method, path: &str, q: &HashMap<String, String>, body: &[u8]) -
             }
         }
         (Method::Get, "/api/phone/history") => json_resp(json!(phone::get().engine.history())),
+        (Method::Post, "/api/phone/history/delete") => {
+            let ids: Vec<String> = serde_json::from_slice::<Value>(&body)
+                .ok()
+                .and_then(|v| v.get("call_ids").cloned())
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default();
+            phone::get().delete_history(&ids);
+            json_resp(json!({"ok": true, "deleted": ids.len()}))
+        }
         (Method::Post, "/api/phone/history/clear") => {
             phone::get().clear_history();
             json_resp(json!({"ok": true}))

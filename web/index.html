@@ -172,12 +172,11 @@
       <div class="page-head">
         <h1>Calls</h1>
         <div class="row">
-          <input id="hist-filter" placeholder="Filter history" spellcheck="false" aria-label="Filter history">
           <button type="button" class="btn small" id="hist-clear">Clear history</button>
         </div>
       </div>
       <section class="card active-card">
-        <div class="sect-head"><h2>Calls now <b id="active-count"></b></h2></div>
+        <div class="sect-head"><h2>Calls now <b id="active-count"></b></h2><button type="button" class="linklike" id="active-clear" hidden>Clear ended calls</button></div>
         <div class="active-regs" id="active-regs"></div>
         <div id="active-body"></div>
       </section>
@@ -192,9 +191,29 @@
         </section>
       </div>
       <section class="card">
-        <h2>History</h2>
+        <div class="sect-head"><h2>History <b id="hist-count"></b></h2></div>
+        <div class="hist-tools">
+          <input id="hist-filter" placeholder="Number, name, code or Call-ID" spellcheck="false" aria-label="Filter history">
+          <label class="hf">From date <input type="date" id="hist-from"></label>
+          <label class="hf">To date <input type="date" id="hist-to"></label>
+          <select id="hist-dir" aria-label="Direction">
+            <option value="">All directions</option>
+            <option value="out">Outgoing</option>
+            <option value="in">Incoming</option>
+            <option value="missed">Missed</option>
+          </select>
+          <select id="hist-res" aria-label="Result">
+            <option value="">Any result</option>
+            <option value="answered">Answered</option>
+            <option value="failed">Not answered or failed</option>
+          </select>
+          <button type="button" class="linklike" id="hist-reset">Reset filters</button>
+          <span class="grow"></span>
+          <button type="button" class="btn small" id="hist-del" disabled>Delete selected</button>
+          <button type="button" class="btn small" id="hist-csv">Export CSV</button>
+        </div>
         <table class="hist">
-          <thead><tr><th></th><th>Remote</th><th>Started</th><th>Duration</th><th>Result</th><th>Account</th><th></th></tr></thead>
+          <thead><tr><th><input type="checkbox" id="hist-all" aria-label="Select all"></th><th></th><th>Remote</th><th>Started</th><th>Duration</th><th>Result</th><th>Codec</th><th>Account</th><th></th></tr></thead>
           <tbody id="hist"></tbody>
         </table>
         <p class="empty-note" id="hist-empty">No calls yet.</p>
@@ -233,6 +252,7 @@
       </div>
       <div class="an" id="an" hidden>
         <div class="an-bar">
+          <span class="live-tag" id="an-live" hidden><i class="live-dot"></i><span id="an-live-text">Live</span> <button type="button" class="linklike" id="an-live-stop">Stop following</button></span>
           <span class="capinfo" id="capinfo"></span>
           <div class="menu" data-menu="export">
             <button class="btn small" type="button" aria-haspopup="true" id="btn-export">Export</button>

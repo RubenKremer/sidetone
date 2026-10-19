@@ -116,6 +116,7 @@ async function pickBackend() {
 // ---------- state ----------
 
 const S = {
+  hiddenEnded: new Set(),
   picked: new Set(), // dialogs ticked for a combined ladder
   be: null,
   ctl: null,
@@ -450,6 +451,7 @@ function onState(st) {
       const c = line(id);
       toast(`Incoming call from ${c.remote_name || c.remote}`);
       flashTitle(`Incoming: ${c.remote_name || c.remote}`);
+      followCall(id);
     }
   }
   lastIncoming = new Set(inc);
@@ -465,6 +467,7 @@ function onState(st) {
   }
   pickSelection();
   announceActions();
+  liveTick();
   renderAccounts();
   renderBlf();
   renderLines();
@@ -555,8 +558,7 @@ async function callOrAnswer() {
   const l = selLine();
   if (l && l.state === "incoming") return cmd({ cmd: "answer", line: l.line });
   const r = await dial();
-  // Follow the call on the Calls page.
-  if (r && r.line && store.get("sidetone.follow_calls", true)) showWs("calls");
+  if (r && r.line) followCall(r.line);
   return r;
 }
 
@@ -608,6 +610,104 @@ function keyPress(k) {
   else {
     const d = $("#dial");
     d.value += k;
+  }
+}
+
+// ---- Live analysis: the ladder, log and findings follow the call as it happens
+
+const LIVE = { on: false, line: null, busy: false, last: 0, size: -1, endedAt: 0 };
+
+/// Opens the call being placed or received: Analysis (live) when troubleshooting,
+/// the Calls page in phone-only mode.
+function followCall(lineId) {
+  if (!store.get("sidetone.follow_calls", true)) return;
+  if (document.body.classList.contains("phone-mode")) {
+    if (!document.body.classList.contains("compact")) showWs("calls");
+    return;
+  }
+  Object.assign(LIVE, { on: true, line: lineId, size: -1, last: 0, endedAt: 0, keep: null });
+  showWs("analysis");
+  liveTick(true);
+}
+
+function stopLive() {
+  LIVE.on = false;
+  renderLiveTag();
+}
+
+function renderLiveTag() {
+  const el = $("#an-live");
+  if (!el) return;
+  const l = LIVE.on && line(LIVE.line);
+  el.hidden = !LIVE.on;
+  if (LIVE.on) {
+    $("#an-live-text").textContent = `${t("Live")}: L${LIVE.line}${l ? ` ${l.remote_name || l.remote}` : ""}${l && l.state === "ended" ? ` (${t("ended")})` : ""}`;
+  }
+}
+
+async function liveTick(force = false) {
+  if (!LIVE.on || LIVE.busy) return;
+  const l = line(LIVE.line);
+  const now = Date.now();
+  // Keep refreshing a few seconds after the call ends to catch BYE/200 and the last RTP.
+  if (!l || l.state === "ended") {
+    if (!LIVE.endedAt) LIVE.endedAt = now;
+    if (now - LIVE.endedAt > 4000) {
+      LIVE.on = false;
+      renderLiveTag();
+      return;
+    }
+  }
+  if (!force && (S.page !== "analysis" || now - LIVE.last < 1500)) return;
+  if (PL.src) return; // do not cut the RTP player
+  LIVE.busy = true;
+  LIVE.last = now;
+  try {
+    const bytes = await S.ctl.capture(S.be);
+    if (!force && bytes.length === LIVE.size) return;
+    LIVE.size = bytes.length;
+    await liveLoad(bytes, l ? l.call_id : "");
+  } catch {
+    /* nothing captured yet */
+  } finally {
+    LIVE.busy = false;
+    renderLiveTag();
+  }
+}
+
+/// Reloads the capture keeping what the user is looking at: the dialog, the
+/// selected message, the tab and the ladder scroll (or its end when it was there).
+async function liveLoad(bytes, callId) {
+  const prevCall = S.report && S.call != null && S.report.calls[S.call] ? S.report.calls[S.call].call_id : null;
+  // The call being followed, unless the user clicked another dialog meanwhile.
+  const keepCall = LIVE.keep || callId || prevCall;
+  const prevMsg = S.msg;
+  const lad = $("#ladder");
+  const atEnd = !lad || lad.scrollTop + lad.clientHeight >= lad.scrollHeight - 30;
+  const scroll = lad ? [lad.scrollTop, lad.scrollLeft] : [0, 0];
+  let report;
+  try {
+    report = await S.be.analyze(bytes);
+  } catch {
+    return;
+  }
+  const picked = S.picked || new Set();
+  Object.assign(S, { bytes, name: `live-L${LIVE.line}.pcapng`, report, webrtc: S.ctl.kind === "web" ? S.ctl.lastSummary : null, picked });
+  $("#an-empty").hidden = true;
+  $("#an").hidden = false;
+  const sm = report.summary;
+  $("#capinfo").textContent = `${sm.calls} dialogs, ${sm.sip_messages} SIP messages, ${sm.rtp_streams} RTP streams, ${sm.duration_s.toFixed(1)} s, ${sm.errors} errors, ${sm.warnings} warnings`;
+  renderCalls();
+  let idx = report.calls.findIndex((c) => c.call_id === keepCall);
+  if (idx < 0 && callId) idx = report.calls.findIndex((c) => c.call_id === callId);
+  if (idx < 0) idx = report.calls.length ? report.calls.length - 1 : null;
+  await selectCall(idx);
+  const sameCall = idx != null && report.calls[idx] && report.calls[idx].call_id === prevCall;
+  if (prevMsg != null && report.messages[prevMsg] && sameCall) selectMessage(prevMsg, false);
+  const lad2 = $("#ladder");
+  if (lad2) {
+    if (atEnd) lad2.scrollTop = lad2.scrollHeight;
+    else [lad2.scrollTop, lad2.scrollLeft] = scroll;
   }
 }
 
@@ -878,8 +978,9 @@ function announceActions() {
 function renderActive() {
   const box = $("#active-body");
   if (!box) return;
-  const ls = lines();
+  const ls = lines().filter((l) => !(l.state === "ended" && S.hiddenEnded.has(l.line + ":" + l.call_id)));
   $("#active-count").textContent = ls.filter((l) => l.state !== "ended").length || "";
+  $("#active-clear").hidden = !ls.some((l) => l.state === "ended");
   // Every account: registered or not, over which transport, where.
   const accRows = (S.st ? S.st.accounts : []).map((a) => {
     const cls = regClass(a);
@@ -1025,33 +1126,61 @@ function accName(id) {
   return a ? accLabel(a) : id;
 }
 
+const HSEL = new Set();
+
+/// History rows that pass the text, date, direction and result filters.
+function historyRows() {
+  const f = $("#hist-filter").value.trim().toLowerCase();
+  const from = $("#hist-from").value ? new Date(`${$("#hist-from").value}T00:00:00`).getTime() : null;
+  const to = $("#hist-to").value ? new Date(`${$("#hist-to").value}T23:59:59.999`).getTime() : null;
+  const dir = $("#hist-dir").value;
+  const res = $("#hist-res").value;
+  return S.history.filter((h) => {
+    if (f && !`${h.remote} ${h.remote_name || ""} ${h.final_code || ""} ${h.reason || ""} ${h.call_id} ${h.codec || ""}`.toLowerCase().includes(f)) return false;
+    if (from != null && h.started_ms < from) return false;
+    if (to != null && h.started_ms > to) return false;
+    const missed = h.direction === "in" && !h.answered;
+    if (dir === "missed" ? !missed : dir && h.direction !== dir) return false;
+    if (res === "answered" && !h.answered) return false;
+    if (res === "failed" && h.answered) return false;
+    return true;
+  });
+}
+
 async function renderHistory() {
   try {
     S.history = await S.ctl.history();
   } catch {
     S.history = [];
   }
-  const f = $("#hist-filter").value.trim().toLowerCase();
-  const rows = S.history.filter((h) => !f || `${h.remote} ${h.remote_name || ""} ${h.final_code || ""} ${h.reason || ""} ${h.call_id}`.toLowerCase().includes(f));
+  const rows = historyRows();
+  for (const id of [...HSEL]) if (!S.history.some((h) => h.call_id === id)) HSEL.delete(id);
+  $("#hist-count").textContent = S.history.length ? (rows.length === S.history.length ? `${rows.length}` : `${rows.length} / ${S.history.length}`) : "";
   $("#hist-empty").hidden = rows.length > 0;
+  $("#hist-empty").textContent = t(S.history.length ? "No call matches the filters." : "No calls yet.");
   $("#hist").innerHTML = rows
-    .slice(0, 300)
+    .slice(0, 500)
     .map((h, i) => {
       const missed = h.direction === "in" && !h.answered;
       const icon = missed ? "missed" : h.direction === "in" ? "in" : "out";
       const result = h.answered ? "Answered" : resultText(h.final_code, h.reason) || "Not answered";
       return `<tr class="${missed ? "missed" : ""}">
+        <td><input type="checkbox" data-hsel="${esc(h.call_id)}" ${HSEL.has(h.call_id) ? "checked" : ""} aria-label="${esc(t("Select"))}"></td>
         <td><svg class="hi" aria-label="${icon}"><use href="#i-${icon}"/></svg></td>
         <td>${h.remote_name ? `<b>${esc(h.remote_name)}</b> ` : ""}<span class="mono">${esc(h.remote)}</span></td>
         <td>${when(h.started_ms)}</td>
         <td class="num">${h.answered ? dur(h.duration_s * 1000) : ""}</td>
         <td class="${h.answered ? "" : "muted"}">${esc(result)}</td>
+        <td class="mono muted">${esc(h.codec || "")}</td>
         <td class="muted">${esc(accName(h.account))}</td>
-        <td class="acts"><button type="button" class="linklike" data-redial="${i}">Call</button> <button type="button" class="linklike" data-han="${i}">Analyze</button></td>
+        <td class="acts"><button type="button" class="linklike" data-redial="${i}">Call</button> <button type="button" class="linklike" data-han="${i}">Analyze</button> <button type="button" class="linklike del" data-hdel="${i}" title="${esc(t("Delete from history"))}">✕</button></td>
       </tr>`;
     })
     .join("");
-  $("#hist").onclick = (e) => {
+  $("#hist-all").checked = rows.length > 0 && rows.every((h) => HSEL.has(h.call_id));
+  $("#hist-del").disabled = !HSEL.size;
+  $("#hist-del").textContent = HSEL.size ? `${t("Delete selected")} (${HSEL.size})` : t("Delete selected");
+  $("#hist").onclick = async (e) => {
     const r = e.target.closest("[data-redial]");
     if (r) {
       const h = rows[+r.dataset.redial];
@@ -1060,8 +1189,31 @@ async function renderHistory() {
     }
     const a = e.target.closest("[data-han]");
     if (a) analyzeLine(rows[+a.dataset.han].call_id);
+    const d = e.target.closest("[data-hdel]");
+    if (d) {
+      const id = rows[+d.dataset.hdel].call_id;
+      HSEL.delete(id);
+      await S.ctl.deleteHistory([id]);
+      renderHistory();
+    }
+  };
+  $("#hist").onchange = (e) => {
+    const c = e.target.closest("[data-hsel]");
+    if (!c) return;
+    if (c.checked) HSEL.add(c.dataset.hsel);
+    else HSEL.delete(c.dataset.hsel);
+    $("#hist-all").checked = rows.length > 0 && rows.every((h) => HSEL.has(h.call_id));
+    $("#hist-del").disabled = !HSEL.size;
+    $("#hist-del").textContent = HSEL.size ? `${t("Delete selected")} (${HSEL.size})` : t("Delete selected");
   };
   renderCallDetail();
+}
+
+function historyCsv() {
+  const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const head = ["started", "direction", "remote", "remote_name", "answered", "duration_s", "final_code", "reason", "ended_by", "codec", "account", "call_id"];
+  const lines = historyRows().map((h) => [new Date(h.started_ms).toISOString(), h.direction, h.remote, h.remote_name, h.answered, h.duration_s.toFixed(1), h.final_code, h.reason, h.ended_by, h.codec, accName(h.account), h.call_id].map(q).join(","));
+  return [head.join(","), ...lines].join("\r\n");
 }
 
 // ============================================================================
@@ -1240,6 +1392,7 @@ function bindTrace() {
 // Analysis (captures)
 
 async function load(bytes, name, webrtc = null) {
+  stopLive();
   try {
     const report = await S.be.analyze(bytes);
     Object.assign(S, { bytes, name, report, call: null, msg: null, webrtc, picked: new Set() });
@@ -1303,7 +1456,8 @@ function renderCalls() {
     .join("");
 }
 
-async function selectCall(i) {
+async function selectCall(i, user = false) {
+  if (user && LIVE.on && S.report && S.report.calls[i]) LIVE.keep = S.report.calls[i].call_id;
   S.call = i;
   S.msg = null;
   const picked = pickedCalls();
@@ -2100,7 +2254,7 @@ function bindAnalysis() {
   });
   $("#calls").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-call]");
-    if (b) selectCall(+b.dataset.call);
+    if (b) selectCall(+b.dataset.call, true);
   });
   $("#calls").addEventListener("change", (e) => {
     const cb = e.target.closest("input[data-pick]");
@@ -2127,6 +2281,7 @@ function bindAnalysis() {
       }
     }, 200);
   });
+  $("#an-live-stop").addEventListener("click", stopLive);
   $("#calls-clear").addEventListener("click", () => {
     const keep = S.call ?? pickedCalls()[0] ?? null;
     S.picked.clear();
@@ -2931,7 +3086,7 @@ async function renderGlobal(section) {
     const fields = CALL_SETTINGS.filter((f) => native || f[5] !== "native");
     body.innerHTML = `<div class="set-head"><h1>Call handling</h1></div>
       <form class="set-form" id="g-form"><div class="fields">${fields.map((f, i) => fieldHtml(f, get(st, f[0]), `gf-${i}`)).join("")}
-        <label class="check fld"><input type="checkbox" id="lp-follow" ${store.get("sidetone.follow_calls", true) ? "checked" : ""}> ${esc(t("Open the Calls page when you press Call"))}</label>
+        <label class="check fld"><input type="checkbox" id="lp-follow" ${store.get("sidetone.follow_calls", true) ? "checked" : ""}> ${esc(t("Follow calls: when you call or a call rings, open Analysis and update the ladder and log live"))}</label>
         <label class="check fld"><input type="checkbox" id="lp-keys" ${store.get("sidetone.key_tones", true) ? "checked" : ""}> ${esc(t("Play keypad tones"))}</label>
       </div>
       <div class="set-actions"><button type="submit" class="btn primary">Save</button></div></form>`;
@@ -3196,6 +3351,28 @@ function bindChrome() {
     renderEvents();
   });
   $("#hist-filter").addEventListener("input", renderHistory);
+  for (const id of ["#hist-from", "#hist-to", "#hist-dir", "#hist-res"]) $(id).addEventListener("change", renderHistory);
+  $("#hist-reset").addEventListener("click", () => {
+    for (const id of ["#hist-filter", "#hist-from", "#hist-to", "#hist-dir", "#hist-res"]) $(id).value = "";
+    renderHistory();
+  });
+  $("#hist-all").addEventListener("change", (e) => {
+    for (const h of historyRows()) e.target.checked ? HSEL.add(h.call_id) : HSEL.delete(h.call_id);
+    renderHistory();
+  });
+  $("#hist-del").addEventListener("click", async () => {
+    if (!HSEL.size) return;
+    const n = HSEL.size;
+    await S.ctl.deleteHistory([...HSEL]);
+    HSEL.clear();
+    toast(`${n} ${t("calls deleted from the history")}`);
+    renderHistory();
+  });
+  $("#hist-csv").addEventListener("click", () => download(new TextEncoder().encode(historyCsv()), `sidetone-history-${new Date().toISOString().slice(0, 10)}.csv`, "text/csv"));
+  $("#active-clear").addEventListener("click", () => {
+    for (const l of lines()) if (l.state === "ended") S.hiddenEnded.add(l.line + ":" + l.call_id);
+    renderActive();
+  });
   $("#hist-clear").addEventListener("click", async () => {
     await S.ctl.clearHistory();
     renderHistory();

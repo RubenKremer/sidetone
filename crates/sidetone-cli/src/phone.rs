@@ -321,6 +321,11 @@ impl Phone {
         }
     }
 
+    pub fn delete_history(&self, call_ids: &[String]) {
+        self.engine.delete_history(call_ids);
+        self.save_history();
+    }
+
     pub fn clear_history(&self) {
         self.engine.clear_history();
         self.save_history();

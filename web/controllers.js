@@ -89,6 +89,7 @@ export class NativeController extends Emitter {
   }
   async history() { return (await this.http.get("api/phone/history")).json(); }
   async clearHistory() { await this.http.post("api/phone/history/clear", "", "application/json"); }
+  async deleteHistory(ids) { await this.http.post("api/phone/history/delete", JSON.stringify({ call_ids: ids }), "application/json"); }
   async capture() { return new Uint8Array(await (await this.http.get("api/phone/capture")).arrayBuffer()); }
   async clearCapture() { return this.cmd({ cmd: "clear_capture" }); }
   async recording(line) { return new Uint8Array(await (await this.http.get(`api/phone/recording?line=${line}`)).arrayBuffer()); }
@@ -575,6 +576,10 @@ export class WebController extends Emitter {
 
   async history() { return this.histList; }
   async clearHistory() { this.histList = []; store.set("sidetone.web.history", []); }
+  async deleteHistory(ids) {
+    this.histList = this.histList.filter((h) => !ids.includes(h.call_id));
+    store.set("sidetone.web.history", this.histList);
+  }
 
   /// The capture of a browser call is rebuilt from the SIP log (media is DTLS-SRTP).
   async capture(be) {

@@ -802,3 +802,15 @@ body.compact { height: 100vh; overflow: hidden; }
 body.compact .phone { overflow-y: auto; min-height: 0; border-bottom: 0; }
 body.compact.compact-open .ws { overflow-y: auto; min-height: 0; }
 body.compact .ai-dock { display: none; }
+
+/* Live analysis */
+.live-tag { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--bad); white-space: nowrap; margin-right: 10px; }
+.live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--bad-bg); animation: livepulse 1.2s ease-in-out infinite; }
+@keyframes livepulse { 50% { opacity: 0.25; } }
+
+/* History filters */
+.hist-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin: 6px 0 10px; }
+.hist-tools #hist-filter { width: 240px; }
+.hist-tools .hf { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.hist-tools input[type=date], .hist-tools select { font: inherit; font-size: 13px; padding: 4px 6px; border: 1px solid var(--rule-strong); border-radius: 6px; background: var(--panel); color: var(--ink); }
+table.hist .del { color: var(--bad); }

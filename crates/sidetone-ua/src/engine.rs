@@ -434,6 +434,13 @@ impl Engine {
         s.history = h.into_iter().take(MAX_HISTORY).collect();
     }
 
+    /// Removes the calls with these Call-IDs from the history.
+    pub fn delete_history(&self, call_ids: &[String]) {
+        let mut s = self.shared.lock().unwrap();
+        s.history.retain(|h| !call_ids.contains(&h.call_id));
+        s.history_dirty = true;
+    }
+
     pub fn clear_history(&self) {
         let mut s = self.shared.lock().unwrap();
         s.history.clear();
