@@ -7,7 +7,8 @@ import { NativeController, WebController, webAccountDefaults } from "./controlle
 import { initI18n, currentLang, setLang, LANGS, t } from "./i18n.js";
 import { renderHelp } from "./help.js";
 import { renderExplain, sdpTable, headerHelp, statusHelp } from "./explain.js";
-import { compileFilter, FIELD_NAMES } from "./filter.js";
+import { compileFilter } from "./filter.js";
+import { attachSuggest } from "./filter-suggest.js";
 import { trFinding } from "./findings-i18n.js";
 
 const $ = (s, el = document) => el.querySelector(s);
@@ -24,6 +25,8 @@ const store = {
 };
 
 const token = new URLSearchParams(location.search).get("token");
+/// Ladder option: RTP streams after the SIP instead of in time order.
+const rtpAtEnd = () => store.get("sidetone.ladder.rtp_end", false);
 
 // ---------- analysis backends ----------
 
@@ -34,8 +37,8 @@ async function wasmBackend() {
     kind: "wasm",
     features: [],
     analyze: async (b) => JSON.parse(w.analyze(b)),
-    ladder: async (b, call) => w.ladder_svg(b, call ?? -1),
-    ladderCalls: async (b, calls) => w.ladder_svg_calls(b, calls.join(",")),
+    ladder: async (b, call) => (w.ladder_svg_opts ? w.ladder_svg_opts(b, call ?? -1, "", rtpAtEnd()) : w.ladder_svg(b, call ?? -1)),
+    ladderCalls: async (b, calls) => (w.ladder_svg_opts ? w.ladder_svg_opts(b, -1, calls.join(","), rtpAtEnd()) : w.ladder_svg_calls(b, calls.join(","))),
     rtpAudio: async (b, id) => {
       try {
         return { wav: w.rtp_audio(b, id) };
@@ -83,8 +86,8 @@ async function httpBackend() {
     get,
     post,
     analyze: async (b) => (await post("api/analyze", b)).json(),
-    ladder: async (b, call) => (await post(`api/ladder?${q({ call })}`, b)).text(),
-    ladderCalls: async (b, calls) => (await post(`api/ladder?${q({ calls: calls.join(",") })}`, b)).text(),
+    ladder: async (b, call) => (await post(`api/ladder?${q({ call, rtp: rtpAtEnd() ? "end" : null })}`, b)).text(),
+    ladderCalls: async (b, calls) => (await post(`api/ladder?${q({ calls: calls.join(","), rtp: rtpAtEnd() ? "end" : null })}`, b)).text(),
     rtpAudio: async (b, id) => ({ wav: new Uint8Array(await (await post(`api/rtp_audio?${q({ stream: id })}`, b)).arrayBuffer()) }),
     exportPcap: async (b, o) => new Uint8Array(await (await post(`api/export?${q({ call: o.call, redact: o.redact, sip_only: o.sip_only, no_annotate: o.annotate === false })}`, b)).arrayBuffer()),
     prompt: async (b, call, redact, lang, question) => (await post(`api/prompt?${q({ call, redact, lang, question })}`, b)).json(),
@@ -1580,6 +1583,16 @@ async function selectCall(i, user = false) {
   $("#tab-message").innerHTML = `<p class="empty-note">Click an arrow in the ladder to see the full message.</p>`;
 }
 
+/// Empty ladder and details, waiting for a dialog to be picked.
+function clearLadder() {
+  S.msg = null;
+  $$("#calls button").forEach((b) => b.setAttribute("aria-current", "false"));
+  $("#call-head").innerHTML = "";
+  $("#ladder").innerHTML = `<p class="empty-note pad">${esc(t("No dialog selected. Click one on the left, or tick several to see them together."))}</p>`;
+  $("#tab-message").innerHTML = "";
+  $("#tab-explain").innerHTML = renderExplain(S.report, null, []);
+}
+
 /// Highlights the ladder arrows that match the Analysis filter.
 function markLadderMatches() {
   const hits = anMatches();
@@ -2365,10 +2378,18 @@ function bindAnalysis() {
     const i = +cb.dataset.pick;
     if (cb.checked) S.picked.add(i);
     else S.picked.delete(i);
+    if (!S.picked.size) {
+      // Nothing ticked any more: nothing on the ladder until a dialog is picked.
+      S.call = null;
+      renderCalls();
+      clearLadder();
+      return;
+    }
     renderCalls();
-    selectCall(S.picked.size === 1 ? [...S.picked][0] : S.picked.size ? null : S.call ?? i);
+    selectCall(S.picked.size === 1 ? [...S.picked][0] : null);
   });
-  $("#filter-fields").innerHTML = FIELD_NAMES.map((f) => `<option value="${f}">`).join("");
+  attachSuggest($("#an-filter"), () => (S.report ? S.report.messages : []));
+  attachSuggest($("#tr-filter"), () => S.trace);
   let anT = null;
   $("#an-filter").addEventListener("input", () => {
     clearTimeout(anT);
@@ -2386,10 +2407,10 @@ function bindAnalysis() {
   });
   $("#an-live-stop").addEventListener("click", stopLive);
   $("#calls-clear").addEventListener("click", () => {
-    const keep = S.call ?? pickedCalls()[0] ?? null;
     S.picked.clear();
+    S.call = null;
     renderCalls();
-    selectCall(keep);
+    clearLadder();
   });
   $("#ladder").addEventListener("click", (e) => {
     const g = e.target.closest(".msg");
@@ -3191,12 +3212,14 @@ async function renderGlobal(section) {
       <form class="set-form" id="g-form"><div class="fields">${fields.map((f, i) => fieldHtml(f, get(st, f[0]), `gf-${i}`)).join("")}
         <label class="check fld"><input type="checkbox" id="lp-follow" ${store.get("sidetone.follow_calls", true) ? "checked" : ""}> ${esc(t("Follow calls: when you call or a call rings, open Analysis and update the ladder and log live"))}</label>
         <label class="check fld"><input type="checkbox" id="lp-keys" ${store.get("sidetone.key_tones", true) ? "checked" : ""}> ${esc(t("Play keypad tones"))}</label>
+        <label class="check fld"><input type="checkbox" id="lp-rtpend" ${rtpAtEnd() ? "checked" : ""}> ${esc(t("Ladder: put RTP streams after the SIP (off: each stream where it starts, between the answer and the BYE)"))}</label>
       </div>
       <div class="set-actions"><button type="submit" class="btn primary">Save</button></div></form>`;
     $("#g-form").addEventListener("submit", async (e) => {
       e.preventDefault();
       store.set("sidetone.follow_calls", $("#lp-follow").checked);
       store.set("sidetone.key_tones", $("#lp-keys").checked);
+      store.set("sidetone.ladder.rtp_end", $("#lp-rtpend").checked);
       fields.forEach((f, i) => readField(f, `gf-${i}`, st));
       await S.ctl.setConfig({ settings: st });
       toast("Saved");

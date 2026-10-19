@@ -91,6 +91,32 @@ pub fn ladder_svg_calls(bytes: &[u8], calls: &str) -> Result<String, JsError> {
     })
 }
 
+/// Ladder SVG with options: one call (-1 = all) or several ("0,2,5"), and
+/// RTP streams in time order or after the SIP.
+#[wasm_bindgen]
+pub fn ladder_svg_opts(
+    bytes: &[u8],
+    call: i32,
+    calls: &str,
+    rtp_at_end: bool,
+) -> Result<String, JsError> {
+    with_report(bytes, |r| {
+        render_svg(
+            r,
+            &LadderOptions {
+                call: call_opt(r, call),
+                calls: calls
+                    .split(',')
+                    .filter_map(|x| x.trim().parse().ok())
+                    .filter(|c: &usize| *c < r.calls.len())
+                    .collect(),
+                rtp_at_end,
+                ..Default::default()
+            },
+        )
+    })
+}
+
 /// One RTP stream as a WAV when it is G.711; otherwise an error whose
 /// message is JSON {"codec", "frames": [[ts_offset, base64], ...]} for
 /// decoding in the page (Opus through WebCodecs).

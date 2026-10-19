@@ -26,6 +26,7 @@ const HELP_JS: &str = include_str!("../../../web/help.js");
 const EXPLAIN_JS: &str = include_str!("../../../web/explain.js");
 const FILTER_JS: &str = include_str!("../../../web/filter.js");
 const FINDINGS_I18N_JS: &str = include_str!("../../../web/findings-i18n.js");
+const FILTER_SUGGEST_JS: &str = include_str!("../../../web/filter-suggest.js");
 
 fn header(k: &str, v: &str) -> Header {
     Header::from_bytes(k.as_bytes(), v.as_bytes()).expect("valid header")
@@ -260,6 +261,7 @@ fn handle(
                                     v.split(',').filter_map(|x| x.trim().parse().ok()).collect()
                                 })
                                 .unwrap_or_default(),
+                            rtp_at_end: q.get("rtp").map(|v| v == "end").unwrap_or(false),
                             ..Default::default()
                         },
                     )
@@ -424,6 +426,9 @@ fn handle(
                 "filter.js" => ok_bytes(FILTER_JS.as_bytes().to_vec(), "text/javascript"),
                 "findings-i18n.js" => {
                     ok_bytes(FINDINGS_I18N_JS.as_bytes().to_vec(), "text/javascript")
+                }
+                "filter-suggest.js" => {
+                    ok_bytes(FILTER_SUGGEST_JS.as_bytes().to_vec(), "text/javascript")
                 }
                 _ => err(404, "not found"),
             }

@@ -7,7 +7,7 @@
 //
 // A bare word or a quoted string searches the whole message text.
 
-const FIELDS = {
+export const FIELDS = {
   "ip.addr": (r) => [host(r.src), host(r.dst)],
   "ip.src": (r) => [host(r.src)],
   "ip.dst": (r) => [host(r.dst)],

@@ -223,14 +223,13 @@
     </section>
 
     <!-- SIP trace -->
-    <datalist id="filter-fields"></datalist>
     <section class="ws-page trace-page" data-page="trace" hidden>
       <div class="page-head">
         <h1>SIP trace</h1>
         <div class="row">
           <select id="tr-call" aria-label="Show messages of"><option value="">All messages</option></select>
           <label class="check" title="Calls joined by a transfer (Replaces, Refer-To) are shown together"><input type="checkbox" id="tr-legs" checked> Related legs</label>
-          <input id="tr-filter" class="dfilter" placeholder="Filter: text, or ip.addr==10.0.0.5 && sip.status>=400" spellcheck="false" aria-label="Filter trace" list="filter-fields">
+          <input id="tr-filter" class="dfilter" placeholder="Filter: text, or ip.addr==10.0.0.5 && sip.status>=400" spellcheck="false" aria-label="Filter trace">
           <label class="check"><input type="checkbox" id="tr-hide-reg" checked> Hide REGISTER</label>
           <label class="check"><input type="checkbox" id="tr-hide-opt" checked> Hide OPTIONS and NOTIFY</label>
           <button type="button" class="btn small" id="tr-pause" aria-pressed="false">Pause</button>
@@ -274,7 +273,7 @@
         <div class="an-grid">
           <aside class="calls" aria-label="Calls in the capture">
             <div class="calls-head"><h2>Dialogs</h2><span class="grow"></span><button type="button" class="linklike" id="calls-clear" hidden>Clear selection</button><span id="calls-count"></span></div>
-            <div class="an-filter"><input id="an-filter" class="dfilter" placeholder="Filter: ip.addr==10.0.0.5, sip.method==INVITE, sip.status>=400, text" spellcheck="false" aria-label="Filter messages" list="filter-fields"><span class="hint" id="an-filter-info"></span></div>
+            <div class="an-filter"><input id="an-filter" class="dfilter" placeholder="Filter: ip.addr==10.0.0.5, sip.method==INVITE, sip.status>=400, text" spellcheck="false" aria-label="Filter messages"><span class="hint" id="an-filter-info"></span></div>
             <p class="calls-hint hint">Tick two or more to see the call legs in one ladder.</p>
             <ol id="calls"></ol>
           </aside>

@@ -825,3 +825,13 @@ table.hist tbody tr.sel { background: var(--mark-soft); }
 #tab-media tr[data-stream] { cursor: pointer; }
 #tab-media tr[data-stream].sel { background: var(--mark-soft); }
 .ladder .st-ladder .stream.sel .hit { fill: var(--mark); fill-opacity: 0.35; }
+
+/* Filter query helper */
+.fsuggest { position: absolute; z-index: 40; max-height: 320px; overflow-y: auto; background: var(--panel); border: 1px solid var(--rule-strong); border-radius: 8px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16); padding: 4px; font-size: 12.5px; }
+.fs-item { display: flex; align-items: baseline; gap: 12px; padding: 4px 8px; border-radius: 5px; cursor: pointer; white-space: nowrap; }
+.fs-item.on, .fs-item:hover { background: var(--mark-soft); }
+.fs-l { font-family: var(--mono); font-weight: 600; min-width: 90px; }
+.fs-d { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.fs-op .fs-l { color: var(--req); }
+.fs-join .fs-l { color: var(--end, #7c3aed); }
+.fs-value .fs-l { color: var(--ok); font-weight: 500; }

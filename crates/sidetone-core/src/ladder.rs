@@ -13,6 +13,8 @@ pub struct LadderOptions {
     /// Columns per IP instead of per IP:port. `None` picks automatically.
     pub group_by_ip: Option<bool>,
     pub include_rtp: bool,
+    /// RTP streams in a block after the SIP instead of at the moment they start.
+    pub rtp_at_end: bool,
 }
 
 impl Default for LadderOptions {
@@ -22,6 +24,7 @@ impl Default for LadderOptions {
             calls: Vec::new(),
             group_by_ip: None,
             include_rtp: true,
+            rtp_at_end: false,
         }
     }
 }
@@ -154,12 +157,35 @@ fn render_with(r: &Report, msgs: Vec<usize>, streams: Vec<usize>, opt: &LadderOp
     let left = 96.0;
     let top = 64.0;
     let row_h = 30.0;
-    let n_rows = msgs.len()
-        + if streams.is_empty() {
-            0
-        } else {
-            streams.len() + 1
-        };
+    // Rows in drawing order: by default each RTP stream sits where it starts
+    // among the SIP messages (after the 200 OK/ACK, before the BYE); optionally
+    // all streams go in a block after the signaling.
+    enum Row {
+        Msg(usize),
+        Stream(usize),
+        RtpHeader,
+    }
+    let mut rows: Vec<Row> = Vec::new();
+    if opt.rtp_at_end || streams.is_empty() {
+        rows.extend(msgs.iter().map(|&m| Row::Msg(m)));
+        if !streams.is_empty() {
+            rows.push(Row::RtpHeader);
+            rows.extend(streams.iter().map(|&st| Row::Stream(st)));
+        }
+    } else {
+        let mut ss: Vec<usize> = streams.clone();
+        ss.sort_by_key(|&i| r.streams[i].start_ns);
+        let mut k = 0;
+        for &m in &msgs {
+            while k < ss.len() && r.streams[ss[k]].start_ns < r.messages[m].ts_ns {
+                rows.push(Row::Stream(ss[k]));
+                k += 1;
+            }
+            rows.push(Row::Msg(m));
+        }
+        rows.extend(ss[k..].iter().map(|&st| Row::Stream(st)));
+    }
+    let n_rows = rows.len();
     let width = left + col_w * cols.len().max(1) as f64 + 20.0;
     let height = top + row_h * n_rows as f64 + 30.0;
     let x_of = |addr: &str| -> f64 {
@@ -246,9 +272,24 @@ fn render_with(r: &Report, msgs: Vec<usize>, streams: Vec<usize>, opt: &LadderOp
         .first()
         .map(|&i| r.messages[i].ts_ns)
         .unwrap_or(r.summary.start_ns);
-    for (row, &mi) in msgs.iter().enumerate() {
-        let m = &r.messages[mi];
+    for (row, item) in rows.iter().enumerate() {
         let y = top + row_h * row as f64 + 14.0;
+        let mi = match item {
+            Row::Msg(mi) => *mi,
+            Row::RtpHeader => {
+                let _ = write!(
+                    s,
+                    r#"<text class="t" x="8" y="{:.1}" font-size="11">RTP</text>"#,
+                    y + 4.0
+                );
+                continue;
+            }
+            Row::Stream(si) => {
+                stream_row(&mut s, r, *si, y, row_h, width, t0, &x_of);
+                continue;
+            }
+        };
+        let m = &r.messages[mi];
         let x1 = x_of(&m.src);
         let x2 = x_of(&m.dst);
         let cls = color_for(m.method.as_deref(), m.status);
@@ -314,55 +355,58 @@ fn render_with(r: &Report, msgs: Vec<usize>, streams: Vec<usize>, opt: &LadderOp
         s.push_str("</g>");
     }
 
-    if !streams.is_empty() {
-        let base = top + row_h * msgs.len() as f64 + 10.0;
-        let _ = write!(
-            s,
-            r#"<text class="t" x="8" y="{:.1}" font-size="11">RTP</text>"#,
-            base + 4.0
-        );
-        for (k, &si) in streams.iter().enumerate() {
-            let st = &r.streams[si];
-            let y = base + row_h * (k + 1) as f64;
-            let x1 = x_of(&st.src);
-            let x2 = x_of(&st.dst);
-            let mos = st.mos.map(|m| format!(" MOS {m:.1}")).unwrap_or_default();
-            let label = format!(
-                "{} {} pkts loss {:.1}% jit {:.0}ms{mos}",
-                st.codec, st.packets, st.loss_pct, st.jitter_ms
-            );
-            let rel = (st.start_ns - t0) as f64 / 1e9;
-            let _ = write!(
-                s,
-                r#"<g class="stream" data-stream="{si}"><title>{} → {} SSRC {}</title><rect class="hit" x="0" y="{:.1}" width="{width:.0}" height="{row_h:.0}"/><text class="t" x="8" y="{:.1}" font-size="11">+{rel:.3}s</text>"#,
-                esc(&st.src),
-                esc(&st.dst),
-                esc(&st.ssrc),
-                y - row_h / 2.0 - 2.0,
-                y + 4.0
-            );
-            if (x1 - x2).abs() < 1.0 {
-                let _ = write!(
-                    s,
-                    r#"<g class="st-rtp"><text class="lbl st-rtp" x="{:.1}" y="{y:.1}">⟲ {}</text></g>"#,
-                    x1 + 6.0,
-                    esc(&label)
-                );
-            } else {
-                let mid = (x1 + x2) / 2.0;
-                let _ = write!(
-                    s,
-                    r#"<g class="st-rtp"><line x1="{x1:.1}" y1="{y:.1}" x2="{:.1}" y2="{y:.1}" stroke-width="3" stroke-dasharray="10 5" marker-end="url(#ahr)"/><text class="lbl st-rtp" x="{mid:.1}" y="{:.1}" text-anchor="middle" font-size="11">{}</text></g>"#,
-                    if x2 > x1 { x2 - 2.0 } else { x2 + 2.0 },
-                    y - 8.0,
-                    esc(&label)
-                );
-            }
-            s.push_str("</g>");
-        }
-    }
     s.push_str("</svg>");
     s
+}
+
+/// One RTP stream as a dashed arrow with its quality summary.
+#[allow(clippy::too_many_arguments)]
+fn stream_row(
+    s: &mut String,
+    r: &Report,
+    si: usize,
+    y: f64,
+    row_h: f64,
+    width: f64,
+    t0: i64,
+    x_of: &dyn Fn(&str) -> f64,
+) {
+    let st = &r.streams[si];
+    let x1 = x_of(&st.src);
+    let x2 = x_of(&st.dst);
+    let mos = st.mos.map(|m| format!(" MOS {m:.1}")).unwrap_or_default();
+    let label = format!(
+        "{} {} pkts loss {:.1}% jit {:.0}ms{mos}",
+        st.codec, st.packets, st.loss_pct, st.jitter_ms
+    );
+    let rel = (st.start_ns - t0) as f64 / 1e9;
+    let _ = write!(
+        s,
+        r#"<g class="stream" data-stream="{si}"><title>RTP {} → {} SSRC {}</title><rect class="hit" x="0" y="{:.1}" width="{width:.0}" height="{row_h:.0}"/><text class="t" x="8" y="{:.1}" font-size="11">+{rel:.3}s</text>"#,
+        esc(&st.src),
+        esc(&st.dst),
+        esc(&st.ssrc),
+        y - 18.0,
+        y + 4.0
+    );
+    if (x1 - x2).abs() < 1.0 {
+        let _ = write!(
+            s,
+            r#"<g class="st-rtp"><text class="lbl st-rtp" x="{:.1}" y="{y:.1}">⟲ {}</text></g>"#,
+            x1 + 6.0,
+            esc(&label)
+        );
+    } else {
+        let mid = (x1 + x2) / 2.0;
+        let _ = write!(
+            s,
+            r#"<g class="st-rtp"><line x1="{x1:.1}" y1="{y:.1}" x2="{:.1}" y2="{y:.1}" stroke-width="3" stroke-dasharray="10 5" marker-end="url(#ahr)"/><text class="lbl st-rtp" x="{mid:.1}" y="{:.1}" text-anchor="middle" font-size="11">{}</text></g>"#,
+            if x2 > x1 { x2 - 2.0 } else { x2 + 2.0 },
+            y - 5.0,
+            esc(&label)
+        );
+    }
+    s.push_str("</g>");
 }
 
 fn ua_for(r: &Report, msgs: &[usize], col: &str, by_ip: bool) -> Option<String> {
