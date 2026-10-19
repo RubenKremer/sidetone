@@ -55,6 +55,7 @@ const H = {
         "NAT asks STUN servers which public address they see; different ports for different servers mean a symmetric NAT, the classic cause of one-way audio.",
         "Audio lets you pick the microphone and speaker and play the microphone back to check levels.",
         "Capture on an interface records other hosts' traffic (a PBX, an SBC, a phone on a mirrored port) with a BPF filter, shows SIP as it passes, and opens the result in Analysis. It needs Npcap on Windows and capture rights on Linux and macOS; the message says what to change.",
+        "Phone provisioning fetches what a desk phone with a given MAC would get from a TFTP or HTTP server (tftp://10.0.0.5/SEP{MAC}.cnf.xml) and shows the error or the account the file describes; Ask DHCP shows the server the network hands to phones (options 66, 150, 160). A capture of a phone booting shows the same in Analysis.",
       ]],
       ["Common problems", [
         "Registration failed 401/403: check user, authentication user and password. 404: the user does not exist on that domain.",
@@ -124,6 +125,7 @@ const H = {
       ]],
       ["Diagnóstico", [
         "Alcance do servidor envia OPTIONS: qualquer resposta, até 404 ou 405, prova que o servidor está alcançável. Silêncio aponta para endereço, porta, firewall ou interface de rede.",
+        "Provisionamento de telefones busca o que um telefone de mesa com um MAC receberia de um servidor TFTP ou HTTP (tftp://10.0.0.5/SEP{MAC}.cnf.xml) e mostra o erro ou a conta que o arquivo descreve; Perguntar ao DHCP mostra o servidor que a rede entrega aos telefones (opções 66, 150, 160). Uma captura de um telefone iniciando mostra o mesmo em Análise.",
         "DNS mostra como um domínio é resolvido (NAPTR, SRV, A/AAAA) e qual endereço o Sidetone usa.",
         "NAT pergunta a servidores STUN qual endereço público eles veem; portas diferentes para servidores diferentes indicam NAT simétrico, a causa clássica de áudio de um lado só.",
         "Áudio permite escolher microfone e alto-falante e ouvir o próprio microfone para conferir os níveis.",
@@ -197,6 +199,7 @@ const H = {
       ]],
       ["Diagnóstico", [
         "Alcance del servidor envía OPTIONS: cualquier respuesta, incluso 404 o 405, prueba que el servidor es alcanzable. El silencio apunta a dirección, puerto, firewall o interfaz de red.",
+        "Aprovisionamiento de teléfonos descarga lo que recibiría un teléfono de sobremesa con una MAC desde un servidor TFTP o HTTP (tftp://10.0.0.5/SEP{MAC}.cnf.xml) y muestra el error o la cuenta que describe el archivo; Preguntar al DHCP muestra el servidor que la red da a los teléfonos (opciones 66, 150, 160). Una captura de un teléfono arrancando muestra lo mismo en Análisis.",
         "DNS muestra cómo se resuelve un dominio (NAPTR, SRV, A/AAAA) y qué dirección usa Sidetone.",
         "NAT pregunta a servidores STUN qué dirección pública ven; puertos distintos para servidores distintos indican NAT simétrico, la causa clásica del audio en un solo sentido.",
         "Audio permite elegir micrófono y altavoz y escuchar tu micrófono para comprobar niveles.",
@@ -270,6 +273,7 @@ const H = {
       ]],
       ["Diagnose", [
         "Erreichbarkeit sendet OPTIONS: jede Antwort, auch 404 oder 405, beweist die Erreichbarkeit. Stille deutet auf Adresse, Port, Firewall oder Netzwerkschnittstelle.",
+        "Telefon-Provisionierung holt, was ein Tischtelefon mit einer bestimmten MAC von einem TFTP- oder HTTP-Server bekäme (tftp://10.0.0.5/SEP{MAC}.cnf.xml), und zeigt den Fehler oder das beschriebene Konto; DHCP fragen zeigt den Server, den das Netz den Telefonen gibt (Optionen 66, 150, 160). Ein Mitschnitt eines startenden Telefons zeigt dasselbe in der Analyse.",
         "DNS zeigt, wie eine Domain aufgelöst wird (NAPTR, SRV, A/AAAA) und welche Adresse Sidetone nutzt.",
         "NAT fragt STUN-Server nach der öffentlichen Adresse; unterschiedliche Ports je Server bedeuten symmetrisches NAT, die klassische Ursache für einseitiges Audio.",
         "Audio wählt Mikrofon und Lautsprecher und spielt das Mikrofon zur Pegelkontrolle ab.",

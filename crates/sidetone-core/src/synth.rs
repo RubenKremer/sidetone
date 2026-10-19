@@ -121,6 +121,13 @@ impl Synth {
             .push((BASE_NS + (self.t0_ms + t_ms) * 1_000_000, pkt));
     }
 
+    /// Any UDP datagram.
+    pub fn udp(&mut self, t_ms: i64, src: &str, dst: &str, payload: &[u8]) {
+        let pkt = build_udp_packet(sa(src), sa(dst), payload);
+        self.pkts
+            .push((BASE_NS + (self.t0_ms + t_ms) * 1_000_000, pkt));
+    }
+
     /// RTP stream: `count` packets every 20 ms. `lose` drops given indices, `jitter_ms`
     /// adds a deterministic pseudo-random delay, `dtmf` sends digits at given packet indices.
     #[allow(clippy::too_many_arguments)]
@@ -865,6 +872,140 @@ pub fn scenario_register_timeout(s: &mut Synth) {
     }
 }
 
+fn dhcp_msg(
+    op: u8,
+    kind: u8,
+    xid: u32,
+    mac: [u8; 6],
+    yiaddr: [u8; 4],
+    opts: &[(u8, Vec<u8>)],
+) -> Vec<u8> {
+    let mut p = vec![0u8; 236];
+    p[0] = op;
+    p[1] = 1;
+    p[2] = 6;
+    p[4..8].copy_from_slice(&xid.to_be_bytes());
+    p[16..20].copy_from_slice(&yiaddr);
+    p[28..34].copy_from_slice(&mac);
+    p.extend_from_slice(&[99, 130, 83, 99, 53, 1, kind]);
+    for (c, v) in opts {
+        p.push(*c);
+        p.push(v.len() as u8);
+        p.extend_from_slice(v);
+    }
+    p.push(255);
+    p
+}
+
+fn tftp_rrq(file: &str) -> Vec<u8> {
+    let mut p = vec![0, 1];
+    for part in [file, "octet"] {
+        p.extend_from_slice(part.as_bytes());
+        p.push(0);
+    }
+    p
+}
+
+/// Two Cisco phones booting: DHCP with and without option 150, TFTP
+/// downloads that work, a file the server does not have, and a server that
+/// does not answer.
+pub fn scenario_phone_boot(s: &mut Synth) {
+    let base = 120_000;
+    let srv = "10.50.0.5";
+    // Phone A: DHCP gives option 150, its file downloads (two blocks).
+    let a_mac = [0x00, 0x1b, 0x54, 0xaa, 0xbb, 0xcc];
+    let ask = vec![1, 3, 6, 15, 66, 150];
+    s.udp(
+        base,
+        "0.0.0.0:68",
+        "255.255.255.255:67",
+        &dhcp_msg(1, 1, 0x1001, a_mac, [0; 4], &[(55, ask.clone())]),
+    );
+    let o150 = vec![(150, vec![10, 50, 0, 5]), (54, vec![10, 50, 0, 1])];
+    s.udp(
+        base + 5,
+        "10.50.0.1:67",
+        "255.255.255.255:68",
+        &dhcp_msg(2, 2, 0x1001, a_mac, [10, 50, 0, 20], &o150),
+    );
+    s.udp(
+        base + 10,
+        "0.0.0.0:68",
+        "255.255.255.255:67",
+        &dhcp_msg(1, 3, 0x1001, a_mac, [0; 4], &[(55, ask.clone())]),
+    );
+    s.udp(
+        base + 15,
+        "10.50.0.1:67",
+        "255.255.255.255:68",
+        &dhcp_msg(2, 5, 0x1001, a_mac, [10, 50, 0, 20], &o150),
+    );
+    let pa = "10.50.0.20:50001";
+    s.udp(
+        base + 300,
+        pa,
+        &format!("{srv}:69"),
+        &tftp_rrq("CTLSEP001B54AABBCC.tlv"),
+    );
+    let mut e = vec![0, 5, 0, 1];
+    e.extend_from_slice(b"File not found\0");
+    s.udp(base + 302, &format!("{srv}:40001"), pa, &e);
+    let pa2 = "10.50.0.20:50002";
+    s.udp(
+        base + 400,
+        pa2,
+        &format!("{srv}:69"),
+        &tftp_rrq("SEP001B54AABBCC.cnf.xml"),
+    );
+    let mut d1 = vec![0, 3, 0, 1];
+    d1.extend(std::iter::repeat_n(b'x', 512));
+    s.udp(base + 402, &format!("{srv}:40002"), pa2, &d1);
+    s.udp(base + 403, pa2, &format!("{srv}:40002"), &[0, 4, 0, 1]);
+    let mut d2 = vec![0, 3, 0, 2];
+    d2.extend(std::iter::repeat_n(b'y', 100));
+    s.udp(base + 405, &format!("{srv}:40002"), pa2, &d2);
+    s.udp(base + 406, pa2, &format!("{srv}:40002"), &[0, 4, 0, 2]);
+    // Phone B: the DHCP scope has no option 150 or 66.
+    let b_mac = [0x00, 0x1b, 0x54, 0xdd, 0xee, 0xff];
+    s.udp(
+        base + 1000,
+        "0.0.0.0:68",
+        "255.255.255.255:67",
+        &dhcp_msg(1, 3, 0x2002, b_mac, [0; 4], &[(55, ask)]),
+    );
+    s.udp(
+        base + 1005,
+        "10.50.0.1:67",
+        "255.255.255.255:68",
+        &dhcp_msg(
+            2,
+            5,
+            0x2002,
+            b_mac,
+            [10, 50, 0, 21],
+            &[(54, vec![10, 50, 0, 1])],
+        ),
+    );
+    // Set by hand, the server has no file for it, and an old server is gone.
+    let pb = "10.50.0.21:50010";
+    s.udp(
+        base + 1300,
+        pb,
+        &format!("{srv}:69"),
+        &tftp_rrq("SEP001B54DDEEFF.cnf.xml"),
+    );
+    s.udp(base + 1302, &format!("{srv}:40003"), pb, &e);
+    let pb2 = "10.50.0.21:50011";
+    for t in [1500, 2500, 4500] {
+        s.udp(
+            base + t,
+            pb2,
+            "10.50.0.9:69",
+            &tftp_rrq("SEP001B54DDEEFF.cnf.xml"),
+        );
+    }
+}
+
 /// SRTP offered, plain RTP answered.
 pub fn scenario_srtp_mismatch(s: &mut Synth) {
     let a = "10.40.0.2:5060";
@@ -1250,6 +1391,10 @@ pub const SCENARIOS: &[(&str, &str)] = &[
         "REGISTER retransmitted to a registrar that never answers",
     ),
     ("srtp-mismatch", "SRTP offered, plain RTP answered"),
+    (
+        "phone-boot",
+        "Cisco phones booting: DHCP option 150, TFTP downloads, a missing SEP file and a dead server",
+    ),
     ("demo", "All scenarios in one capture"),
 ];
 
@@ -1264,6 +1409,7 @@ pub fn generate(name: &str) -> Option<Vec<u8>> {
         "register-timeout" => scenario_register_timeout(&mut s),
         "srtp-mismatch" => scenario_srtp_mismatch(&mut s),
         "sbc-legs" => scenario_sbc_legs(&mut s),
+        "phone-boot" => scenario_phone_boot(&mut s),
         "demo" => {
             scenario_good_call(&mut s);
             scenario_nat_one_way(&mut s);
@@ -1272,6 +1418,7 @@ pub fn generate(name: &str) -> Option<Vec<u8>> {
             scenario_register_timeout(&mut s);
             scenario_srtp_mismatch(&mut s);
             scenario_sbc_legs(&mut s);
+            scenario_phone_boot(&mut s);
         }
         _ => return None,
     }
@@ -1554,5 +1701,43 @@ mod g711_tests {
             assert!((u - x as i32).abs() <= tol, "ulaw {x} -> {u}");
             assert!((a - x as i32).abs() <= tol, "alaw {x} -> {a}");
         }
+    }
+
+    #[test]
+    fn phone_boot_dhcp_and_tftp() {
+        let r = crate::analyze_bytes(&super::generate("phone-boot").unwrap()).unwrap();
+        let p = &r.provisioning;
+        let tftp: Vec<(&str, &str, u64)> = p
+            .iter()
+            .filter(|e| e.kind == "tftp")
+            .map(|e| (e.file.as_deref().unwrap(), e.outcome.as_str(), e.bytes))
+            .collect();
+        assert_eq!(
+            tftp,
+            vec![
+                ("CTLSEP001B54AABBCC.tlv", "error", 0),
+                ("SEP001B54AABBCC.cnf.xml", "ok", 612),
+                ("SEP001B54DDEEFF.cnf.xml", "error", 0),
+                ("SEP001B54DDEEFF.cnf.xml", "no answer", 0),
+            ]
+        );
+        let dhcp: Vec<_> = p.iter().filter(|e| e.kind == "dhcp").collect();
+        assert_eq!(dhcp.len(), 2);
+        assert_eq!(dhcp[0].option150, vec!["10.50.0.5"]);
+        let rules: Vec<&str> = r.findings.iter().map(|f| f.rule.as_str()).collect();
+        for want in [
+            "dhcp.tftp",
+            "dhcp.no_tftp",
+            "tftp.ok",
+            "tftp.optional_missing",
+            "tftp.error",
+            "tftp.no_answer",
+        ] {
+            assert!(rules.contains(&want), "{want} missing in {rules:?}");
+        }
+        assert!(r
+            .findings
+            .iter()
+            .any(|f| f.rule == "tftp.error" && f.detail.contains("MAC")));
     }
 }

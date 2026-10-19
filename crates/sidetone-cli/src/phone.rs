@@ -410,6 +410,7 @@ impl Phone {
                 },
                 provision_url: stored.provision_url.clone(),
                 provision_tls_verify: stored.provision_tls_verify,
+                provision_mac: stored.provision_mac.clone(),
             };
             if accounts_json_equal(&merged, &c.accounts[idx]) {
                 return Ok(());
@@ -502,7 +503,7 @@ impl Phone {
     }
 
     fn finish_provision_fetch(p: &Phone, id: &str) {
-        let (url, tls_verify) = {
+        let (url, tls_verify, mac) = {
             let cfg = p.config.lock().unwrap();
             let Some(acc) = cfg.accounts.iter().find(|a| a.id == id) else {
                 PROVISION
@@ -526,10 +527,10 @@ impl Phone {
                 );
                 return;
             };
-            (url, acc.provision_tls_verify)
+            (url, acc.provision_tls_verify, acc.provision_mac.clone())
         };
 
-        let fetch_result = fetch_provision(&url, tls_verify);
+        let fetch_result = fetch_provision(&url, tls_verify, mac.as_deref());
 
         let need_rerun = {
             let mut guard = PROVISION.lock().unwrap();

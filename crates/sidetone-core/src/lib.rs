@@ -4,6 +4,7 @@
 pub mod ai;
 pub mod analysis;
 pub mod audio;
+pub mod bootprov;
 pub mod export;
 pub mod ladder;
 pub mod net;

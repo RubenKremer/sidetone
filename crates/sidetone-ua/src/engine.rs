@@ -53,6 +53,9 @@ pub struct AccountCfg {
     pub provision_url: Option<String>,
     #[serde(default = "default_provision_tls_verify")]
     pub provision_tls_verify: bool,
+    /// MAC the provisioning URL is fetched for (`{mac}`); empty: this computer's.
+    #[serde(default)]
+    pub provision_mac: Option<String>,
 }
 
 fn default_provision_tls_verify() -> bool {
@@ -73,6 +76,7 @@ impl Default for AccountCfg {
             profile: Profile::default(),
             provision_url: None,
             provision_tls_verify: true,
+            provision_mac: None,
         }
     }
 }

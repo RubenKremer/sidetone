@@ -14,8 +14,54 @@ use ureq::{AgentBuilder, RedirectAuthHeaders};
 const MAX_BODY: usize = 2 * 1024 * 1024;
 const USER_AGENT: &str = concat!("Sidetone/", env!("CARGO_PKG_VERSION"));
 
-/// Downloads provisioning XML and returns native `parse` JSON (does not persist).
-pub fn fetch_provision(url: &str, tls_verify: bool) -> Result<Value> {
+/// The device MAC a provisioning URL is fetched for: the account's own (any
+/// separators), else this computer's first network card. 12 lower-case hex digits.
+pub fn device_mac(stored: Option<&str>) -> String {
+    let clean = |m: &str| -> Option<String> {
+        let h: String = m
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        (h.len() == 12).then_some(h)
+    };
+    stored
+        .and_then(clean)
+        .or_else(|| {
+            mac_address::get_mac_address()
+                .ok()
+                .flatten()
+                .map(|m| m.bytes().iter().map(|b| format!("{b:02x}")).collect())
+        })
+        .unwrap_or_else(|| "000000000000".into())
+}
+
+/// The MAC as bytes, for DHCP.
+pub fn mac_bytes(mac: &str) -> [u8; 6] {
+    let mut out = [0u8; 6];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(mac.get(i * 2..i * 2 + 2).unwrap_or("00"), 16).unwrap_or(0);
+    }
+    out
+}
+
+/// Fills the MAC into a URL the way phones do: `{mac}`, `$mac`, `$MAC` and
+/// Polycom's `[PHONE_MAC_ADDRESS]` give lower case, `{MAC}` upper case.
+pub fn expand_url(url: &str, mac: &str) -> String {
+    url.replace("{MAC}", &mac.to_ascii_uppercase())
+        .replace("{mac}", mac)
+        .replace("$MAC", mac)
+        .replace("$mac", mac)
+        .replace("[PHONE_MAC_ADDRESS]", mac)
+}
+
+/// Downloads a provisioning file over HTTP(S) or TFTP (`url` already expanded).
+pub fn fetch_raw(url: &str, tls_verify: bool) -> Result<Vec<u8>> {
+    if url.len() > 7 && url[..7].eq_ignore_ascii_case("tftp://") {
+        let (host, port, path) = crate::tftp::parse_url(url).map_err(|e| anyhow!("{e}"))?;
+        return crate::tftp::get(&host, port, &path, MAX_BODY, Duration::from_secs(3))
+            .map_err(|e| anyhow!("{e} ({url})"));
+    }
     let (fetch_url, auth, https) = prepare_fetch_url(url)?;
     let agent = build_agent(tls_verify, https);
     let mut req = agent.get(&fetch_url);
@@ -46,9 +92,17 @@ pub fn fetch_provision(url: &str, tls_verify: bool) -> Result<Value> {
     if body.len() > MAX_BODY {
         return Err(anyhow!("provisioning body exceeds {} bytes", MAX_BODY));
     }
-    let xml =
+    Ok(body)
+}
+
+/// Downloads a provisioning file and returns native `parse` JSON (does not
+/// persist). `mac` fills `{mac}` and the like (None: this computer's).
+pub fn fetch_provision(url: &str, tls_verify: bool, mac: Option<&str>) -> Result<Value> {
+    let url = expand_url(url, &device_mac(mac));
+    let body = fetch_raw(&url, tls_verify)?;
+    let text =
         String::from_utf8(body).map_err(|e| anyhow!("provisioning body is not UTF-8: {e}"))?;
-    sidetone_core::provision::parse(&xml, "native").map_err(|e| anyhow!("{e}"))
+    sidetone_core::provision::parse(&text, "native").map_err(|e| anyhow!("{e}"))
 }
 
 fn build_agent(tls_verify: bool, https: bool) -> ureq::Agent {
@@ -211,6 +265,7 @@ pub(crate) fn account_from_provision_json(
         },
         provision_url: stored.provision_url.clone(),
         provision_tls_verify: stored.provision_tls_verify,
+        provision_mac: stored.provision_mac.clone(),
     })
 }
 
@@ -250,7 +305,7 @@ mod tests {
             *seen2.lock().unwrap() = user_agent(&req);
             let _ = req.respond(Response::from_string(MIN_XML));
         });
-        fetch_provision(&format!("{base}/cfg.xml"), true).expect("provision");
+        fetch_provision(&format!("{base}/cfg.xml"), true, None).expect("provision");
         let ua = seen.lock().unwrap().clone().unwrap_or_default();
         assert_eq!(ua, format!("Sidetone/{}", env!("CARGO_PKG_VERSION")));
         assert!(!ua.to_ascii_lowercase().contains("ureq"));
@@ -258,7 +313,7 @@ mod tests {
 
     #[test]
     fn rejects_non_http_scheme_without_server() {
-        let err = fetch_provision("ftp://example.com/cfg.xml", true).unwrap_err();
+        let err = fetch_provision("ftp://example.com/cfg.xml", true, None).unwrap_err();
         assert!(err.to_string().contains("http or https"));
     }
 
@@ -281,7 +336,7 @@ mod tests {
             }
         });
         let url = format!("http://{addr}/big");
-        let err = fetch_provision(&url, true).unwrap_err();
+        let err = fetch_provision(&url, true, None).unwrap_err();
         *stop.lock().unwrap() = true;
         assert!(err.to_string().contains("exceeds"));
     }
@@ -328,7 +383,7 @@ mod tests {
             base.trim_start_matches("http://")
         );
         let authed = format!("{authed}/cfg");
-        let _ = fetch_provision(&authed, true).expect("provision");
+        let _ = fetch_provision(&authed, true, None).expect("provision");
         assert!(
             *auth_seen.lock().unwrap(),
             "Authorization must reach same-host redirect target"
@@ -359,7 +414,7 @@ mod tests {
             "http://alice:secret@{}/x",
             outer.trim_start_matches("http://")
         );
-        let _ = fetch_provision(&url, true).expect("provision");
+        let _ = fetch_provision(&url, true, None).expect("provision");
         assert!(
             !*inner_auth.lock().unwrap(),
             "Authorization must not follow cross-host redirect"

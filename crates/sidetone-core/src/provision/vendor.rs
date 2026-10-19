@@ -15,6 +15,9 @@ pub enum Format {
     Sidetone,
     Yealink,
     Polycom,
+    /// Cisco `SEP<MAC>.cnf.xml` (SIP firmware, as Asterisk, FreeSWITCH or
+    /// FreePBX serve it) or the older text `SIP<MAC>.cnf` of the 79xx.
+    Cisco,
 }
 
 impl Format {
@@ -23,6 +26,7 @@ impl Format {
             Format::Sidetone => "Sidetone",
             Format::Yealink => "Yealink",
             Format::Polycom => "Polycom",
+            Format::Cisco => "Cisco",
         }
     }
 }
@@ -35,6 +39,9 @@ pub fn detect(text: &str) -> Format {
         if lower.contains("<sidetone-provision") {
             return Format::Sidetone;
         }
+        if lower.contains("<siplines") || lower.contains("<sipprofile") {
+            return Format::Cisco;
+        }
         if lower.contains("<polycomconfig")
             || lower.contains(" reg.1.")
             || lower.contains("voipprot.")
@@ -42,6 +49,12 @@ pub fn detect(text: &str) -> Format {
             return Format::Polycom;
         }
         return Format::Sidetone;
+    }
+    if t.lines().any(|l| {
+        let l = l.trim_start().to_ascii_lowercase();
+        l.starts_with("line1_name") || l.starts_with("proxy1_address")
+    }) {
+        return Format::Cisco;
     }
     if t.starts_with("#!version") || t.lines().any(|l| l.trim_start().starts_with("account.")) {
         return Format::Yealink;
@@ -276,7 +289,7 @@ fn polycom_attrs(xml: &str) -> Result<HashMap<String, String>, String> {
                 for a in e.attributes().flatten() {
                     let k = String::from_utf8_lossy(a.key.as_ref()).to_ascii_lowercase();
                     let v = a
-                        .unescape_value()
+                        .normalized_value(quick_xml::XmlVersion::Explicit1_0)
                         .map(|v| v.into_owned())
                         .map_err(|e| format!("malformed XML: {e}"))?;
                     out.insert(k, v);
@@ -443,6 +456,248 @@ pub fn polycom(xml: &str) -> Result<HashMap<String, String>, String> {
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// Cisco
+
+/// Maps the first SIP line of a Cisco configuration, XML or the old text form.
+pub fn cisco(text: &str) -> Result<HashMap<String, String>, String> {
+    if text.trim_start().starts_with('<') {
+        cisco_xml(text)
+    } else {
+        cisco_text(text)
+    }
+}
+
+/// Text of every element by its path (`device/sipProfile/...`), first value
+/// wins, plus the children of each `<line>` in order.
+type CiscoDoc = (HashMap<String, String>, Vec<HashMap<String, String>>);
+
+fn cisco_collect(xml: &str) -> Result<CiscoDoc, String> {
+    let lower = xml.to_ascii_lowercase();
+    if lower.contains("<!doctype") || lower.contains("<!entity") {
+        return Err("DOCTYPE or ENTITY declarations are not allowed".into());
+    }
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut path: Vec<String> = Vec::new();
+    let mut paths: HashMap<String, String> = HashMap::new();
+    let mut lines: Vec<HashMap<String, String>> = Vec::new();
+    let mut line_depth: Option<usize> = None;
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_ascii_lowercase();
+                path.push(name.clone());
+                if name == "line" && line_depth.is_none() {
+                    line_depth = Some(path.len());
+                    let mut m = HashMap::new();
+                    for a in e.attributes().flatten() {
+                        let k = String::from_utf8_lossy(a.key.as_ref()).to_ascii_lowercase();
+                        if let Ok(v) = a.normalized_value(quick_xml::XmlVersion::Explicit1_0) {
+                            m.insert(format!("@{k}"), v.into_owned());
+                        }
+                    }
+                    lines.push(m);
+                }
+            }
+            Ok(Event::Text(t)) => {
+                let v = t
+                    .decode()
+                    .map_err(|e| format!("malformed XML: {e}"))?
+                    .into_owned();
+                let key = path.join("/");
+                paths.entry(key).or_insert(v.clone());
+                if let (Some(d), Some(l)) = (line_depth, lines.last_mut()) {
+                    if path.len() == d + 1 {
+                        l.entry(path[d].clone()).or_insert(v);
+                    }
+                }
+            }
+            Ok(Event::End(_)) => {
+                if line_depth == Some(path.len()) {
+                    line_depth = None;
+                }
+                path.pop();
+            }
+            Ok(Event::DocType(_)) => return Err("DOCTYPE is not allowed".into()),
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(e) => return Err(format!("malformed XML: {e}")),
+        }
+        buf.clear();
+    }
+    Ok((paths, lines))
+}
+
+fn cisco_xml(xml: &str) -> Result<HashMap<String, String>, String> {
+    let (paths, lines) = cisco_collect(xml)?;
+    let find = |suffix: &str| {
+        let suffix = suffix.to_ascii_lowercase();
+        paths
+            .iter()
+            .filter(|(k, v)| {
+                (k.ends_with(&format!("/{suffix}")) || **k == suffix) && !v.trim().is_empty()
+            })
+            .min_by_key(|(k, _)| k.len())
+            .map(|(_, v)| v.trim().to_string())
+    };
+    // A line key (featureID 9, or no featureID) with a user name.
+    let line = lines
+        .iter()
+        .find(|l| {
+            l.get("featureid").is_none_or(|f| f.trim() == "9")
+                && l.get("name").is_some_and(|n| !n.trim().is_empty())
+        })
+        .ok_or("the Cisco file has no SIP line with a name")?;
+    let l = |k: &str| {
+        line.get(k)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let mut out = HashMap::new();
+    let user = l("name").unwrap_or_default();
+    put(&mut out, "user", &user);
+    if let Some(v) = l("authname") {
+        put(&mut out, "auth_user", v);
+    }
+    if let Some(v) = l("authpassword") {
+        put(&mut out, "password", v);
+    }
+    let label = l("featurelabel");
+    if let Some(v) = &label {
+        put(&mut out, "label", v);
+    }
+    put(
+        &mut out,
+        "display_name",
+        l("displayname").or(label).unwrap_or(user.clone()),
+    );
+    // The line's own proxy, or the call manager ("USECALLMANAGER").
+    let proxy = l("proxy").filter(|p| !p.eq_ignore_ascii_case("usecallmanager"));
+    let (host, port) = match proxy {
+        Some(p) => (Some(p), l("port")),
+        None => (find("processNodeName"), find("sipPort").or(l("port"))),
+    };
+    match host {
+        Some(h) => put(&mut out, "domain", with_port(&h, port.as_deref())),
+        None => return Err("the Cisco file has no proxy or processNodeName".into()),
+    }
+    // transportLayerProtocol: 1 TCP, 2 UDP, 4 TLS.
+    if let Some(t) = find("transportLayerProtocol") {
+        put(
+            &mut out,
+            "transport",
+            match t.as_str() {
+                "1" => "tcp",
+                "4" => "tls",
+                _ => "udp",
+            },
+        );
+    }
+    if let Some(e) = find("registerExpires").or(find("timerRegisterExpires")) {
+        put(&mut out, "expires", e);
+    }
+    if let Some(p) = find("outboundProxy").filter(|p| !p.eq_ignore_ascii_case("usecallmanager")) {
+        let port = find("outboundProxyPort");
+        put(&mut out, "outbound_proxy", with_port(&p, port.as_deref()));
+    }
+    if let Some(n) = l("messagesnumber").or(find("messagesNumber")) {
+        put(&mut out, "voicemail", n);
+    }
+    if let Some(v) = find("dtmfAvtPayload") {
+        put(&mut out, "dtmf_payload_type", v);
+    }
+    // Speed dials with BLF (featureID 21) watch other extensions.
+    let mut blf = Vec::new();
+    for x in &lines {
+        if x.get("featureid").map(|f| f.trim()) == Some("21") {
+            if let Some(v) = x
+                .get("speeddialnumber")
+                .or(x.get("name"))
+                .filter(|v| !v.trim().is_empty())
+            {
+                blf.push(v.trim().to_string());
+            }
+        }
+    }
+    for (i, b) in blf.iter().enumerate() {
+        put(&mut out, &format!("blf.{}", i + 1), b);
+    }
+    Ok(out)
+}
+
+/// The 79xx text form: `key: value` (or `key value`), `#` comments.
+fn cisco_text(text: &str) -> Result<HashMap<String, String>, String> {
+    let mut kv: HashMap<String, String> = HashMap::new();
+    for line in text.lines() {
+        let l = line.split('#').next().unwrap_or("").trim();
+        if l.is_empty() {
+            continue;
+        }
+        let (k, v) = match l.split_once(':') {
+            Some((k, v)) => (k, v),
+            None => match l.split_once(char::is_whitespace) {
+                Some(x) => x,
+                None => continue,
+            },
+        };
+        let v = v.trim().trim_matches('"').to_string();
+        kv.insert(k.trim().to_ascii_lowercase(), v);
+    }
+    let get = |k: &str| {
+        kv.get(k)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty() && v != "UNPROVISIONED")
+    };
+    let idx = (1..=6)
+        .find(|i| get(&format!("line{i}_name")).is_some())
+        .ok_or("the Cisco file has no lineN_name")?;
+    let mut out = HashMap::new();
+    let user = get(&format!("line{idx}_name")).unwrap_or_default();
+    put(&mut out, "user", &user);
+    if let Some(v) = get(&format!("line{idx}_authname")) {
+        put(&mut out, "auth_user", v);
+    }
+    if let Some(v) = get(&format!("line{idx}_password")) {
+        put(&mut out, "password", v);
+    }
+    let label = get(&format!("line{idx}_shortname"));
+    if let Some(v) = &label {
+        put(&mut out, "label", v);
+    }
+    put(
+        &mut out,
+        "display_name",
+        get(&format!("line{idx}_displayname"))
+            .or(label)
+            .unwrap_or(user.clone()),
+    );
+    let host = get(&format!("proxy{idx}_address")).or(get("proxy1_address"));
+    let port = get(&format!("proxy{idx}_port")).or(get("proxy1_port"));
+    match host {
+        Some(h) => put(&mut out, "domain", with_port(&h, port.as_deref())),
+        None => return Err("the Cisco file has no proxyN_address".into()),
+    }
+    if let Some(p) = get("outbound_proxy") {
+        put(
+            &mut out,
+            "outbound_proxy",
+            with_port(&p, get("outbound_proxy_port").as_deref()),
+        );
+    }
+    if let Some(e) = get("timer_register_expires") {
+        put(&mut out, "expires", e);
+    }
+    if let Some(n) = get("messages_uri") {
+        put(&mut out, "voicemail", n);
+    }
+    if let Some(v) = get("dtmf_avt_payload") {
+        put(&mut out, "dtmf_payload_type", v);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::parse;
@@ -492,6 +747,80 @@ lcd_logo.mode = 1
   <attendant attendant.resourceList.1.address="3001" attendant.resourceList.1.label="Ana"/>
   <device device.set="1"/>
 </polycomConfig>"#;
+
+    const CISCO: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<device>
+  <deviceProtocol>SIP</deviceProtocol>
+  <devicePool>
+    <callManagerGroup><members><member priority="0"><callManager>
+      <ports><ethernetPhonePort>2000</ethernetPhonePort><sipPort>5070</sipPort></ports>
+      <processNodeName>10.0.0.5</processNodeName>
+    </callManager></member></members></callManagerGroup>
+  </devicePool>
+  <sipProfile>
+    <sipCallFeatures><dtmfAvtPayload>101</dtmfAvtPayload></sipCallFeatures>
+    <sipStack><timerRegisterExpires>3600</timerRegisterExpires></sipStack>
+    <sipLines>
+      <line button="1">
+        <featureID>9</featureID>
+        <featureLabel>Desk 2001</featureLabel>
+        <proxy>USECALLMANAGER</proxy>
+        <port>5060</port>
+        <name>2001</name>
+        <displayName>Lab 2001</displayName>
+        <authName>2001</authName>
+        <authPassword>secret</authPassword>
+        <messagesNumber>*97</messagesNumber>
+      </line>
+      <line button="2">
+        <featureID>21</featureID>
+        <featureLabel>Ana</featureLabel>
+        <speedDialNumber>3001</speedDialNumber>
+      </line>
+    </sipLines>
+  </sipProfile>
+  <transportLayerProtocol>1</transportLayerProtocol>
+</device>"#;
+
+    const CISCO_TEXT: &str = "# SIP0011223344.cnf
+image_version: P0S3-8-12-00
+proxy1_address: 10.0.0.5
+proxy1_port: 5060
+line1_name: 2001
+line1_authname: 2001
+line1_password: secret
+line1_displayname: \"Lab 2001\"
+line2_name: UNPROVISIONED
+messages_uri: *97
+";
+
+    #[test]
+    fn cisco_xml_first_line() {
+        assert_eq!(detect(CISCO), Format::Cisco);
+        let v = parse(CISCO, "native").unwrap();
+        let a = &v["profile"]["account"];
+        assert_eq!(a["user"], "2001");
+        assert_eq!(a["password"], "secret");
+        assert_eq!(a["display_name"], "Lab 2001");
+        assert_eq!(a["domain"], "10.0.0.5:5070");
+        assert_eq!(a["expires"], 3600);
+        assert_eq!(v["label"], "Desk 2001");
+        assert_eq!(v["profile"]["behavior"]["transport"], "tcp");
+        assert_eq!(v["blf"], serde_json::json!(["3001"]));
+        assert_eq!(v["voicemail"], "*97");
+    }
+
+    #[test]
+    fn cisco_text_form() {
+        assert_eq!(detect(CISCO_TEXT), Format::Cisco);
+        let v = parse(CISCO_TEXT, "native").unwrap();
+        let a = &v["profile"]["account"];
+        assert_eq!(a["user"], "2001");
+        assert_eq!(a["auth_user"], "2001");
+        assert_eq!(a["display_name"], "Lab 2001");
+        assert_eq!(a["domain"], "10.0.0.5:5060");
+        assert_eq!(v["voicemail"], "*97");
+    }
 
     #[test]
     fn detects_formats() {

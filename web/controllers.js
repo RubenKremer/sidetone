@@ -120,8 +120,15 @@ export class NativeController extends Emitter {
   async sniffPcap() { return new Uint8Array(await (await this.http.get("api/sniff/pcap")).arrayBuffer()); }
   async audioStatus() { return (await this.http.get("api/audio/status")).json(); }
   async loopback(on) { return (await this.http.post("api/audio/loopback", JSON.stringify({ on }), "application/json")).json(); }
-  async provision(url, tlsVerify) {
-    const r = await this.http.post("api/phone/provision", JSON.stringify({ url, tls_verify: tlsVerify !== false }), "application/json");
+  async provisionMac() { return (await (await this.http.get("api/phone/provision/mac")).json()).mac; }
+  async provisionDiscover(mac) {
+    const j = await (await this.http.post("api/phone/provision/discover", JSON.stringify({ mac }), "application/json")).json();
+    if (j.error) throw new Error(j.error);
+    return j.result;
+  }
+  async diagProvision(url, mac, tlsVerify) { return (await this.http.post("api/diag/provision", JSON.stringify({ url, mac, tls_verify: tlsVerify !== false }), "application/json")).json(); }
+  async provision(url, tlsVerify, mac) {
+    const r = await this.http.post("api/phone/provision", JSON.stringify({ url, tls_verify: tlsVerify !== false, mac: mac || null }), "application/json");
     const j = await r.json();
     if (j.error) throw new Error(j.error);
     if (!j.ok) throw new Error(j.error || "Provisioning failed");

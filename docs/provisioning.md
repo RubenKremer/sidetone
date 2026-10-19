@@ -307,8 +307,66 @@ WebSocket address).
 | `blf.N` | `linekey.M.value` of keys with `type = 16` on this line | `attendant.resourceList.M.address` |
 | others | `nat.rport`, `session_timer.*`, `dtmf.dtmf_payload` | `tone.dtmf.rfc2833Payload` |
 
-Files that use `$MAC`-style names are fetched by their final URL: type the
-URL with the MAC your PBX expects.
+## Cisco files and TFTP
+
+The desktop app also reads Cisco configuration files: the `SEP<MAC>.cnf.xml`
+that Asterisk, FreeSWITCH, FreePBX and similar servers generate for Cisco
+phones on SIP firmware, and the older text `SIP<MAC>.cnf` of the 79xx. The
+first SIP line (`<line>` with `featureID` 9, or `line1_name`) becomes the
+account: `name`, `authName`, `authPassword`, `displayName`, `featureLabel`,
+the line's `proxy` or the call manager's `processNodeName` and `sipPort`,
+`transportLayerProtocol` (1 TCP, 2 UDP, 4 TLS), `messagesNumber` for
+voicemail, and speed dials with BLF (`featureID` 21). Cisco Unified CM is
+different: its files carry no digest password and it only accepts a MAC
+registered with that phone model, so for CUCM add Sidetone as a third-party
+SIP device instead.
+
+The URL may be `tftp://server[:port]/file` as well as http or https, so the
+file can come from the same TFTP server the phones use.
+
+### The device MAC
+
+Phones fetch files named after their MAC. In the URL, `{mac}` (or `$mac`,
+`$MAC`, `[PHONE_MAC_ADDRESS]`) becomes the MAC in lower case and `{MAC}` in
+upper case, as Cisco names its files:
+
+```
+tftp://10.0.0.5/SEP{MAC}.cnf.xml
+http://prov.example.com/yealink/{mac}.cfg
+```
+
+The **Device MAC** field in the Provision dialog sets which MAC is used (any
+separators); empty means this computer's network card. It is stored with
+the account, so a resync asks for the same file.
+
+### Finding the server (DHCP)
+
+**Find the server on the network** sends a DHCPINFORM and shows what the DHCP
+server tells phones: option 150 (Cisco TFTP servers), 66 (TFTP server name)
+and 160 (Polycom provisioning URL), with the usual file names ready to pick.
+DHCP answers go to UDP port 68, which needs administrator rights (root on
+Linux and macOS); without them the dialog says so and the server can be
+typed by hand.
+
+### Testing what a phone would get
+
+Diagnostics, **Phone provisioning** fetches a URL for a given MAC exactly as
+a phone would, without touching any account, and shows the result: a TFTP
+error such as File not found, or the format, the size, the account it
+describes and the content with passwords hidden. **Ask DHCP for the server**
+runs the same DHCPINFORM.
+
+### In a capture
+
+Analysis recognizes DHCP and TFTP in a pcap of a phone booting: which
+server DHCP hands out (or that the phone asked for option 66/150 and got
+none), each file the phone asked for and how it ended (downloaded, File not
+found, no answer, cut off). A missing `SEP<MAC>.cnf.xml` is flagged with the
+likely cause; the trust lists and other optional files Cisco phones always
+ask for are reported as normal when absent.
+
+Files that use `$MAC`-style names are fetched by their final URL, or by the
+same URL with `{mac}` and the Device MAC set.
 
 ## Fetching the file
 

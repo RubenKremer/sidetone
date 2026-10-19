@@ -512,9 +512,82 @@ fn phone_api(m: &Method, path: &str, q: &HashMap<String, String>, body: &[u8]) -
                 .get("tls_verify")
                 .and_then(|x| x.as_bool())
                 .unwrap_or(true);
-            match provision::fetch_provision(url, tls_verify) {
+            let mac = v
+                .get("mac")
+                .and_then(|x| x.as_str())
+                .filter(|m| !m.trim().is_empty());
+            match provision::fetch_provision(url, tls_verify, mac) {
                 Ok(account) => json_resp(json!({"ok": true, "account": account})),
                 Err(e) => err(400, e),
+            }
+        }
+        // This computer's MAC, the default device MAC for {mac} in URLs.
+        (Method::Get, "/api/phone/provision/mac") => {
+            json_resp(json!({"mac": provision::device_mac(None)}))
+        }
+        // DHCPINFORM for options 66/150/160 (the servers phones are given).
+        (Method::Post, "/api/phone/provision/discover") => {
+            let v: Value = serde_json::from_slice(body).unwrap_or_default();
+            let mac = provision::device_mac(v.get("mac").and_then(|x| x.as_str()));
+            match crate::dhcp::discover(
+                provision::mac_bytes(&mac),
+                std::time::Duration::from_secs(4),
+            ) {
+                Ok(r) => json_resp(json!({"ok": true, "result": r})),
+                Err(e) => err(400, e),
+            }
+        }
+        // Diagnostics: fetch what a phone with this MAC would get, and say
+        // what it is, without touching any account.
+        (Method::Post, "/api/diag/provision") => {
+            let v: Value = serde_json::from_slice(body).unwrap_or_default();
+            let raw_url = v
+                .get("url")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if raw_url.is_empty() {
+                return err(400, "missing url");
+            }
+            let mac = provision::device_mac(v.get("mac").and_then(|x| x.as_str()));
+            let url = provision::expand_url(&raw_url, &mac);
+            let tls = v
+                .get("tls_verify")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(true);
+            let t0 = std::time::Instant::now();
+            let res = provision::fetch_raw(&url, tls);
+            let ms = t0.elapsed().as_millis() as u64;
+            match res {
+                Err(e) => json_resp(
+                    json!({"ok": false, "url": provision::redact_url(&url), "mac": mac, "ms": ms, "error": e.to_string()}),
+                ),
+                Ok(body) => {
+                    let text = String::from_utf8_lossy(&body).into_owned();
+                    let format = sidetone_core::provision::detect_name(&text);
+                    let parsed = sidetone_core::provision::parse(&text, "native");
+                    let mut excerpt: String = text.chars().take(4000).collect();
+                    // Passwords stay out of the preview.
+                    excerpt = sidetone_core::provision::mask_secrets(&excerpt);
+                    json_resp(json!({
+                        "ok": parsed.is_ok(),
+                        "url": provision::redact_url(&url),
+                        "mac": mac,
+                        "ms": ms,
+                        "bytes": body.len(),
+                        "format": format,
+                        "excerpt": excerpt,
+                        "account": parsed.as_ref().ok().map(|a| {
+                            let mut a = a.clone();
+                            if a.pointer("/profile/account/password").is_some_and(|p| !p.is_null()) {
+                                a["profile"]["account"]["password"] = json!("•••");
+                            }
+                            a
+                        }),
+                        "error": parsed.err(),
+                    }))
+                }
             }
         }
         (Method::Get, "/api/phone/history") => json_resp(json!(phone::get().history_view())),

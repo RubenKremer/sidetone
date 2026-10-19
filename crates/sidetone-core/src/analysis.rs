@@ -134,6 +134,8 @@ pub struct Report {
     pub streams: Vec<RtpStream>,
     /// Voice-quality reports carried in SIP PUBLISH (RFC 6035).
     pub vq: Vec<crate::rtcp::VqReport>,
+    /// Phone boot provisioning: DHCP options 66/150/160 and TFTP downloads.
+    pub provisioning: Vec<crate::bootprov::ProvEvent>,
     pub findings: Vec<Finding>,
     #[serde(skip)]
     pub capture: Capture,
@@ -168,6 +170,7 @@ pub fn analyze_capture(cap: Capture) -> Report {
     let mut messages: Vec<Message> = Vec::new();
     let mut rtp_flows: BTreeMap<(SocketAddr, SocketAddr, u32), Vec<RtpObs>> = BTreeMap::new();
     let mut tcp: HashMap<FlowKey, TcpFlow> = HashMap::new();
+    let mut boot = crate::bootprov::Collector::default();
     let mut rtcp_obs: Vec<(
         usize,
         i64,
@@ -187,6 +190,9 @@ pub fn analyze_capture(cap: Capture) -> Report {
         }
         match d.transport {
             Transport::Udp => {
+                if !d.hep && boot.observe(frame, p.ts_ns, d.src, d.dst, d.payload) {
+                    continue;
+                }
                 if sip::looks_like_sip(d.payload) {
                     if let Some(m) = sip::parse_datagram(d.payload) {
                         push_message(
@@ -413,6 +419,7 @@ pub fn analyze_capture(cap: Capture) -> Report {
         messages,
         streams,
         vq,
+        provisioning: boot.finish(start_ns),
         findings: Vec::new(),
         capture: cap,
     };

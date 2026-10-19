@@ -1,11 +1,13 @@
 //! Library side of the CLI: shared by the `sidetone` binary and the desktop app.
 
 pub mod aihttp;
+pub mod dhcp;
 pub mod mcp;
 pub mod phone;
 pub mod provision;
 pub mod serve;
 pub mod testrun;
+pub mod tftp;
 
 use sidetone_core::ladder::render_text;
 use sidetone_core::{Report, Severity};

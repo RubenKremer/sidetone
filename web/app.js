@@ -3043,6 +3043,41 @@ function bindDiag() {
     }
   });
   $("#dg-dns-host").addEventListener("keydown", (e) => e.key === "Enter" && $("#dg-dns-go").click());
+  $("#dg-prov-go").addEventListener("click", async () => {
+    const url = $("#dg-prov-url").value.trim();
+    if (!url) return;
+    const out = $("#dg-prov-out");
+    out.innerHTML = `<p class="muted">${esc(t("Fetching…"))}</p>`;
+    try {
+      const r = await S.ctl.diagProvision(url, $("#dg-prov-mac").value.trim(), true);
+      const acc = r.account && r.account.profile ? r.account.profile.account : null;
+      const beh = r.account && r.account.profile ? r.account.profile.behavior : null;
+      out.innerHTML = `
+        <p class="mono">${esc(r.url)} <span class="muted">(MAC ${esc((r.mac || "").match(/../g)?.join(":") || "")}, ${r.ms} ms)</span></p>
+        ${r.bytes == null ? `<p class="bad"><b>${esc(r.error || "")}</b></p>` : r.ok ? `<p class="ok"><b>${esc(t("Format"))}: ${esc(r.format)}, ${r.bytes} bytes</b></p>` : `<p class="warn"><b>${esc(t("Format"))}: ${esc(r.format)}, ${r.bytes} bytes. ${esc(r.error || "")}</b></p>`}
+        ${acc ? table([t("User"), t("Display name"), t("Server"), t("Transport"), t("Codecs"), t("Voicemail")], [[esc(acc.user), esc(acc.display_name || ""), `<span class="mono">${esc(acc.domain)}</span>`, esc(beh.transport), esc((beh.codecs || []).join(", ") || t("global list")), esc(r.account.voicemail || "")]]) : ""}
+        ${r.excerpt ? `<details><summary>${esc(t("Content (passwords hidden)"))}</summary><pre class="mono dg-pre">${esc(r.excerpt)}</pre></details>` : ""}`;
+    } catch (e) {
+      out.innerHTML = `<p class="bad">${esc(e.message || e)}</p>`;
+    }
+  });
+  $("#dg-prov-url").addEventListener("keydown", (e) => e.key === "Enter" && $("#dg-prov-go").click());
+  $("#dg-prov-dhcp").addEventListener("click", async () => {
+    const out = $("#dg-prov-out");
+    out.innerHTML = `<p class="muted">${esc(t("Asking the DHCP server…"))}</p>`;
+    try {
+      const r = await S.ctl.provisionDiscover($("#dg-prov-mac").value.trim());
+      const rows = [["66", esc(r.option66 || "-")], ["150", esc(r.option150.join(", ") || "-")], ["160", esc(r.option160 || "-")]];
+      out.innerHTML = `<p class="${r.servers.length ? "ok" : "warn"}"><b>${esc(t("DHCP server"))} ${esc(r.dhcp_server || "?")}</b></p>${table([t("Option"), t("Value")], rows)}
+        ${r.servers.map((u) => `<button type="button" class="linklike mono" data-dg-prov="${esc(u)}">${esc(u)}</button>`).join(" · ")}`;
+    } catch (e) {
+      out.innerHTML = `<p class="bad">${esc(e.message || e)}</p>`;
+    }
+  });
+  $("#dg-prov-out").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-dg-prov]");
+    if (b) $("#dg-prov-url").value = /^tftp:\/\/[^/]+$/.test(b.dataset.dgProv) ? `${b.dataset.dgProv}/SEP{MAC}.cnf.xml` : b.dataset.dgProv;
+  });
   $("#dg-stun-go").addEventListener("click", async () => {
     const servers = $("#dg-stun-servers").value.split(/[,\s]+/).filter(Boolean);
     const out = $("#dg-stun-out");
@@ -3337,6 +3372,26 @@ function applyWebProvision(acc, p, url) {
   acc.provisionUrl = url;
 }
 
+// DHCPINFORM: offers the servers the network gives phones as URLs to pick.
+async function discoverProvisioning() {
+  const box = $("#prov-found");
+  box.textContent = t("Asking the DHCP server…");
+  try {
+    const r = await S.ctl.provisionDiscover($("#prov-mac").value.trim());
+    if (!r.servers.length) {
+      box.textContent = t("The DHCP server answered without provisioning options (66, 150 or 160).");
+      return;
+    }
+    const files = ["SEP{MAC}.cnf.xml", "{mac}.cfg", "y000000000000.cfg", "{mac}-phone.cfg"];
+    box.innerHTML = `${esc(t("From DHCP"))}${r.dhcp_server ? ` (${esc(r.dhcp_server)})` : ""}: ` + r.servers
+      .flatMap((sv) => (/^tftp:\/\/[^/]+$/.test(sv) ? files.map((f) => `${sv}/${f}`) : [sv]))
+      .map((u) => `<button type="button" class="linklike" data-prov-url="${esc(u)}">${esc(u)}</button>`)
+      .join(" · ");
+  } catch (e) {
+    box.textContent = e.message || String(e);
+  }
+}
+
 function openProvisionDialog() {
   const dlg = $("#prov-dialog");
   const native = S.ctl.kind === "native";
@@ -3344,7 +3399,14 @@ function openProvisionDialog() {
   $("#prov-title").textContent = t("Fetch provisioning");
   $("#prov-url-label").textContent = t("Provisioning URL");
   $("#prov-tls-label").textContent = t("Check the server's TLS certificate");
-  $("#prov-hint").textContent = t(native ? "Sidetone XML, a Yealink .cfg or a Polycom XML; from a phone file, the first configured line is used." : "Sidetone XML with a WebSocket address (ws or wss). Yealink and Polycom files need the desktop app.");
+  $("#prov-hint").textContent = t(native ? "http, https or tftp. Sidetone XML, a Yealink .cfg, a Polycom XML or a Cisco SEP<MAC>.cnf.xml; from a phone file, the first configured line is used. {mac} in the URL becomes the device MAC, as a phone would ask (tftp://10.0.0.5/SEP{MAC}.cnf.xml)." : "Sidetone XML with a WebSocket address (ws or wss). Yealink, Polycom and Cisco files need the desktop app.");
+  $("#prov-mac-label").textContent = t("Device MAC (for {mac} in the URL; empty: this computer's)");
+  $("#prov-discover").textContent = t("Find the server on the network (DHCP)");
+  $("#prov-mac-wrap").hidden = !native;
+  $("#prov-discover-wrap").hidden = !native;
+  $("#prov-found").innerHTML = "";
+  $("#prov-mac").value = (native && acc && acc.provision_mac) || "";
+  if (native && S.ctl.provisionMac) S.ctl.provisionMac().then((m) => ($("#prov-mac").placeholder = m.match(/../g).join(":"))).catch(() => {});
   $("#prov-fetch").textContent = t("Fetch");
   $("#prov-cancel").textContent = t("Cancel");
   $("#prov-err").hidden = true;
@@ -3362,10 +3424,14 @@ async function runProvisionFetch() {
   errEl.hidden = true;
   const native = S.ctl.kind === "native";
   try {
-    const parsed = await S.ctl.provision(url, $("#prov-tls").checked);
+    const mac = $("#prov-mac").value.trim();
+    const parsed = await S.ctl.provision(url, $("#prov-tls").checked, mac);
     const acc = SET.cfg.accounts.find((a) => a.id === SET.accId);
     if (!acc) return;
-    if (native) applyNativeProvision(acc, parsed, url, $("#prov-tls").checked);
+    if (native) {
+      applyNativeProvision(acc, parsed, url, $("#prov-tls").checked);
+      acc.provision_mac = mac || null;
+    }
     else applyWebProvision(acc, parsed, url);
     if (!native && parsed.password) S.ctl.passwords[acc.id] = parsed.password;
     $("#prov-dialog").close();
@@ -4045,6 +4111,11 @@ function bindSettings() {
     runProvisionFetch();
   });
   $("#prov-cancel").addEventListener("click", () => $("#prov-dialog").close());
+  $("#prov-discover").addEventListener("click", discoverProvisioning);
+  $("#prov-found").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-prov-url]");
+    if (b) $("#prov-url").value = b.dataset.provUrl;
+  });
 }
 
 // ============================================================================

@@ -61,6 +61,7 @@ pub fn run_all(r: &Report) -> Vec<Finding> {
             }
         }
     }
+    provisioning_level(r, &mut o);
     let mut v = o.0;
     // Errors first, then warnings, then info; stable within a severity.
     v.sort_by(|a, b| b.severity.cmp(&a.severity));
@@ -68,7 +69,7 @@ pub fn run_all(r: &Report) -> Vec<Finding> {
 }
 
 fn capture_level(r: &Report, o: &mut Out) {
-    if r.summary.packets > 0 && r.messages.is_empty() {
+    if r.summary.packets > 0 && r.messages.is_empty() && r.provisioning.is_empty() {
         o.add("capture.no_sip", Severity::Info, "No SIP found in capture",
             "No SIP messages were decoded. If SIP runs over TLS (port 5061) or WebSocket, the capture needs the TLS keys or a capture taken at the endpoint.", None, vec![], None);
     }
@@ -948,5 +949,73 @@ fn stream_level(r: &Report, si: usize, o: &mut Out) {
             vec![],
             Some(si),
         );
+    }
+}
+
+/// Phone boot provisioning: which server DHCP gives, and how each TFTP
+/// download of a configuration file ended.
+fn provisioning_level(r: &Report, o: &mut Out) {
+    use crate::bootprov::optional_file;
+    for e in &r.provisioning {
+        if e.kind == "dhcp" {
+            let mut given: Vec<String> = Vec::new();
+            if !e.option150.is_empty() {
+                given.push(format!(
+                    "option 150 (Cisco TFTP) {}",
+                    e.option150.join(", ")
+                ));
+            }
+            if let Some(v) = &e.option66 {
+                given.push(format!("option 66 (TFTP server) {v}"));
+            }
+            if let Some(v) = &e.option160 {
+                given.push(format!("option 160 (provisioning URL) {v}"));
+            }
+            if given.is_empty() {
+                o.add("dhcp.no_tftp", Severity::Warning,
+                    format!("DHCP gave {} no provisioning server", e.client),
+                    format!("The phone asked for option 66 or 150 (frame {}), but the {} from {} has neither. Without it the phone cannot find its configuration: add option 150 (Cisco) or 66 to the DHCP scope, or set the server on the phone.", e.frame, e.outcome, e.server),
+                    None, vec![], None);
+            } else {
+                o.add("dhcp.tftp", Severity::Info,
+                    format!("DHCP tells {} to provision from {}", e.client, given.join("; ")),
+                    format!("{} from {} at +{:.3} s (frame {}). This is where the phone looks for its configuration and firmware.", e.outcome, e.server, e.rel_s, e.frame),
+                    None, vec![], None);
+            }
+            continue;
+        }
+        let file = e.file.clone().unwrap_or_default();
+        match e.outcome.as_str() {
+            "ok" => o.add("tftp.ok", Severity::Info,
+                format!("{} downloaded {file} by TFTP ({} bytes)", e.client, e.bytes),
+                format!("From {} at +{:.3} s (frame {}).", e.server, e.rel_s, e.frame),
+                None, vec![], None),
+            "error" if optional_file(&file) => o.add("tftp.optional_missing", Severity::Info,
+                format!("TFTP server has no {file} (normal outside CUCM)"),
+                format!("{} asked {} for {file}: {}. Cisco phones always ask for trust lists, dial plans and similar optional files; without CUCM they are usually absent.", e.client, e.server, e.error.clone().unwrap_or_default()),
+                None, vec![], None),
+            "error" => {
+                let lower = file.to_ascii_lowercase();
+                let hint = if lower.starts_with("sep") || lower.starts_with("sip") {
+                    "This is the phone's own file, named after its MAC: the phone is not configured on the server, or under a different MAC. Check the MAC on the label and in the PBX."
+                } else if lower.ends_with(".cfg") && lower.len() >= 16 {
+                    "Files named after the MAC are generated per phone: create this phone in the provisioning server, or check the MAC."
+                } else {
+                    "Check the file name and the TFTP root directory on the server."
+                };
+                o.add("tftp.error", Severity::Warning,
+                    format!("TFTP {file}: {}", e.error.clone().unwrap_or_else(|| "error".into())),
+                    format!("{} asked {} at +{:.3} s (frame {}). {hint}", e.client, e.server, e.rel_s, e.frame),
+                    None, vec![], None);
+            }
+            "no answer" => o.add("tftp.no_answer", Severity::Warning,
+                format!("TFTP request for {file} got no answer"),
+                format!("{} asked {} at +{:.3} s (frame {}) and nothing came back. The server may be down or not running TFTP, a firewall may drop UDP 69 or the replies from its data port, or DHCP points to the wrong address.", e.client, e.server, e.rel_s, e.frame),
+                None, vec![], None),
+            _ => o.add("tftp.incomplete", Severity::Warning,
+                format!("TFTP transfer of {file} stopped after {} bytes", e.bytes),
+                format!("From {} to {} (frame {}). The transfer did not finish: packet loss, a firewall that lets the request through but not every data block, or a timeout.", e.server, e.client, e.frame),
+                None, vec![], None),
+        }
     }
 }

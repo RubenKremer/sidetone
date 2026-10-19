@@ -348,6 +348,19 @@
           </div>
           <div class="dg-out" id="dg-dns-out"></div>
         </section>
+        <section class="card" data-native>
+          <h2>Phone provisioning</h2>
+          <p class="muted">Fetches what a desk phone with this MAC would get, over TFTP, HTTP or HTTPS, and says what came back: file not found, the format (Sidetone, Yealink, Polycom, Cisco) and the account it describes. Nothing is saved.</p>
+          <div class="row">
+            <label class="grow">URL <input id="dg-prov-url" placeholder="tftp://10.0.0.5/SEP{MAC}.cnf.xml" spellcheck="false"></label>
+            <label>MAC <input id="dg-prov-mac" placeholder="this computer's" spellcheck="false" size="17"></label>
+          </div>
+          <div class="row">
+            <button type="button" class="btn primary" id="dg-prov-go">Fetch as a phone</button>
+            <button type="button" class="btn" id="dg-prov-dhcp">Ask DHCP for the server (66, 150, 160)</button>
+          </div>
+          <div class="dg-out" id="dg-prov-out"></div>
+        </section>
         <section class="card">
           <h2>NAT and public address</h2>
           <p class="muted">Asks STUN servers which public address and port they see. Different ports for different servers mean a symmetric NAT, the usual cause of one-way audio.</p>
@@ -446,6 +459,8 @@
     <h2 id="prov-title">Fetch provisioning</h2>
     <p class="err" id="prov-err" hidden></p>
     <label class="fld"><span id="prov-url-label">Provisioning URL</span><input id="prov-url" type="url" spellcheck="false" autocomplete="off" required></label>
+    <label class="fld" id="prov-mac-wrap"><span id="prov-mac-label">Device MAC</span><input id="prov-mac" spellcheck="false" autocomplete="off" placeholder="00:11:22:33:44:55"></label>
+    <div class="prov-discover" id="prov-discover-wrap"><button type="button" class="btn small" id="prov-discover">Find the server on the network (DHCP)</button><div id="prov-found" class="hint"></div></div>
     <p class="hint" id="prov-hint">Sidetone XML, a Yealink .cfg or a Polycom XML; from a phone file, the first configured line is used.</p>
     <label class="check fld" id="prov-tls-wrap"><input type="checkbox" id="prov-tls" checked> <span id="prov-tls-label">Check the server's TLS certificate</span></label>
     <div class="row prov-actions">

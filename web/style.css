@@ -903,3 +903,7 @@ svg.qchart { width: 100%; height: auto; display: block; overflow: visible; strok
 .ladder-bar .check { display: inline-flex; gap: 6px; align-items: center; }
 .bk-url { display: flex; gap: 6px; margin-top: 10px; }
 .bk-url input { flex: 1; min-width: 0; }
+.prov-discover { display: grid; gap: 6px; }
+.prov-discover .btn { justify-self: start; }
+#prov-found .linklike { font-family: var(--mono); font-size: 12px; }
+.dg-pre { max-height: 280px; overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; }

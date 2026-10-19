@@ -23,6 +23,56 @@ pub fn parse(xml: &str, kind: &str) -> Result<Value, String> {
     }
 }
 
+/// The format name of a provisioning file ("Sidetone", "Yealink", "Polycom", "Cisco").
+pub fn detect_name(text: &str) -> &'static str {
+    vendor::detect(text).name()
+}
+
+/// Replaces password values in a provisioning file for display.
+pub fn mask_secrets(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        out.push_str(&mask_line(line));
+    }
+    out
+}
+
+fn mask_line(line: &str) -> String {
+    let lower = line.to_ascii_lowercase();
+    // key = value / key: value (Yealink, Cisco text)
+    if !lower.trim_start().starts_with('<') {
+        if lower.contains("password") || lower.contains("passwd") {
+            if let Some(i) = line.find(['=', ':']) {
+                let end = if line.ends_with('\n') { "\n" } else { "" };
+                return format!("{} ***{end}", &line[..=i]);
+            }
+        }
+        return line.to_string();
+    }
+    // XML: element text (<authPassword>x</authPassword>) and attributes (x.password="y").
+    let mut s = line.to_string();
+    for tag in ["authpassword", "password", "account.1.password"] {
+        if let Some(a) = s.to_ascii_lowercase().find(&format!("<{tag}>")) {
+            let start = a + tag.len() + 2;
+            if let Some(e) = s[start..].find('<') {
+                s.replace_range(start..start + e, "***");
+            }
+        }
+    }
+    let mut res = String::new();
+    let mut rest = s.as_str();
+    while let Some(i) = rest.to_ascii_lowercase().find("password=\"") {
+        let vstart = i + "password=\"".len();
+        res.push_str(&rest[..vstart]);
+        let after = &rest[vstart..];
+        let vend = after.find('"').unwrap_or(after.len());
+        res.push_str("***");
+        rest = &after[vend..];
+    }
+    res.push_str(rest);
+    res
+}
+
 fn reject_doctype_entity(xml: &str) -> Result<(), String> {
     let lower = xml.to_ascii_lowercase();
     if lower.contains("<!doctype") || lower.contains("<!entity") {
@@ -454,6 +504,7 @@ fn parse_native(text: &str) -> Result<Value, String> {
     match vendor::detect(text) {
         vendor::Format::Yealink => native_from_keys(&vendor::yealink(text)?),
         vendor::Format::Polycom => native_from_keys(&vendor::polycom(text)?),
+        vendor::Format::Cisco => native_from_keys(&vendor::cisco(text)?),
         vendor::Format::Sidetone => {
             let keys = parse_flat(text)?;
             validate_keys_native(&keys)?;
@@ -845,6 +896,13 @@ fn parse_browser(xml: &str) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secrets_masked_for_display() {
+        let m = mask_secrets("account.1.password = s3cret\n<authPassword>s3cret</authPassword>\n<reg reg.1.auth.password=\"s3cret\" reg.1.address=\"2001\"/>\nline1_password: s3cret\n");
+        assert!(!m.contains("s3cret"), "{m}");
+        assert!(m.contains("reg.1.address=\"2001\""));
+    }
 
     fn wrap(body: &str) -> String {
         format!(
