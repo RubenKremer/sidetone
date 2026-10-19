@@ -4314,6 +4314,7 @@ dependencies = [
 name = "sidetone-core"
 version = "0.1.21"
 dependencies = [
+ "quick-xml 0.41.0",
  "serde",
  "serde_json",
 ]

@@ -49,6 +49,14 @@ pub struct AccountCfg {
     /// address the server announces, if any.
     pub voicemail: String,
     pub profile: Profile,
+    /// HTTP(S) URL for NOTIFY-driven provisioning resync.
+    pub provision_url: Option<String>,
+    #[serde(default = "default_provision_tls_verify")]
+    pub provision_tls_verify: bool,
+}
+
+fn default_provision_tls_verify() -> bool {
+    true
 }
 
 impl Default for AccountCfg {
@@ -63,8 +71,49 @@ impl Default for AccountCfg {
             mwi: true,
             voicemail: String::new(),
             profile: Profile::default(),
+            provision_url: None,
+            provision_tls_verify: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResyncGate {
+    Ignore,
+    Wait,
+    Emit,
+}
+
+/// `acc` is `usize::MAX` when set_accounts has detached the line.
+/// `live_other` is the number of other lines with the same acc whose state is not Ended.
+/// `this_active` is whether this line itself is still active (not Ended).
+pub fn resync_gate(
+    has_provision_url: bool,
+    already_pending: bool,
+    acc: usize,
+    this_active: bool,
+    live_other: usize,
+) -> ResyncGate {
+    if acc == usize::MAX {
+        return ResyncGate::Ignore;
+    }
+    if !has_provision_url {
+        let _ = already_pending;
+        return ResyncGate::Ignore;
+    }
+    if this_active || live_other > 0 {
+        return ResyncGate::Wait;
+    }
+    ResyncGate::Emit
+}
+
+pub fn is_provision_resync(event: &str) -> bool {
+    let lower = event.to_ascii_lowercase();
+    let token = lower
+        .split([';', ' ', '\t', '\r', '\n'])
+        .next()
+        .unwrap_or("");
+    token == "check-sync" || token == "resync"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -509,6 +558,22 @@ impl Engine {
         s.events.iter().filter(|e| e.seq > since).cloned().collect()
     }
 
+    pub fn emit(&self, kind: &str, account: Option<String>, text: impl Into<String>) {
+        let mut s = self.shared.lock().unwrap();
+        let seq = s.next();
+        s.events.push_back(PhoneEvent {
+            seq,
+            ts_ms: now_ms(),
+            kind: kind.into(),
+            line: None,
+            account,
+            text: text.into(),
+        });
+        while s.events.len() > MAX_EVENTS {
+            s.events.pop_front();
+        }
+    }
+
     pub fn trace_since(&self, since: u64, limit: usize) -> Vec<TraceItem> {
         let s = self.shared.lock().unwrap();
         let v: Vec<TraceItem> = s.trace.iter().filter(|e| e.seq > since).cloned().collect();
@@ -640,6 +705,7 @@ struct Acc {
     /// Direct client: no registrar, socket bound to every interface.
     direct: bool,
     publication: Option<Publication>,
+    resync_pending: bool,
     mwi: Option<MwiView>,
 }
 
@@ -1540,6 +1606,7 @@ impl Core {
             last_keepalive: Instant::now(),
             direct: false,
             publication: None,
+            resync_pending: false,
             mwi: None,
         }
     }
@@ -3372,6 +3439,41 @@ impl Core {
             }
         }
         self.event("call", Some(id), Some(acc), text);
+        // Only a resync that arrived during this call is released here. An
+        // ordinary hangup must not download just because a URL is stored.
+        if acc != usize::MAX {
+            let has_url = self
+                .accs
+                .get(acc)
+                .and_then(|a| a.cfg.provision_url.as_ref())
+                .is_some_and(|s| !s.is_empty());
+            let pending = self
+                .accs
+                .get(acc)
+                .map(|a| a.resync_pending)
+                .unwrap_or(false);
+            if pending {
+                let live_other = self
+                    .lines
+                    .values()
+                    .filter(|l| l.acc == acc && l.state.active())
+                    .count();
+                match resync_gate(has_url, true, acc, false, live_other) {
+                    ResyncGate::Emit => {
+                        if let Some(a) = self.accs.get_mut(acc) {
+                            a.resync_pending = false;
+                        }
+                        self.event("resync", None, Some(acc), "provisioning resync");
+                    }
+                    ResyncGate::Ignore => {
+                        if let Some(a) = self.accs.get_mut(acc) {
+                            a.resync_pending = false;
+                        }
+                    }
+                    ResyncGate::Wait => {}
+                }
+            }
+        }
         if let Some(parent) = notify_line {
             if self
                 .lines
@@ -5043,7 +5145,8 @@ impl Core {
             }
             "NOTIFY" => {
                 self.respond(ai, &m, from, 200, "OK", None, &[], None);
-                let event = m.header("Event").unwrap_or("").to_ascii_lowercase();
+                let event_hdr = m.header("Event").unwrap_or("");
+                let event = event_hdr.to_ascii_lowercase();
                 if event.starts_with("dialog")
                     || event.starts_with("presence")
                     || event.starts_with(MWI_EVENT)
@@ -5100,6 +5203,44 @@ impl Core {
                         let st = self.lines.get(&id).map(|l| l.state);
                         if st == Some(LState::Connected) {
                             self.send_bye(id, Some("transferred".into()));
+                        }
+                    }
+                }
+                if is_provision_resync(event_hdr) {
+                    let has_url = self.accs[ai]
+                        .cfg
+                        .provision_url
+                        .as_ref()
+                        .is_some_and(|s| !s.is_empty());
+                    let pending = self.accs[ai].resync_pending;
+                    let live_other = self
+                        .lines
+                        .values()
+                        .filter(|l| l.acc == ai && l.state.active())
+                        .count();
+                    match resync_gate(has_url, pending, ai, false, live_other) {
+                        ResyncGate::Ignore => {
+                            self.event(
+                                "info",
+                                None,
+                                Some(ai),
+                                "provisioning resync ignored: no provisioning URL",
+                            );
+                        }
+                        ResyncGate::Wait => {
+                            self.accs[ai].resync_pending = true;
+                            if !pending {
+                                self.event(
+                                    "info",
+                                    None,
+                                    Some(ai),
+                                    "provisioning will wait until the call ends",
+                                );
+                            }
+                        }
+                        ResyncGate::Emit => {
+                            self.accs[ai].resync_pending = false;
+                            self.event("resync", None, Some(ai), "provisioning resync");
                         }
                     }
                 }
@@ -5540,6 +5681,51 @@ fn tx_clone_shallow(tx: &ClientTx) -> ClientTx {
         purpose: tx.purpose.clone(),
         auth_tries: tx.auth_tries,
         completed: None,
+    }
+}
+
+#[cfg(test)]
+mod provision_resync_tests {
+    use super::{is_provision_resync, resync_gate, ResyncGate};
+
+    #[test]
+    fn is_provision_resync_cases() {
+        assert!(!is_provision_resync("dialog"));
+        assert!(!is_provision_resync("presence"));
+        assert!(!is_provision_resync("refer"));
+        assert!(!is_provision_resync("check-sync-extra"));
+        assert!(is_provision_resync("check-sync;reboot=true"));
+        assert!(is_provision_resync("resync"));
+        assert!(is_provision_resync("ReSync"));
+        assert!(is_provision_resync("CHECK-SYNC"));
+    }
+
+    #[test]
+    fn resync_gate_cases() {
+        assert_eq!(
+            resync_gate(true, false, 0, true, 0),
+            ResyncGate::Wait
+        );
+        assert_eq!(
+            resync_gate(true, true, 0, false, 1),
+            ResyncGate::Wait
+        );
+        assert_eq!(
+            resync_gate(true, true, 0, false, 0),
+            ResyncGate::Emit
+        );
+        assert_eq!(
+            resync_gate(true, false, usize::MAX, false, 0),
+            ResyncGate::Ignore
+        );
+        assert_eq!(
+            resync_gate(false, false, 0, false, 0),
+            ResyncGate::Ignore
+        );
+        assert_eq!(
+            resync_gate(false, true, 0, false, 0),
+            ResyncGate::Ignore
+        );
     }
 }
 

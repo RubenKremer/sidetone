@@ -440,6 +440,20 @@
 </footer>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<dialog id="prov-dialog" class="prov-dialog">
+  <form id="prov-form" class="prov-form">
+    <h2 id="prov-title">Fetch provisioning</h2>
+    <p class="err" id="prov-err" hidden></p>
+    <label class="fld"><span id="prov-url-label">Provisioning URL</span><input id="prov-url" type="url" spellcheck="false" autocomplete="off" required></label>
+    <label class="check fld" id="prov-tls-wrap"><input type="checkbox" id="prov-tls" checked> <span id="prov-tls-label">Check the server's TLS certificate</span></label>
+    <div class="row prov-actions">
+      <button type="submit" class="btn primary" id="prov-fetch">Fetch</button>
+      <button type="button" class="btn" id="prov-cancel">Cancel</button>
+    </div>
+  </form>
+</dialog>
+
 <script type="module" src="app.js"></script>
 </body>
 </html>
