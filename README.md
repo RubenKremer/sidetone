@@ -317,7 +317,8 @@ hints, echo, busy and unallocated numbers).
 ## Provisioning
 
 Sidetone can load account settings from a small XML file served over HTTP(S).
-In Settings, open an account and press **Provision**, paste the URL, and save.
+In Settings, open an account and press **Provision**, then paste the URL.
+A valid file is saved and the account registers.
 The format is Sidetone-specific (not a Yealink phone file): unknown keys fail
 verification. Every key, the desktop and browser samples, and the resync
 rules are in [docs/provisioning.md](docs/provisioning.md).

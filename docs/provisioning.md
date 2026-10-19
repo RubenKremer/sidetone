@@ -269,9 +269,11 @@ Leave the elements out to keep them unset as well.
 
 ## Fetching the file
 
-**Provision** downloads immediately, even during a call. The form is marked
-unsaved; press **Save account** to keep it. The URL shown on the account is
-stored, but the username and password in the URL are not shown.
+**Provision** downloads immediately, even during a call. A valid file is
+saved and applied at once: the account is stored and registration starts.
+If saving fails, the loaded values stay on the form as unsaved changes.
+The URL shown on the account is stored, but the username and password in
+the URL are not shown.
 
 Desktop download:
 

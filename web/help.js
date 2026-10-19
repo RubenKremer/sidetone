@@ -11,7 +11,7 @@ const H = {
         "Open Settings and add an account: user, password and the domain or registrar (host or host:port). Save, and the dot next to the account turns green when it is registered.",
         "No registrar? Leave the domain empty and turn Register off: Sidetone becomes an anonymous client that dials SIP URIs directly (sip:600@10.0.0.5:5060).",
         "In the browser version the account needs a WebSocket URL (wss://...): your PBX or SBC must accept SIP over WebSocket.",
-        "Provision loads account fields from a sidetone-provision XML URL (Settings, Provision on the account). A SIP NOTIFY with Event check-sync or resync re-downloads that URL; if you are on a call, Sidetone waits until it ends before applying the new file.",
+        "Provision loads account fields from a sidetone-provision XML URL (Settings, Provision on the account) and saves them. A SIP NOTIFY with Event check-sync or resync re-downloads that URL; if you are on a call, Sidetone waits until it ends before applying the new file.",
       ]],
       ["Making and taking calls", [
         "Type a number, user@host or a SIP URI and press Enter or Call. The keypad sends DTMF once a call is up.",
@@ -72,7 +72,7 @@ const H = {
         "Abra Configurações e adicione uma conta: usuário, senha e o domínio ou registrar (host ou host:porta). Salve; a bolinha ao lado da conta fica verde quando ela registra.",
         "Sem registrar? Deixe o domínio vazio e desligue Registrar: o Sidetone vira um cliente anônimo que disca SIP URIs direto (sip:600@10.0.0.5:5060).",
         "Na versão do navegador a conta precisa de uma URL WebSocket (wss://...): seu PABX ou SBC tem de aceitar SIP sobre WebSocket.",
-        "Provisionar carrega os campos da conta a partir de uma URL com XML sidetone-provision (Configurações, Provisionar na conta). Um NOTIFY SIP com Event check-sync ou resync baixa de novo essa URL; se houver chamada, o Sidetone espera ela terminar antes de aplicar o arquivo.",
+        "Provisionar carrega os campos da conta a partir de uma URL com XML sidetone-provision (Configurações, Provisionar na conta) e os salva. Um NOTIFY SIP com Event check-sync ou resync baixa de novo essa URL; se houver chamada, o Sidetone espera ela terminar antes de aplicar o arquivo.",
       ]],
       ["Fazendo e recebendo chamadas", [
         "Digite um número, usuario@host ou um SIP URI e aperte Enter ou Ligar. Com a chamada ativa, o teclado envia DTMF.",
@@ -133,7 +133,7 @@ const H = {
         "Abre Configuración y añade una cuenta: usuario, contraseña y el dominio o registrar (host o host:puerto). Guarda; el punto junto a la cuenta se pone verde cuando se registra.",
         "¿Sin registrar? Deja el dominio vacío y desactiva Registrar: Sidetone se convierte en un cliente anónimo que marca SIP URI directamente (sip:600@10.0.0.5:5060).",
         "En la versión del navegador la cuenta necesita una URL WebSocket (wss://...): tu centralita o SBC debe aceptar SIP sobre WebSocket.",
-        "Provisionar carga los campos de la cuenta desde una URL con XML sidetone-provision (Configuración, Provisionar en la cuenta). Un NOTIFY SIP con Event check-sync o resync vuelve a descargar esa URL; si hay una llamada, Sidetone espera a que termine antes de aplicar el archivo.",
+        "Provisionar carga los campos de la cuenta desde una URL con XML sidetone-provision (Configuración, Provisionar en la cuenta) y los guarda. Un NOTIFY SIP con Event check-sync o resync vuelve a descargar esa URL; si hay una llamada, Sidetone espera a que termine antes de aplicar el archivo.",
       ]],
       ["Hacer y recibir llamadas", [
         "Escribe un número, usuario@host o un SIP URI y pulsa Enter o Llamar. Con la llamada activa, el teclado envía DTMF.",
@@ -194,7 +194,7 @@ const H = {
         "Einstellungen öffnen und ein Konto anlegen: Benutzer, Passwort und Domain oder Registrar (Host oder Host:Port). Speichern; der Punkt neben dem Konto wird grün, sobald es registriert ist.",
         "Kein Registrar? Domain leer lassen und Registrieren ausschalten: Sidetone wird zum anonymen Client, der SIP-URIs direkt wählt (sip:600@10.0.0.5:5060).",
         "In der Browser-Version braucht das Konto eine WebSocket-URL (wss://...): Ihre TK-Anlage oder Ihr SBC muss SIP über WebSocket annehmen.",
-        "Provisionieren lädt Kontofelder von einer sidetone-provision-XML-URL (Einstellungen, Provisionieren am Konto). Ein SIP-NOTIFY mit Event check-sync oder resync lädt diese URL erneut; bei einem Gespräch wartet Sidetone, bis es endet, bevor die Datei angewendet wird.",
+        "Provisionieren lädt Kontofelder von einer sidetone-provision-XML-URL (Einstellungen, Provisionieren am Konto) und speichert sie. Ein SIP-NOTIFY mit Event check-sync oder resync lädt diese URL erneut; bei einem Gespräch wartet Sidetone, bis es endet, bevor die Datei angewendet wird.",
       ]],
       ["Anrufen und Anrufe annehmen", [
         "Nummer, benutzer@host oder SIP-URI eingeben und Enter oder Anrufen drücken. Im Gespräch sendet die Tastatur DTMF.",

@@ -2033,10 +2033,13 @@ async function runProvisionFetch() {
     if (native) applyNativeProvision(acc, parsed, url, $("#prov-tls").checked);
     else applyWebProvision(acc, parsed, url);
     if (!native && parsed.password) S.ctl.passwords[acc.id] = parsed.password;
-    SET.dirty = true;
     $("#prov-dialog").close();
-    renderSetBody();
-    toast(t("Provisioning loaded. Save to keep it."));
+    renderSetNav();
+    const saved = await saveAccounts();
+    if (!saved) {
+      SET.dirty = true;
+      await renderSetBody();
+    }
   } catch (e) {
     errEl.textContent = e.message || String(e);
     errEl.hidden = false;
@@ -2215,8 +2218,10 @@ async function saveAccounts() {
     SET.cfg = await S.ctl.getConfig();
     renderSetNav();
     renderSetBody();
+    return true;
   } catch (e) {
     toast(`Not saved: ${e.message || e}`, 5000);
+    return false;
   }
 }
 

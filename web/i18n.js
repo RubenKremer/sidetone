@@ -342,7 +342,6 @@ const T = {
   "Duplicate": ["Duplicar", "Duplicar", "Duplizieren"],
   "Provision": ["Provisionar", "Provisionar", "Provisionieren"],
   "Provisioning URL": ["URL de provisionamento", "URL de aprovisionamiento", "Provisioning-URL"],
-  "Provisioning loaded. Save to keep it.": ["Provisionamento carregado. Salve para manter.", "Aprovisionamiento cargado. Guarda para conservarlo.", "Provisioning geladen. Speichern, um es zu behalten."],
   "Fetch provisioning": ["Buscar provisionamento", "Obtener aprovisionamiento", "Provisioning abrufen"],
   "Fetch": ["Buscar", "Obtener", "Abrufen"],
   "This page is HTTPS, so it cannot download an http:// provisioning URL. Use the desktop app for a LAN server.": ["Esta página é HTTPS e não pode baixar uma URL de provisionamento http://. Use o app desktop para um servidor LAN.", "Esta página es HTTPS y no puede descargar una URL de aprovisionamiento http://. Usa la app de escritorio para un servidor LAN.", "Diese Seite ist HTTPS und kann keine http://-Provisioning-URL laden. Nutzen Sie die Desktop-App für einen LAN-Server."],
