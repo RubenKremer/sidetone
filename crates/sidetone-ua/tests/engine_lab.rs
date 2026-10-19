@@ -825,7 +825,8 @@ fn rtcp_reports_with_asterisk() {
     let a = acc("a", "2001", "secret2001", DtmfMode::Rfc4733);
     let e = Engine::start(settings, vec![a], None);
     wait_for(&e, "registered", 10, |e| {
-        e.state().accounts.iter().all(|a| a.state == "registered")
+        let a = e.state().accounts;
+        !a.is_empty() && a.iter().all(|a| a.state == "registered")
     });
     let l = e.call(CallRequest {
         account: Some("a".into()),
@@ -870,7 +871,8 @@ fn hep_copies_to_a_collector() {
     let a = acc("a", "2001", "secret2001", DtmfMode::Rfc4733);
     let e = Engine::start(settings, vec![a], None);
     wait_for(&e, "registered", 10, |e| {
-        e.state().accounts.iter().all(|a| a.state == "registered")
+        let a = e.state().accounts;
+        !a.is_empty() && a.iter().all(|a| a.state == "registered")
     });
     // The HEP copies, unwrapped, make a capture the analysis reads like any other.
     let mut methods = Vec::new();
@@ -956,7 +958,8 @@ fn call_forwarding() {
     );
     for e in [&fwd, &caller] {
         wait_for(e, "registered", 10, |e| {
-            e.state().accounts.iter().all(|a| a.state == "registered")
+            let a = e.state().accounts;
+            !a.is_empty() && a.iter().all(|a| a.state == "registered")
         });
     }
     let l = caller.call(CallRequest {
