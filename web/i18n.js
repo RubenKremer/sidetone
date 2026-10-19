@@ -46,6 +46,7 @@ const T = {
   "Required": ["Obrigatória", "Obligatorio", "Erforderlich"],
   "SRTP keys": ["Chaves SRTP", "Claves SRTP", "SRTP-Schlüssel"],
   "SDES puts the keys in the SDP (a=crypto): use it with TLS. DTLS-SRTP negotiates them on the media path and checks the far end's certificate against a=fingerprint.": ["SDES coloca as chaves no SDP (a=crypto): use com TLS. DTLS-SRTP negocia as chaves no caminho de mídia e confere o certificado do outro lado com o a=fingerprint.", "SDES pone las claves en el SDP (a=crypto): úsalo con TLS. DTLS-SRTP las negocia en la ruta de medios y comprueba el certificado del otro extremo con a=fingerprint.", "SDES legt die Schlüssel ins SDP (a=crypto): mit TLS verwenden. DTLS-SRTP handelt sie auf dem Medienpfad aus und prüft das Zertifikat der Gegenseite gegen a=fingerprint."],
+  "Drag to resize, double-click to reset": ["Arraste para redimensionar, clique duplo para voltar ao padrão", "Arrastra para cambiar el tamaño, doble clic para restablecer", "Ziehen zum Ändern der Größe, Doppelklick zum Zurücksetzen"],
   "Presence not published": ["Presença não publicada", "Presencia no publicada", "Presence nicht veröffentlicht"],
   "Available": ["Disponível", "Disponible", "Verfügbar"],
   "Away": ["Ausente", "Ausente", "Abwesend"],

@@ -1460,6 +1460,98 @@ function bindDock() {
   $("#ai-redact").addEventListener("change", (e) => saveAiSettings({ ...aiSettings(), redact: e.target.checked, key: aiSettings().key, remember: aiSettings().remember }));
 }
 
+// ---- draggable dividers
+
+/// A divider that sets a CSS length on `box`: "col" moves a vertical line
+/// (size from the left), "row" a horizontal one (size from the bottom).
+function splitter(box, { name, axis, min, max, start, place }) {
+  const g = document.createElement("div");
+  g.className = `gutter ${axis === "col" ? "v" : "h"}`;
+  g.setAttribute("role", "separator");
+  g.setAttribute("aria-orientation", axis === "col" ? "vertical" : "horizontal");
+  g.title = t("Drag to resize, double-click to reset");
+  box.appendChild(g);
+  const key = `sidetone.split.${name}`;
+  // Every divider of the box moves when any of them does.
+  (box._gutters ||= []).push(() => place(g, box));
+  const replace = () => box._gutters.forEach((f) => f());
+  const apply = (px) => {
+    if (px == null) box.style.removeProperty(`--${name}`);
+    else box.style.setProperty(`--${name}`, `${Math.round(px)}px`);
+    replace();
+  };
+  const clamp = (px) => {
+    const r = box.getBoundingClientRect();
+    const total = axis === "col" ? r.width : r.height;
+    return Math.max(min, Math.min(px, total - max));
+  };
+  const saved = store.get(key, null);
+  apply(saved);
+  g.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    g.setPointerCapture(e.pointerId);
+    g.classList.add("drag");
+    document.body.classList.add("resizing", axis);
+    const move = (ev) => {
+      const r = box.getBoundingClientRect();
+      const px = axis === "col" ? ev.clientX - r.left : r.bottom - ev.clientY;
+      apply(clamp(px));
+    };
+    const up = () => {
+      g.classList.remove("drag");
+      document.body.classList.remove("resizing", axis);
+      g.removeEventListener("pointermove", move);
+      g.removeEventListener("pointerup", up);
+      const v = parseFloat(box.style.getPropertyValue(`--${name}`));
+      if (!Number.isNaN(v)) store.set(key, v);
+    };
+    g.addEventListener("pointermove", move);
+    g.addEventListener("pointerup", up);
+  });
+  g.addEventListener("dblclick", () => {
+    store.set(key, null);
+    apply(start);
+  });
+  // Keyboard: arrows move the divider by 24 px.
+  g.tabIndex = 0;
+  g.addEventListener("keydown", (e) => {
+    const step = { ArrowLeft: -24, ArrowRight: 24, ArrowUp: 24, ArrowDown: -24 }[e.key];
+    if (step == null) return;
+    e.preventDefault();
+    const cur = parseFloat(box.style.getPropertyValue(`--${name}`)) || (axis === "col" ? g.offsetLeft : box.clientHeight - g.offsetTop);
+    const v = clamp(cur + step);
+    apply(v);
+    store.set(key, v);
+  });
+  new ResizeObserver(replace).observe(box);
+  return g;
+}
+
+function bindSplitters() {
+  const an = $(".an-grid");
+  const calls = $(".an-grid .calls");
+  const detail = $(".an-grid .detail");
+  // Dialog list | ladder and details.
+  splitter(an, {
+    name: "an-left", axis: "col", min: 160, max: 360, start: null,
+    place: (g) => { g.style.left = `${calls.offsetWidth}px`; },
+  });
+  // Ladder above, details below.
+  splitter(an, {
+    name: "an-bottom", axis: "row", min: 90, max: 80, start: null,
+    place: (g) => { g.style.left = `${calls.offsetWidth}px`; g.style.right = "0"; g.style.top = `${detail.offsetTop}px`; },
+  });
+  // SIP trace: message list above, message below.
+  const tr = $(".trace-split");
+  const view = $(".trace-split .trace-view");
+  if (tr && view) {
+    splitter(tr, {
+      name: "tr-bottom", axis: "row", min: 80, max: 60, start: null,
+      place: (g) => { g.style.left = "0"; g.style.right = "0"; g.style.top = `${view.offsetTop}px`; },
+    });
+  }
+}
+
 function bindAnalysis() {
   $("#file").addEventListener("change", (e) => e.target.files[0] && loadFile(e.target.files[0]));
   document.addEventListener("dragover", (e) => {
@@ -2373,6 +2465,7 @@ async function main() {
   bindTrace();
   bindAnalysis();
   bindDiag();
+  bindSplitters();
   bindSettings();
   bindDock();
   renderAiUsing();
