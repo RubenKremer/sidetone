@@ -142,8 +142,14 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          exe=$(ls target/release/sidetone-desktop.exe app/src-tauri/target/release/sidetone-desktop.exe target/release/Sidetone.exe 2>/dev/null | head -1)
-          test -n "$exe" || { echo "desktop executable not found"; exit 1; }
+          exe=$(find target app/src-tauri/target -maxdepth 3 -path '*release/*' -iname '*.exe' 2>/dev/null | grep -iE '/(sidetone-desktop|sidetone)\.exe$' | grep -v '/sidetone\.exe$' | head -1)
+          [ -n "$exe" ] || exe=$(find target app/src-tauri/target -maxdepth 3 -path '*release/*' -iname 'sidetone*.exe' 2>/dev/null | head -1)
+          if [ -z "$exe" ]; then
+            echo "desktop executable not found; executables built:"
+            find . -path ./node_modules -prune -o -iname '*.exe' -print 2>/dev/null | grep -v '/deps/\|/build/' | head -40
+            exit 1
+          fi
+          echo "portable from $exe"
           v="${{ needs.meta.outputs.tag }}"
           mkdir -p portable/Sidetone
           cp "$exe" portable/Sidetone/Sidetone.exe
