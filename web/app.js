@@ -8,6 +8,7 @@ import { initI18n, currentLang, setLang, LANGS, t } from "./i18n.js";
 import { renderHelp } from "./help.js";
 import { renderExplain, sdpTable, headerHelp, statusHelp } from "./explain.js";
 import { compileFilter, FIELD_NAMES } from "./filter.js";
+import { trFinding } from "./findings-i18n.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -1364,8 +1365,8 @@ function renderFindings() {
     .map((f) => {
       const idx = S.report.findings.indexOf(f);
       return `<li class="${f.severity}" data-finding="${idx}" tabindex="0">
-        <div><span class="f-sev">${sevName[f.severity]}</span><span class="f-title">${esc(f.title)}</span></div>
-        <div class="f-detail">${esc(f.detail)}</div>
+        <div><span class="f-sev">${esc(t(sevName[f.severity]))}</span><span class="f-title">${esc(trFinding(f.title))}</span></div>
+        <div class="f-detail">${esc(trFinding(f.detail))}</div>
         <div class="f-rule">${esc(f.rule)}${f.messages.length ? `, messages ${f.messages.map((m) => "#" + m).join(" ")}` : ""}</div>
       </li>`;
     })
@@ -1468,7 +1469,7 @@ function selectMessage(idx, switchTab = true) {
     ${messageSummary(m)}
     ${m.status ? `<p class="status-help"><b>${m.status}</b> ${esc(statusHelp(m.status))}</p>` : ""}
     ${sdpOf(m) ? `<details class="sdp-explained" open><summary>${esc(t("SDP explained line by line"))}</summary>${sdpTable(sdpOf(m))}</details>` : ""}
-    ${related.length ? `<ul class="findings" style="margin-bottom:10px">${related.map((f) => `<li class="${f.severity}"><span class="f-title">${esc(f.title)}</span><div class="f-detail">${esc(f.detail)}</div></li>`).join("")}</ul>` : ""}
+    ${related.length ? `<ul class="findings" style="margin-bottom:10px">${related.map((f) => `<li class="${f.severity}"><span class="f-title">${esc(trFinding(f.title))}</span><div class="f-detail">${esc(trFinding(f.detail))}</div></li>`).join("")}</ul>` : ""}
     <pre class="sipmsg">${highlightSip(m.raw)}</pre>`;
   if (switchTab) showTab("message");
 }

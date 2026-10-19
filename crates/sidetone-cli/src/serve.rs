@@ -25,6 +25,7 @@ const I18N_JS: &str = include_str!("../../../web/i18n.js");
 const HELP_JS: &str = include_str!("../../../web/help.js");
 const EXPLAIN_JS: &str = include_str!("../../../web/explain.js");
 const FILTER_JS: &str = include_str!("../../../web/filter.js");
+const FINDINGS_I18N_JS: &str = include_str!("../../../web/findings-i18n.js");
 
 fn header(k: &str, v: &str) -> Header {
     Header::from_bytes(k.as_bytes(), v.as_bytes()).expect("valid header")
@@ -421,6 +422,9 @@ fn handle(
                 "help.js" => ok_bytes(HELP_JS.as_bytes().to_vec(), "text/javascript"),
                 "explain.js" => ok_bytes(EXPLAIN_JS.as_bytes().to_vec(), "text/javascript"),
                 "filter.js" => ok_bytes(FILTER_JS.as_bytes().to_vec(), "text/javascript"),
+                "findings-i18n.js" => {
+                    ok_bytes(FINDINGS_I18N_JS.as_bytes().to_vec(), "text/javascript")
+                }
                 _ => err(404, "not found"),
             }
         }
