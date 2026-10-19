@@ -3,7 +3,7 @@
 // matches one sentence or phrase and keeps the values: {} any text, {w} one
 // word, {n} a number. Entries: [english, pt, es, de]; $1, $2... are the values.
 
-import { currentLang } from "./i18n.js";
+import { currentLang, EXTRA } from "./i18n.js";
 
 const E = [
   // ---- capture
@@ -279,7 +279,7 @@ function compile() {
     }
     // A sentence ending in a token is closed by the end of the text or the next sentence.
     if (/\((?:\.\+\?|\\S\+\?)\)$/.test(re)) re += "(?=$|[.;,]\\s|\\.$)";
-    return [new RegExp(re, "g"), tr];
+    return [new RegExp(re, "g"), tr, src];
   });
   // Longest English first so a full sentence wins over a fragment of it.
   compiled.sort((a, b) => b[0].source.length - a[0].source.length);
@@ -287,6 +287,19 @@ function compile() {
 
 /// Translates a finding title or detail to the current language.
 export function trFinding(text) {
+  const X = EXTRA[currentLang()];
+  if (X && text) {
+    if (X.WHOLE[text.trim()]) return X.WHOLE[text.trim()];
+    if (!compiled) compile();
+    let out = text;
+    for (const [re, , src] of compiled) {
+      const tr = X.F[src];
+      if (!tr) continue;
+      re.lastIndex = 0;
+      out = out.replace(re, tr);
+    }
+    return out.replace(/(\.\s)([A-Z][a-z]+(?: [a-z]+)?)$/, (m, sep, h) => (X.WHOLE[h] ? sep + X.WHOLE[h] : m));
+  }
   const i = { pt: 0, es: 1, de: 2 }[currentLang()];
   if (i == null || !text) return text;
   if (WHOLE[text.trim()]) return WHOLE[text.trim()][i];

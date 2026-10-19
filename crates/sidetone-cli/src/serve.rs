@@ -28,6 +28,9 @@ const EXPLAIN_JS: &str = include_str!("../../../web/explain.js");
 const FILTER_JS: &str = include_str!("../../../web/filter.js");
 const FINDINGS_I18N_JS: &str = include_str!("../../../web/findings-i18n.js");
 const FILTER_SUGGEST_JS: &str = include_str!("../../../web/filter-suggest.js");
+const LANG_FR_JS: &str = include_str!("../../../web/lang-fr.js");
+const LANG_ZH_JS: &str = include_str!("../../../web/lang-zh.js");
+const LANG_HI_JS: &str = include_str!("../../../web/lang-hi.js");
 
 fn header(k: &str, v: &str) -> Header {
     Header::from_bytes(k.as_bytes(), v.as_bytes()).expect("valid header")
@@ -436,6 +439,9 @@ fn handle(
                 "filter-suggest.js" => {
                     ok_bytes(FILTER_SUGGEST_JS.as_bytes().to_vec(), "text/javascript")
                 }
+                "lang-fr.js" => ok_bytes(LANG_FR_JS.as_bytes().to_vec(), "text/javascript"),
+                "lang-zh.js" => ok_bytes(LANG_ZH_JS.as_bytes().to_vec(), "text/javascript"),
+                "lang-hi.js" => ok_bytes(LANG_HI_JS.as_bytes().to_vec(), "text/javascript"),
                 _ => err(404, "not found"),
             }
         }

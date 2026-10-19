@@ -2270,7 +2270,7 @@ function aiSettings() {
     provider: s.provider || "anthropic",
     model: s.model || AI_DEFAULT_MODEL[s.provider || "anthropic"],
     base_url: s.base_url || null,
-    language: s.language || { pt: "Portuguese (Brazil)", es: "Spanish", de: "German" }[currentLang()] || "English",
+    language: s.language || { pt: "Portuguese (Brazil)", es: "Spanish", de: "German", fr: "French", zh: "Chinese (Simplified)", hi: "Hindi" }[currentLang()] || "English",
     redact: s.redact !== false,
     key: s.key || aiSessionKey || null,
     remember: !!s.key,
@@ -3855,7 +3855,7 @@ async function renderGlobal(section) {
           <label class="fld">${esc(t("Base URL"))} <span class="hint">${esc(t("empty = the provider's default; a full .../chat/completions URL also works"))}</span><input id="as-base" value="${esc(a.base_url || "")}" spellcheck="false"></label>
           <label class="fld" id="as-key-wrap">${esc(t("API key"))}<input id="as-key" type="password" value="${esc(a.key || "")}" autocomplete="off"></label>
           <label class="check fld"><input type="checkbox" id="as-remember" ${a.remember ? "checked" : ""}> ${esc(t("Remember the key on this device"))}</label>
-          <label class="fld">${esc(t("Answer in"))}<select id="as-lang">${["English", "Portuguese (Brazil)", "Spanish", "German"].map((l) => `<option value="${l}" ${l === a.language ? "selected" : ""}>${esc(t(l))}</option>`).join("")}</select></label>
+          <label class="fld">${esc(t("Answer in"))}<select id="as-lang">${["English", "Portuguese (Brazil)", "Spanish", "German", "French", "Chinese (Simplified)", "Hindi"].map((l) => `<option value="${l}" ${l === a.language ? "selected" : ""}>${esc(t(l))}</option>`).join("")}</select></label>
           <label class="check fld"><input type="checkbox" id="as-redact" ${a.redact ? "checked" : ""}> ${esc(t("Mask numbers, names, credentials and public IPs before sending"))}</label>
         </div>
         <p class="hint">${esc(S.be.kind === "wasm" ? t("In the browser the request goes straight from this page to the provider; some providers block that (CORS). Anthropic, OpenRouter and a local Ollama with OLLAMA_ORIGINS work.") : t("Requests go from this computer to the provider."))}</p>

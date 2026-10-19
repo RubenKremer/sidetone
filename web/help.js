@@ -1,5 +1,7 @@
 // Help and About, written per language (not machine-swapped like the rest of the UI).
 
+import { EXTRA } from "./i18n.js";
+
 const REPO = "https://github.com/igtoth/sidetone";
 
 const H = {
@@ -304,7 +306,7 @@ const H = {
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
 export function renderHelp(el, { lang, version, mode, langs, onLang }) {
-  const h = H[lang] || H.en;
+  const h = H[lang] || (EXTRA[lang] && EXTRA[lang].H) || H.en;
   el.innerHTML = `
     <div class="help help-raw">
       <div class="page-head"><h1>${esc(h.title)}</h1>

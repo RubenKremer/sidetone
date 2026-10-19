@@ -4,11 +4,22 @@
 // SIP messages, traces, findings from the analyzer and user data are left
 // untouched: they are evidence and stay as they are on the wire.
 
+import FR from "./lang-fr.js";
+import ZH from "./lang-zh.js";
+import HI from "./lang-hi.js";
+
+// Languages kept in their own files ({T, P, FEATURE, WORDS, WHY, F, WHOLE, H}),
+// keyed by the English text instead of a position in the arrays below.
+export const EXTRA = { fr: FR, zh: ZH, hi: HI };
+
 export const LANGS = [
   ["en", "English"],
   ["pt", "Português (Brasil)"],
   ["es", "Español"],
   ["de", "Deutsch"],
+  ["fr", "Français"],
+  ["zh", "中文（简体）"],
+  ["hi", "हिन्दी"],
 ];
 
 // English -> [Portuguese (Brazil), Spanish, German]
@@ -338,6 +349,9 @@ const T = {
   "DHCP server": ["Servidor DHCP", "Servidor DHCP", "DHCP-Server"],
   "Option": ["Opção", "Opción", "Option"],
   "User": ["Usuário", "Usuario", "Benutzer"],
+  "French": ["Francês", "Francés", "Französisch"],
+  "Chinese (Simplified)": ["Chinês (simplificado)", "Chino (simplificado)", "Chinesisch (vereinfacht)"],
+  "Hindi": ["Hindi", "Hindi", "Hindi"],
   "Presence not published": ["Presença não publicada", "Presencia no publicada", "Presence nicht veröffentlicht"],
   "Available": ["Disponível", "Disponible", "Verfügbar"],
   "Away": ["Ausente", "Ausente", "Abwesend"],
@@ -832,8 +846,40 @@ export function currentLang() {
 }
 
 /// Translates one string; unknown strings come back unchanged.
+function tExtra(X, s) {
+  const key = String(s);
+  const trimmed = key.trim();
+  const hit = X.T[trimmed];
+  if (hit) return key.replace(trimmed, hit);
+  for (const [re, out] of P) {
+    const m = trimmed.match(re);
+    if (!m) continue;
+    if (typeof out === "function") {
+      const why = (w) => {
+        for (const [r] of WHY) if (r.test(w) && X.WHY[r.source]) return w.replace(r, X.WHY[r.source]);
+        return w;
+      };
+      const f = X.FEATURE[m[1]] || m[1];
+      if (/ failed: /.test(re.source)) return key.replace(trimmed, `${f} ${X.WORDS.failed}: ${why(m[2])}${m[3] || ""}`);
+      return key.replace(trimmed, `${f} ${X.WORDS.accepted} (${m[2]})`);
+    }
+    if (out === null) {
+      if (re.source.includes(" L(")) {
+        const kind = m[1] === "Call" ? X.WORDS.call_noun : X.T[m[1]] || m[1];
+        return key.replace(trimmed, `${kind} L${m[2]}`);
+      }
+      const a = X.T[m[2]] || X.T[m[1]];
+      return a ? key.replace(trimmed, `${m[1]}: ${a}`) : s;
+    }
+    const tr = X.P[re.source];
+    return tr ? key.replace(trimmed, trimmed.replace(re, tr)) : s;
+  }
+  return s;
+}
+
 export function t(s) {
   if (lang === "en" || s == null) return s;
+  if (EXTRA[lang]) return tExtra(EXTRA[lang], s);
   const i = IDX[lang];
   const key = String(s);
   const trimmed = key.trim();
@@ -894,9 +940,9 @@ export function initI18n() {
   let saved = null;
   try { saved = localStorage.getItem("sidetone.lang"); } catch { /* storage unavailable */ }
   const nav = (navigator.language || "en").slice(0, 2).toLowerCase();
-  lang = saved || (IDX[nav] !== undefined ? nav : "en");
+  lang = saved || (IDX[nav] !== undefined || EXTRA[nav] ? nav : "en");
   if (!LANGS.some(([c]) => c === lang)) lang = "en";
-  document.documentElement.lang = lang === "pt" ? "pt-BR" : lang;
+  document.documentElement.lang = lang === "pt" ? "pt-BR" : lang === "zh" ? "zh-CN" : lang;
   if (lang === "en") return;
   translateNode(document.body);
   new MutationObserver((muts) => {

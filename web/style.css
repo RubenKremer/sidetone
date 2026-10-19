@@ -17,7 +17,7 @@
   --bad-bg: #dc2626;
   --end: #7c3aed;
   --info: #2563eb;
-  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Nirmala UI", "Noto Sans Devanagari", sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --radius: 6px;
   color-scheme: light;
