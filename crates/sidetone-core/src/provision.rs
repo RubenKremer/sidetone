@@ -1,4 +1,12 @@
-//! Sidetone provisioning XML → account JSON (native desktop or browser web phone).
+//! Provisioning files → account JSON (native desktop or browser web phone).
+//!
+//! The native app reads three formats, recognized from the content: Sidetone's
+//! own `sidetone-provision` XML (strict: unknown keys fail), a Yealink `.cfg`
+//! and a Polycom (Poly UC Software) XML. Vendor files are full phone
+//! configurations, so keys Sidetone has no use for are skipped; line 1 (the
+//! first account with a user) becomes the Sidetone account.
+
+mod vendor;
 
 use quick_xml::events::{attributes::Attribute, BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
@@ -53,7 +61,10 @@ fn parse_flat(xml: &str) -> Result<HashMap<String, String>, String> {
                     return Err("unexpected element after root".into());
                 } else {
                     if e.attributes().count() > 0 {
-                        return Err(format!("attributes are not allowed on <{}>", local_name(&e)));
+                        return Err(format!(
+                            "attributes are not allowed on <{}>",
+                            local_name(&e)
+                        ));
                     }
                     let key = local_name(&e);
                     if !key.starts_with(ACCOUNT_PREFIX) {
@@ -132,7 +143,9 @@ fn attr(e: &BytesStart, key: &str) -> Result<String, String> {
         if name == key {
             found = Some(attr_value(&a)?);
         } else {
-            return Err(format!("unexpected attribute on sidetone-provision: {name}"));
+            return Err(format!(
+                "unexpected attribute on sidetone-provision: {name}"
+            ));
         }
     }
     found.ok_or_else(|| format!("missing attribute {key} on sidetone-provision"))
@@ -194,7 +207,10 @@ fn opt_null_str(v: &str) -> Value {
     }
 }
 
-fn contiguous_indices(prefix: &str, keys: &HashMap<String, String>) -> Result<Vec<(u32, String)>, String> {
+fn contiguous_indices(
+    prefix: &str,
+    keys: &HashMap<String, String>,
+) -> Result<Vec<(u32, String)>, String> {
     let mut items: BTreeMap<u32, String> = BTreeMap::new();
     let needle = format!("{ACCOUNT_PREFIX}{prefix}.");
     for (k, v) in keys {
@@ -218,7 +234,11 @@ fn contiguous_indices(prefix: &str, keys: &HashMap<String, String>) -> Result<Ve
     for i in 1..=max {
         match items.get(&i) {
             Some(v) => out.push((i, v.clone())),
-            None => return Err(format!("non-contiguous {prefix} index: missing {prefix}.{i}")),
+            None => {
+                return Err(format!(
+                    "non-contiguous {prefix} index: missing {prefix}.{i}"
+                ))
+            }
         }
     }
     Ok(out)
@@ -278,10 +298,8 @@ fn parse_headers(keys: &HashMap<String, String>) -> Result<Vec<(String, String)>
 }
 
 fn is_native_only_suffix(suf: &str) -> bool {
-    matches!(
-        suf,
-        "ws" | "ice" | "remember_password"
-    ) || suf.starts_with("codec.")
+    matches!(suf, "ws" | "ice" | "remember_password")
+        || suf.starts_with("codec.")
         || suf.starts_with("blf.")
         || suf.starts_with("header.")
         || matches!(
@@ -321,6 +339,8 @@ fn is_native_only_suffix(suf: &str) -> bool {
                 | "outbound_proxy"
                 | "q_value"
                 | "auth_user"
+                | "mwi"
+                | "voicemail"
         )
 }
 
@@ -328,10 +348,53 @@ fn is_browser_only_suffix(suf: &str) -> bool {
     matches!(suf, "ws" | "ice" | "remember_password")
 }
 
+/// Codec names a provisioning file may list, in Sidetone's spelling.
+const CODEC_NAMES: &[&str] = &[
+    "PCMU",
+    "PCMA",
+    "G722",
+    "opus",
+    "G729",
+    "GSM",
+    "iLBC",
+    "speex/8000",
+    "speex/16000",
+    "G726-16",
+    "G726-24",
+    "G726-32",
+    "G726-40",
+    "AAL2-G726-32",
+    "L16/8000",
+    "L16/16000",
+    "L16/44100",
+];
+
+/// Sidetone's name for a codec, accepting any case and the short aliases.
+pub fn codec_name(c: &str) -> Option<&'static str> {
+    let c = c.trim();
+    let alias = match c.to_ascii_lowercase().as_str() {
+        "speex" => "speex/8000",
+        "l16" => "L16/8000",
+        "g726" => "G726-32",
+        _ => c,
+    };
+    CODEC_NAMES
+        .iter()
+        .find(|n| n.eq_ignore_ascii_case(alias))
+        .copied()
+}
+
 fn is_shared_suffix(suf: &str) -> bool {
     matches!(
         suf,
-        "label" | "enabled" | "register" | "user" | "password" | "domain" | "display_name" | "expires"
+        "label"
+            | "enabled"
+            | "register"
+            | "user"
+            | "password"
+            | "domain"
+            | "display_name"
+            | "expires"
     )
 }
 
@@ -348,8 +411,7 @@ fn classify_unknown(suf: &str) -> bool {
     if suf.starts_with("header.") {
         let rest = &suf[7..];
         if let Some((idx, field)) = rest.split_once('.') {
-            return idx.chars().all(|c| c.is_ascii_digit())
-                && matches!(field, "name" | "value");
+            return idx.chars().all(|c| c.is_ascii_digit()) && matches!(field, "name" | "value");
         }
         return false;
     }
@@ -388,10 +450,20 @@ fn require_non_empty(keys: &HashMap<String, String>, field: &str) -> Result<Stri
     }
 }
 
-fn parse_native(xml: &str) -> Result<Value, String> {
-    let keys = parse_flat(xml)?;
-    validate_keys_native(&keys)?;
+fn parse_native(text: &str) -> Result<Value, String> {
+    match vendor::detect(text) {
+        vendor::Format::Yealink => native_from_keys(&vendor::yealink(text)?),
+        vendor::Format::Polycom => native_from_keys(&vendor::polycom(text)?),
+        vendor::Format::Sidetone => {
+            let keys = parse_flat(text)?;
+            validate_keys_native(&keys)?;
+            native_from_keys(&keys)
+        }
+    }
+}
 
+fn native_from_keys(keys: &HashMap<String, String>) -> Result<Value, String> {
+    let keys = keys.clone();
     let user = require_non_empty(&keys, "user")?;
     let domain = require_non_empty(&keys, "domain")?;
     let display_name = require_non_empty(&keys, "display_name")?;
@@ -457,7 +529,8 @@ fn parse_native(xml: &str) -> Result<Value, String> {
     let mut offer_gruu = false;
     let mut long_contact = false;
     let mut rport = true;
-    let mut codecs: Vec<String> = vec!["PCMU".into(), "PCMA".into()];
+    // Empty: the account follows the global codec list.
+    let mut codecs: Vec<String> = Vec::new();
     let mut ptime_ms: u32 = 20;
     let mut dtmf_mode = "rfc4733".to_string();
     let mut dtmf_payload_type: u8 = 101;
@@ -540,7 +613,9 @@ fn parse_native(xml: &str) -> Result<Value, String> {
     if let Some(s) = keys.get(&format!("{ACCOUNT_PREFIX}dtmf_payload_type")) {
         dtmf_payload_type = parse_u8(s, "dtmf_payload_type")?;
         if dtmf_payload_type > 127 {
-            return Err(format!("dtmf_payload_type out of range: {dtmf_payload_type}"));
+            return Err(format!(
+                "dtmf_payload_type out of range: {dtmf_payload_type}"
+            ));
         }
     }
     if let Some(s) = keys.get(&format!("{ACCOUNT_PREFIX}srtp")) {
@@ -615,26 +690,15 @@ fn parse_native(xml: &str) -> Result<Value, String> {
     if !codec_entries.is_empty() {
         codecs.clear();
         for (_, c) in codec_entries {
-            let up = c.to_ascii_uppercase();
-            let norm = match up.as_str() {
-                "PCMU" | "PCMA" | "OPUS" => {
-                    if up == "OPUS" {
-                        "opus".to_string()
-                    } else {
-                        up
-                    }
-                }
-                _ => return Err(format!("invalid codec: {c}")),
-            };
-            codecs.push(norm);
+            let norm = codec_name(&c).ok_or_else(|| format!("invalid codec: {c}"))?;
+            if !codecs.iter().any(|x| x == norm) {
+                codecs.push(norm.to_string());
+            }
         }
     }
 
     let headers = parse_headers(&keys)?;
-    let extra_headers: Vec<Value> = headers
-        .into_iter()
-        .map(|(n, v)| json!([n, v]))
-        .collect();
+    let extra_headers: Vec<Value> = headers.into_iter().map(|(n, v)| json!([n, v])).collect();
 
     let behavior = json!({
         "transport": transport,
@@ -681,7 +745,7 @@ fn parse_native(xml: &str) -> Result<Value, String> {
         "expires": expires,
         "q_value": q_value,
     });
-    Ok(json!({
+    let mut out = json!({
         "label": label,
         "enabled": enabled,
         "register": register,
@@ -692,10 +756,28 @@ fn parse_native(xml: &str) -> Result<Value, String> {
             "account": account,
             "behavior": behavior,
         }
-    }))
+    });
+    // Voicemail keys only when the file has them, so an absent key keeps
+    // what the account already had.
+    if let Some(s) = keys.get(&format!("{ACCOUNT_PREFIX}mwi")) {
+        out["mwi"] = json!(parse_bool(s, "mwi")?);
+    }
+    if let Some(s) = keys.get(&format!("{ACCOUNT_PREFIX}voicemail")) {
+        out["voicemail"] = json!(s);
+    }
+    Ok(out)
 }
 
 fn parse_browser(xml: &str) -> Result<Value, String> {
+    match vendor::detect(xml) {
+        vendor::Format::Sidetone => {}
+        f => {
+            return Err(format!(
+                "{} files have no WebSocket address for the browser phone: provision this account in the desktop app",
+                f.name()
+            ))
+        }
+    }
     let keys = parse_flat(xml)?;
     validate_keys_browser(&keys)?;
 

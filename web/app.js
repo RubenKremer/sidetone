@@ -3307,6 +3307,8 @@ function applyNativeProvision(acc, p, url, tlsVerify) {
   acc.register = p.register;
   if (p.retry_s != null) acc.retry_s = p.retry_s;
   if (p.blf) acc.blf = p.blf;
+  if (p.mwi != null) acc.mwi = p.mwi;
+  if (p.voicemail != null) acc.voicemail = p.voicemail;
   if (!acc.profile) acc.profile = { name: keepName, account: {}, behavior: {} };
   acc.profile.name = keepName;
   Object.assign(acc.profile.account, p.profile.account);
@@ -3342,6 +3344,7 @@ function openProvisionDialog() {
   $("#prov-title").textContent = t("Fetch provisioning");
   $("#prov-url-label").textContent = t("Provisioning URL");
   $("#prov-tls-label").textContent = t("Check the server's TLS certificate");
+  $("#prov-hint").textContent = t(native ? "Sidetone XML, a Yealink .cfg or a Polycom XML; from a phone file, the first configured line is used." : "Sidetone XML with a WebSocket address (ws or wss). Yealink and Polycom files need the desktop app.");
   $("#prov-fetch").textContent = t("Fetch");
   $("#prov-cancel").textContent = t("Cancel");
   $("#prov-err").hidden = true;

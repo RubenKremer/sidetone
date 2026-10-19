@@ -340,9 +340,7 @@ impl Phone {
             None
         };
         let settings = if let Some(s) = v.get("settings") {
-            Some(
-                serde_json::from_value(s.clone()).map_err(|e| anyhow!("settings: {e}"))?,
-            )
+            Some(serde_json::from_value(s.clone()).map_err(|e| anyhow!("settings: {e}"))?)
         } else {
             None
         };
@@ -420,19 +418,18 @@ impl Phone {
             self.engine.cmd(Cmd::SetAccounts(c.accounts.clone()));
             c.clone()
         };
-        self.engine.emit(
-            "provisioned",
-            Some(id.to_string()),
-            "provisioning applied",
-        );
+        self.engine
+            .emit("provisioned", Some(id.to_string()), "provisioning applied");
         self.save_config(&snapshot);
         Ok(())
     }
 
     fn account_has_live_call(&self, account_id: &str) -> bool {
-        self.engine.state().calls.iter().any(|c| {
-            c.account == account_id && c.state != "ended"
-        })
+        self.engine
+            .state()
+            .calls
+            .iter()
+            .any(|c| c.account == account_id && c.state != "ended")
     }
 
     fn poll_provisioning(&self) {

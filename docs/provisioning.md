@@ -5,8 +5,16 @@ Open the account in Settings, press **Provision** (on an empty phone the same
 button sits next to **Add account**), paste the URL, and save. A file that
 fails verification leaves the form unchanged.
 
-This is a Sidetone account file, not a Yealink (or any other desk-phone)
-configuration. The root is `<sidetone-provision version="1">`. One file
+The desktop app also reads Yealink `.cfg` and Polycom XML files, the same
+files a PBX serves to its desk phones (see [Yealink and Polycom files](#yealink-and-polycom-files)).
+
+Not to be confused with Settings, **Import and export**, which saves or
+loads the whole Sidetone configuration (every account, settings, codecs) as
+one `sidetone-config` JSON, from a file or a URL: that is for backups and
+moving between machines, while this page is for a PBX or provisioning server
+that owns one account and can change it later.
+
+Sidetone's own format is described first. The root is `<sidetone-provision version="1">`. One file
 describes one account, always index `1`. Unknown keys, a wrong version, a
 wrong root, or a second account reject the whole file.
 
@@ -69,6 +77,8 @@ file that contains a desktop-only key (`transport`, `codec.1`, `blf.1`,
 | `expires` | `300` | Registration expiry, seconds |
 | `retry_s` | `30` | Delay before retrying a failed registration |
 | `q_value` | unset | Contact `q` value, as text |
+| `mwi` | kept | Voicemail lamp (SUBSCRIBE message-summary): `0` or `1` |
+| `voicemail` | kept | Number the voicemail button dials, e.g. `*97` |
 
 ### Transport
 
@@ -93,7 +103,7 @@ file that contains a desktop-only key (`transport`, `codec.1`, `blf.1`,
 
 | Key | Default if omitted | Values |
 |---|---|---|
-| `codec.N` | `PCMU`, then `PCMA` | `PCMU`, `PCMA`, or `opus`. Any `codec.N` replaces the default list |
+| `codec.N` | the global codec list | `PCMU`, `PCMA`, `G722`, `opus`, `G729`, `GSM`, `iLBC`, `speex/8000`, `speex/16000`, `G726-16`, `G726-24`, `G726-32`, `G726-40`, `AAL2-G726-32`, `L16/8000`, `L16/16000`, `L16/44100` (any case). Without `codec.N` the account uses Settings, Call handling |
 | `ptime_ms` | `20` | `10`, `20`, `30`, `40`, or `60` |
 | `sdp_direction` | `sendrecv` | `sendrecv`, `sendonly`, `recvonly`, `inactive` |
 | `srtp` | `off` | `off`, `optional`, `mandatory` |
@@ -266,6 +276,39 @@ Leave the elements out to keep them unset as well.
   <account.1.remember_password>0</account.1.remember_password>
 </sidetone-provision>
 ```
+
+## Yealink and Polycom files
+
+Paste the URL of the file your PBX or provisioning server already serves to
+a desk phone: a Yealink `y0000000000xx.cfg` / `<MAC>.cfg`, or a Polycom
+`<MAC>.cfg` / `phone1.cfg` style XML. The format is recognized from the
+content. These files describe a whole phone, so settings a softphone has no
+use for (screen, keys, firmware, network) are skipped instead of rejected.
+The first configured line becomes the Sidetone account; resync by NOTIFY
+works the same way. The browser phone cannot use them (they have no
+WebSocket address).
+
+| Sidetone | Yealink | Polycom |
+|---|---|---|
+| line used | first `account.N` with `enable = 1` and a `user_name` | first `reg.N` with an `address` |
+| `user` | `account.N.user_name` | `reg.N.address` (user part) |
+| `auth_user` | `account.N.auth_name` | `reg.N.auth.userId` |
+| `password` | `account.N.password` | `reg.N.auth.password` |
+| `display_name` | `account.N.display_name`, else the label, else the user | `reg.N.displayName`, same fallbacks |
+| `label` | `account.N.label` | `reg.N.label` |
+| `domain` | `account.N.sip_server.1.address` and `.port` (or `sip_server_host` / `sip_server_port`) | `reg.N.server.1.address` and `.port`, else `voIpProt.server.1.*` |
+| `transport` | `sip_server.1.transport_type`: 0 UDP, 1 TCP, 2 TLS, 3 DNS NAPTR (no port, SRV lookup) | `server.1.transport`: `UDPOnly`, `TCPOnly`/`TCPpreferred`, `TLS`, `DNSnaptr` |
+| `expires` | `sip_server.1.expires` | `server.1.expires` |
+| `outbound_proxy` | `outbound_proxy.1.address` when `outbound_proxy_enable = 1` | `reg.N.outboundProxy.address` or `voIpProt.SIP.outboundProxy.address` |
+| `codec.N` | enabled `account.N.codec.M.payload_type` by `priority`; codecs Sidetone lacks are skipped | `voice.codecPref.*` by number (`0` off): G711_Mu, G711_A, G722, G729_AB, iLBC, OPUS, Lin16 |
+| `dtmf_mode` | `dtmf.type`: 0 inband, 1 RFC 2833, 2/3 SIP INFO | INFO when `voIpProt.SIP.dtmfViaSignaling.rfc2976 = 1` |
+| `srtp` | `srtp_encryption`: 0 off, 1 optional, 2 mandatory | `sec.srtp.require`, `sec.srtp.enable` with `sec.srtp.offer` |
+| `mwi`, `voicemail` | `subscribe_mwi`, `voice_mail.number.N` | `msg.mwi.N.subscribe`, `msg.mwi.N.callBack` |
+| `blf.N` | `linekey.M.value` of keys with `type = 16` on this line | `attendant.resourceList.M.address` |
+| others | `nat.rport`, `session_timer.*`, `dtmf.dtmf_payload` | `tone.dtmf.rfc2833Payload` |
+
+Files that use `$MAC`-style names are fetched by their final URL: type the
+URL with the MAC your PBX expects.
 
 ## Fetching the file
 

@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use ureq::{AgentBuilder, RedirectAuthHeaders};
 
-const MAX_BODY: usize = 256 * 1024;
+// Full Yealink and Polycom configurations run to a few hundred kilobytes.
+const MAX_BODY: usize = 2 * 1024 * 1024;
 const USER_AGENT: &str = concat!("Sidetone/", env!("CARGO_PKG_VERSION"));
 
 /// Downloads provisioning XML and returns native `parse` JSON (does not persist).
@@ -45,7 +46,8 @@ pub fn fetch_provision(url: &str, tls_verify: bool) -> Result<Value> {
     if body.len() > MAX_BODY {
         return Err(anyhow!("provisioning body exceeds {} bytes", MAX_BODY));
     }
-    let xml = String::from_utf8(body).map_err(|e| anyhow!("provisioning body is not UTF-8: {e}"))?;
+    let xml =
+        String::from_utf8(body).map_err(|e| anyhow!("provisioning body is not UTF-8: {e}"))?;
     sidetone_core::provision::parse(&xml, "native").map_err(|e| anyhow!("{e}"))
 }
 
@@ -117,7 +119,10 @@ pub(crate) fn redact_url(url: &str) -> String {
     let Some(at) = rest.find('@') else {
         return url.to_string();
     };
-    let after = rest[at + 1..].find('/').map(|i| at + 1 + i).unwrap_or(rest.len());
+    let after = rest[at + 1..]
+        .find('/')
+        .map(|i| at + 1 + i)
+        .unwrap_or(rest.len());
     format!("{}://***@{}", scheme, &rest[after..])
 }
 
@@ -175,10 +180,17 @@ struct ProvisionNative {
     retry_s: u32,
     blf: Vec<String>,
     profile: Profile,
+    #[serde(default)]
+    mwi: Option<bool>,
+    #[serde(default)]
+    voicemail: Option<String>,
 }
 
 /// Maps native provision JSON onto an account, preserving id, URL, TLS, and profile name.
-pub(crate) fn account_from_provision_json(stored: &AccountCfg, parsed: Value) -> Result<AccountCfg> {
+pub(crate) fn account_from_provision_json(
+    stored: &AccountCfg,
+    parsed: Value,
+) -> Result<AccountCfg> {
     let mut v = parsed;
     patch_user_agent_if_null(&mut v, &stored.profile.behavior.user_agent);
     let p: ProvisionNative =
@@ -190,8 +202,8 @@ pub(crate) fn account_from_provision_json(stored: &AccountCfg, parsed: Value) ->
         register: p.register,
         retry_s: p.retry_s,
         blf: p.blf,
-        mwi: stored.mwi,
-        voicemail: stored.voicemail.clone(),
+        mwi: p.mwi.unwrap_or(stored.mwi),
+        voicemail: p.voicemail.unwrap_or_else(|| stored.voicemail.clone()),
         profile: Profile {
             name: stored.profile.name.clone(),
             account: p.profile.account,
@@ -275,9 +287,7 @@ mod tests {
     }
 
     fn has_authorization(req: &tiny_http::Request) -> bool {
-        req.headers()
-            .iter()
-            .any(|h| h.field.equiv("Authorization"))
+        req.headers().iter().any(|h| h.field.equiv("Authorization"))
     }
 
     fn run_server<F: Fn(tiny_http::Request) + Send + 'static>(handler: F) -> String {
@@ -313,7 +323,10 @@ mod tests {
         });
         let user = "alice";
         let pass = "secret";
-        let authed = format!("http://{user}:{pass}@{}", base.trim_start_matches("http://"));
+        let authed = format!(
+            "http://{user}:{pass}@{}",
+            base.trim_start_matches("http://")
+        );
         let authed = format!("{authed}/cfg");
         let _ = fetch_provision(&authed, true).expect("provision");
         assert!(

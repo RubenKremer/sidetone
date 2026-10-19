@@ -5702,30 +5702,15 @@ mod provision_resync_tests {
 
     #[test]
     fn resync_gate_cases() {
-        assert_eq!(
-            resync_gate(true, false, 0, true, 0),
-            ResyncGate::Wait
-        );
-        assert_eq!(
-            resync_gate(true, true, 0, false, 1),
-            ResyncGate::Wait
-        );
-        assert_eq!(
-            resync_gate(true, true, 0, false, 0),
-            ResyncGate::Emit
-        );
+        assert_eq!(resync_gate(true, false, 0, true, 0), ResyncGate::Wait);
+        assert_eq!(resync_gate(true, true, 0, false, 1), ResyncGate::Wait);
+        assert_eq!(resync_gate(true, true, 0, false, 0), ResyncGate::Emit);
         assert_eq!(
             resync_gate(true, false, usize::MAX, false, 0),
             ResyncGate::Ignore
         );
-        assert_eq!(
-            resync_gate(false, false, 0, false, 0),
-            ResyncGate::Ignore
-        );
-        assert_eq!(
-            resync_gate(false, true, 0, false, 0),
-            ResyncGate::Ignore
-        );
+        assert_eq!(resync_gate(false, false, 0, false, 0), ResyncGate::Ignore);
+        assert_eq!(resync_gate(false, true, 0, false, 0), ResyncGate::Ignore);
     }
 }
 
