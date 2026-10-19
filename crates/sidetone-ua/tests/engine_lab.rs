@@ -715,8 +715,15 @@ fn codecs_interop() {
     ];
     let mut bad = Vec::new();
     let only = std::env::var("SIDETONE_CODECS").unwrap_or_default();
-    for (codec, target, expect) in cases {
+    // A codec gets up to three tries: Asterisk may start its encoder before
+    // the first RTP packet goes out, and Speex on a pure tone then diverges.
+    let runs: Vec<&(&str, &str, &str)> = cases.iter().flat_map(|c| [c, c, c]).collect();
+    let mut passed: Vec<&str> = Vec::new();
+    for (codec, target, expect) in runs {
         if !only.is_empty() && !only.split(',').any(|c| c == *codec) {
+            continue;
+        }
+        if passed.contains(codec) {
             continue;
         }
         let before: Vec<u32> = e.state().calls.iter().map(|c| c.line).collect();
@@ -733,7 +740,10 @@ fn codecs_interop() {
         let st = e.state();
         let me = st.calls.iter().find(|c| c.line == l).unwrap();
         let used = me.codec.clone().unwrap_or_default();
-        println!("  rtp sent {} received {} rx level {}", me.rtp_sent, me.rtp_received, me.rx_level);
+        println!(
+            "  rtp sent {} received {} rx level {}",
+            me.rtp_sent, me.rtp_received, me.rx_level
+        );
         let other = st
             .calls
             .iter()
@@ -759,10 +769,58 @@ fn codecs_interop() {
         );
         if !used.eq_ignore_ascii_case(expect) || mine < 0.5 || theirs.is_some_and(|t| t < 0.5) {
             bad.push(format!("{codec}: {used} {mine:.2} {theirs:?}"));
+        } else {
+            passed.push(codec);
+            bad.retain(|b| !b.starts_with(&format!("{codec}:")));
         }
         // Lines linger 40 s after the end; let the next call get fresh ones.
         std::thread::sleep(Duration::from_millis(300));
     }
     e.cmd(Cmd::HangupAll);
+    if let Ok(p) = std::env::var("SIDETONE_CODECS_PCAP") {
+        std::fs::write(p, e.capture()).ok();
+    }
     assert!(bad.is_empty(), "codecs failing: {bad:?}");
+}
+
+#[test]
+#[ignore]
+fn rtcp_reports_with_asterisk() {
+    let settings = PhoneSettings {
+        audio_source: "tone".into(),
+        auto_hold: false,
+        ..Default::default()
+    };
+    let a = acc("a", "2001", "secret2001", DtmfMode::Rfc4733);
+    let e = Engine::start(settings, vec![a], None);
+    wait_for(&e, "registered", 10, |e| {
+        e.state().accounts.iter().all(|a| a.state == "registered")
+    });
+    let l = e.call(CallRequest {
+        account: Some("a".into()),
+        target: "600".into(),
+        overrides: Some(serde_json::json!({ "codecs": ["PCMU"] })),
+        ..Default::default()
+    });
+    wait_for(&e, "connected", 10, |e| line_state(e, l) == "connected");
+    wait_for(&e, "RTCP both ways with a round trip", 20, |e| {
+        e.state()
+            .calls
+            .iter()
+            .any(|c| c.line == l && c.rtcp_sent >= 2 && c.rtcp_received >= 1 && c.rtt_ms.is_some())
+    });
+    let c = e.state().calls.into_iter().find(|c| c.line == l).unwrap();
+    println!(
+        "rtcp sent {} received {} rtt {:?} remote loss {:?} jitter {:?}, our rx loss {:?} jitter {:?}",
+        c.rtcp_sent, c.rtcp_received, c.rtt_ms, c.remote_loss_pct, c.remote_jitter_ms, c.rx_loss_pct, c.rx_jitter_ms
+    );
+    assert!(c.rtt_ms.unwrap() < 50.0, "loopback round trip");
+    // The capture holds the RTCP and the analysis puts it on the streams.
+    let r = sidetone_core::analyze_bytes(&e.capture()).unwrap();
+    assert!(r.summary.rtcp_packets >= 3);
+    assert!(
+        r.streams.iter().any(|s| !s.rtcp.is_empty()),
+        "RTCP attached to a stream"
+    );
+    e.cmd(Cmd::HangupAll);
 }

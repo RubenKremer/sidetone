@@ -12,6 +12,8 @@ const BASE_NS: i64 = 1_792_231_200 * 1_000_000_000;
 pub struct Synth {
     pkts: Vec<(i64, Vec<u8>)>,
     t0_ms: i64,
+    /// Streams (by SSRC) whose payload is digital silence.
+    silent: Vec<u32>,
 }
 
 fn sa(s: &str) -> SocketAddr {
@@ -60,9 +62,57 @@ pub fn sdp_body(ip: &str, port: u16, proto: &str, pts: &[(u8, &str)], extra: &[&
 impl Synth {
     pub fn new(t0_ms: i64) -> Self {
         Synth {
+            silent: Vec::new(),
             pkts: Vec::new(),
             t0_ms,
         }
+    }
+
+    /// RTCP sender report with one reception report block.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rtcp_sr(
+        &mut self,
+        t_ms: i64,
+        src: &str,
+        dst: &str,
+        ssrc: u32,
+        ntp_mid: u32,
+        packets: u32,
+        about: Option<(u32, u8, u32, u32, u32)>,
+    ) {
+        let n = about.is_some() as u8;
+        let mut p = vec![0x80 | n, 200, 0, if n == 1 { 12 } else { 6 }];
+        p.extend_from_slice(&ssrc.to_be_bytes());
+        p.extend_from_slice(&(ntp_mid >> 16).to_be_bytes());
+        p.extend_from_slice(&(ntp_mid << 16).to_be_bytes());
+        p.extend_from_slice(&(packets * 160).to_be_bytes());
+        p.extend_from_slice(&packets.to_be_bytes());
+        p.extend_from_slice(&(packets * 160).to_be_bytes());
+        if let Some(b) = about {
+            p.extend(report_block(b));
+        }
+        self.pkts.push((
+            BASE_NS + (self.t0_ms + t_ms) * 1_000_000,
+            build_udp_packet(sa(src), sa(dst), &p),
+        ));
+    }
+
+    /// RTCP receiver report: (about SSRC, fraction lost /256, jitter units, LSR, DLSR).
+    pub fn rtcp_rr(
+        &mut self,
+        t_ms: i64,
+        src: &str,
+        dst: &str,
+        ssrc: u32,
+        about: (u32, u8, u32, u32, u32),
+    ) {
+        let mut p = vec![0x81, 201, 0, 7];
+        p.extend_from_slice(&ssrc.to_be_bytes());
+        p.extend(report_block(about));
+        self.pkts.push((
+            BASE_NS + (self.t0_ms + t_ms) * 1_000_000,
+            build_udp_packet(sa(src), sa(dst), &p),
+        ));
     }
 
     pub fn sip(&mut self, t_ms: i64, src: &str, dst: &str, text: &str) {
@@ -128,7 +178,12 @@ impl Synth {
                 // A voice-like signal (voiced syllables with pauses) so playback
                 // and the waveform show something; pitch differs per stream.
                 let f0 = 110.0 + (ssrc % 7) as f64 * 15.0;
+                let mute = self.silent.contains(&ssrc);
                 for k in 0..160u32 {
+                    if mute {
+                        p.push(if pt == 8 { 0xd5 } else { 0xff });
+                        continue;
+                    }
                     let n = ts.wrapping_add(k) as f64 / 8000.0;
                     let syl = (n * 3.3 * std::f64::consts::PI).sin().max(0.0);
                     let gate = if (n * 0.7).fract() < 0.75 { 1.0 } else { 0.0 };
@@ -926,7 +981,257 @@ pub fn scenario_srtp_mismatch(s: &mut Synth) {
     );
 }
 
+fn report_block((ssrc, fraction, jitter, lsr, dlsr): (u32, u8, u32, u32, u32)) -> Vec<u8> {
+    let mut b = ssrc.to_be_bytes().to_vec();
+    let cum = (fraction as u32) * 2;
+    b.extend_from_slice(&[fraction, (cum >> 16) as u8, (cum >> 8) as u8, cum as u8]);
+    b.extend_from_slice(&1000u32.to_be_bytes());
+    b.extend_from_slice(&jitter.to_be_bytes());
+    b.extend_from_slice(&lsr.to_be_bytes());
+    b.extend_from_slice(&dlsr.to_be_bytes());
+    b
+}
+
+/// A call through an SBC: the phone leg and the carrier leg (X-CID names the
+/// first), RTCP with round trip and loss reported by the carrier, and carrier
+/// audio that flows but is silent.
+pub fn scenario_sbc_legs(s: &mut Synth) {
+    let phone = "10.40.1.10:5060";
+    let sbc_in = "10.40.1.1:5060";
+    let sbc_out = "192.0.2.1:5060";
+    let carrier = "198.51.100.7:5060";
+    let base = 150_000;
+    let call = |s: &mut Synth,
+                t: i64,
+                a: &str,
+                b: &str,
+                cid: &str,
+                from: &str,
+                to: &str,
+                ruri: &str,
+                ip_a: &str,
+                port_a: u16,
+                ip_b: &str,
+                port_b: u16,
+                extra: &[(&str, String)],
+                tag: &str| {
+        let via = format!("SIP/2.0/UDP {a};branch=z9hG4bK{tag}");
+        let to_t = format!("{to};tag={tag}b");
+        let mut h: Vec<(&str, String)> = vec![("Contact", format!("<sip:x@{a}>"))];
+        h.extend(extra.iter().cloned());
+        s.sip(
+            t,
+            a,
+            b,
+            &sip_text(
+                &format!("INVITE {ruri} SIP/2.0"),
+                &hdrs(&via, from, to, cid, "1 INVITE", &h),
+                &sdp_body(
+                    ip_a,
+                    port_a,
+                    "RTP/AVP",
+                    &[(0, "PCMU/8000"), (101, "telephone-event/8000")],
+                    &[],
+                ),
+            ),
+        );
+        s.sip(
+            t + 3,
+            b,
+            a,
+            &sip_text(
+                "SIP/2.0 100 Trying",
+                &hdrs(&via, from, to, cid, "1 INVITE", &[]),
+                "",
+            ),
+        );
+        s.sip(
+            t + 900,
+            b,
+            a,
+            &sip_text(
+                "SIP/2.0 180 Ringing",
+                &hdrs(&via, from, &to_t, cid, "1 INVITE", &[]),
+                "",
+            ),
+        );
+        s.sip(
+            t + 2500,
+            b,
+            a,
+            &sip_text(
+                "SIP/2.0 200 OK",
+                &hdrs(
+                    &via,
+                    from,
+                    &to_t,
+                    cid,
+                    "1 INVITE",
+                    &[("Contact", format!("<sip:y@{b}>"))],
+                ),
+                &sdp_body(
+                    ip_b,
+                    port_b,
+                    "RTP/AVP",
+                    &[(0, "PCMU/8000"), (101, "telephone-event/8000")],
+                    &[],
+                ),
+            ),
+        );
+        let via2 = format!("SIP/2.0/UDP {a};branch=z9hG4bK{tag}ack");
+        s.sip(
+            t + 2510,
+            a,
+            b,
+            &sip_text(
+                &format!("ACK {ruri} SIP/2.0"),
+                &hdrs(&via2, from, &to_t, cid, "1 ACK", &[]),
+                "",
+            ),
+        );
+        let via3 = format!("SIP/2.0/UDP {a};branch=z9hG4bK{tag}bye");
+        s.sip(
+            t + 14500,
+            a,
+            b,
+            &sip_text(
+                &format!("BYE {ruri} SIP/2.0"),
+                &hdrs(&via3, from, &to_t, cid, "2 BYE", &[]),
+                "",
+            ),
+        );
+        s.sip(
+            t + 14510,
+            b,
+            a,
+            &sip_text(
+                "SIP/2.0 200 OK",
+                &hdrs(&via3, from, &to_t, cid, "2 BYE", &[]),
+                "",
+            ),
+        );
+    };
+    let from = "\"Desk 7001\" <sip:7001@corp.example>;tag=pa";
+    call(
+        s,
+        base,
+        phone,
+        sbc_in,
+        "leg-a-7001@10.40.1.10",
+        from,
+        "<sip:+5511987654321@corp.example>",
+        "sip:+5511987654321@corp.example",
+        "10.40.1.10",
+        30000,
+        "10.40.1.1",
+        40000,
+        &[("User-Agent", "DeskPhone 5.1".into())],
+        "la",
+    );
+    call(
+        s,
+        base + 40,
+        sbc_out,
+        carrier,
+        "b2b-91f3c2@192.0.2.1",
+        "<sip:+551130001234@192.0.2.1>;tag=pb",
+        "<sip:+5511987654321@carrier.example>",
+        "sip:+5511987654321@carrier.example",
+        "192.0.2.1",
+        50000,
+        "198.51.100.7",
+        60000,
+        &[
+            ("X-CID", "leg-a-7001@10.40.1.10".into()),
+            ("User-Agent", "EdgeSBC 9.1".into()),
+        ],
+        "lb",
+    );
+    // Media: the phone talks, the carrier's audio arrives as digital silence.
+    s.silent.push(0x5000_0004);
+    let t = base + 2520;
+    s.rtp(
+        t,
+        "10.40.1.10:30000",
+        "10.40.1.1:40000",
+        0,
+        0x5000_0001,
+        600,
+        &|_| false,
+        1,
+        &[],
+    );
+    s.rtp(
+        t,
+        "10.40.1.1:40000",
+        "10.40.1.10:30000",
+        0,
+        0x5000_0002,
+        600,
+        &|_| false,
+        1,
+        &[],
+    );
+    s.rtp(
+        t,
+        "192.0.2.1:50000",
+        "198.51.100.7:60000",
+        0,
+        0x5000_0003,
+        600,
+        &|_| false,
+        2,
+        &[],
+    );
+    s.rtp(
+        t,
+        "198.51.100.7:60000",
+        "192.0.2.1:50000",
+        0,
+        0x5000_0004,
+        600,
+        &|_| false,
+        2,
+        &[],
+    );
+    // RTCP every 5 s: the SBC sends SRs; the carrier reports 8% loss and 9 ms
+    // jitter on the SBC's stream; round trip SBC <-> carrier about 180 ms.
+    for k in 1..=2i64 {
+        let ts = t + k * 5000;
+        let ntp = 0x1000_0000u32 + k as u32 * 0x0005_0000;
+        s.rtcp_sr(
+            ts,
+            "192.0.2.1:50001",
+            "198.51.100.7:60001",
+            0x5000_0003,
+            ntp,
+            250 * k as u32,
+            None,
+        );
+        s.rtcp_rr(
+            ts + 200,
+            "198.51.100.7:60001",
+            "192.0.2.1:50001",
+            0x5000_0004,
+            (0x5000_0003, 20, 72, ntp, 1311),
+        );
+        s.rtcp_sr(
+            ts + 10,
+            "10.40.1.10:30001",
+            "10.40.1.1:40001",
+            0x5000_0001,
+            ntp + 7,
+            250 * k as u32,
+            Some((0x5000_0002, 0, 8, 0, 0)),
+        );
+    }
+}
+
 pub const SCENARIOS: &[(&str, &str)] = &[
+    (
+        "sbc-legs",
+        "Call through an SBC: two legs linked by X-CID, RTCP with round trip and loss, silent carrier audio",
+    ),
     (
         "good-call",
         "Registration with digest auth and a clean call with RFC 4733 DTMF",
@@ -958,6 +1263,7 @@ pub fn generate(name: &str) -> Option<Vec<u8>> {
         "bad-quality" => scenario_bad_quality(&mut s),
         "register-timeout" => scenario_register_timeout(&mut s),
         "srtp-mismatch" => scenario_srtp_mismatch(&mut s),
+        "sbc-legs" => scenario_sbc_legs(&mut s),
         "demo" => {
             scenario_good_call(&mut s);
             scenario_nat_one_way(&mut s);
@@ -965,6 +1271,7 @@ pub fn generate(name: &str) -> Option<Vec<u8>> {
             scenario_bad_quality(&mut s);
             scenario_register_timeout(&mut s);
             scenario_srtp_mismatch(&mut s);
+            scenario_sbc_legs(&mut s);
         }
         _ => return None,
     }
@@ -1016,6 +1323,33 @@ mod tests {
                 rules.iter().any(|r| r == want),
                 "missing {want} in {rules:?}"
             );
+        }
+    }
+
+    #[test]
+    fn sbc_legs_are_linked_with_rtcp_and_silence() {
+        let r = crate::analysis::analyze_bytes(&generate("sbc-legs").unwrap()).unwrap();
+        let invites: Vec<_> = r.calls.iter().filter(|c| c.kind == "INVITE").collect();
+        assert_eq!(invites.len(), 2);
+        assert_eq!(
+            invites[0].related,
+            vec![invites[1].index],
+            "X-CID links the legs"
+        );
+        let out = r.streams.iter().find(|s| s.ssrc == "0x50000003").unwrap();
+        assert_eq!(out.remote_loss_pct, Some(7.81));
+        let rtt = out.rtt_ms.unwrap();
+        assert!((rtt - 180.0).abs() < 2.0, "rtt {rtt}");
+        assert!(
+            out.series.len() >= 11 && out.series[3][1] >= 49.0,
+            "{:?}",
+            &out.series[..4]
+        );
+        let silent = r.streams.iter().find(|s| s.ssrc == "0x50000004").unwrap();
+        assert!(silent.silence_pct.unwrap() > 99.0);
+        let rules = rules_of("sbc-legs");
+        for want in ["rtp.silent", "rtcp.loss"] {
+            assert!(rules.iter().any(|x| x == want), "{want} in {rules:?}");
         }
     }
 

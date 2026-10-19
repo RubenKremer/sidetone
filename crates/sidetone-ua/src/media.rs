@@ -731,6 +731,8 @@ pub struct MediaCtl {
     pub record: AtomicBool,
     /// New remote address after a re-INVITE/UPDATE.
     pub remote: Mutex<Option<SocketAddr>>,
+    /// The current remote RTP address, for the RTCP thread.
+    pub remote_rtcp_hint: Mutex<Option<SocketAddr>>,
     /// Digits to play as inband dual tones.
     pub inband: Mutex<VecDeque<char>>,
     /// Peak levels of the last packet, 0..=32767.
@@ -778,6 +780,7 @@ fn mix_in(pcm: &mut [i16], adds: &[Arc<Ring>]) {
 impl Default for MediaCtl {
     fn default() -> Self {
         MediaCtl {
+            remote_rtcp_hint: Mutex::new(None),
             hold: AtomicBool::new(false),
             mute: AtomicBool::new(false),
             record: AtomicBool::new(true),
@@ -906,6 +909,192 @@ pub struct MediaStats {
     pub dtls_ready: bool,
     /// The DTLS handshake failed.
     pub dtls_failed: bool,
+    /// RTCP state: what we receive (for our reports) and what the far end reports.
+    pub rtcp: RtcpState,
+    pub sent_octets: u64,
+    pub our_ssrc: u32,
+}
+
+/// RTCP bookkeeping of one session (RFC 3550 section 6.4 and appendix A).
+#[derive(Debug, Clone, Default)]
+pub struct RtcpState {
+    pub remote_ssrc: Option<u32>,
+    base_ext: Option<i64>,
+    max_ext: Option<i64>,
+    pub received: u64,
+    /// Interarrival jitter in timestamp units.
+    jitter: f64,
+    prev_transit: Option<f64>,
+    expected_prior: u64,
+    received_prior: u64,
+    /// Middle 32 bits of the NTP time of the far end's last SR, and when it came.
+    last_sr: Option<(u32, Instant)>,
+    /// Results.
+    pub rtt_ms: Option<f64>,
+    pub remote_loss_pct: Option<f64>,
+    pub remote_jitter_ms: Option<f64>,
+    pub reports_received: u32,
+    pub reports_sent: u32,
+    pub rx_loss_pct: f64,
+    pub rx_jitter_ms: f64,
+}
+
+/// NTP time now as (seconds, fraction).
+fn ntp_now() -> (u32, u32) {
+    let d = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let sec = (d.as_secs() + 2_208_988_800) as u32;
+    let frac = ((d.subsec_nanos() as u64) << 32) / 1_000_000_000;
+    (sec, frac as u32)
+}
+
+impl RtcpState {
+    /// Accounts one received RTP packet (sequence, timestamp, arrival in clock units).
+    fn on_rtp(&mut self, ssrc: u32, seq: u16, ts: u32, arrival_units: f64) {
+        if self.remote_ssrc != Some(ssrc) {
+            *self = RtcpState {
+                remote_ssrc: Some(ssrc),
+                rtt_ms: self.rtt_ms,
+                remote_loss_pct: self.remote_loss_pct,
+                remote_jitter_ms: self.remote_jitter_ms,
+                reports_received: self.reports_received,
+                reports_sent: self.reports_sent,
+                last_sr: self.last_sr,
+                ..Default::default()
+            };
+        }
+        let s = seq as i64;
+        let ext = match self.max_ext {
+            None => s,
+            Some(m) => {
+                let mut e = (m & !0xffff) | s;
+                if e - m > 32768 {
+                    e -= 65536;
+                } else if m - e > 32768 {
+                    e += 65536;
+                }
+                e
+            }
+        };
+        self.base_ext = Some(self.base_ext.map_or(ext, |b| b.min(ext)));
+        self.max_ext = Some(self.max_ext.map_or(ext, |m| m.max(ext)));
+        self.received += 1;
+        let transit = arrival_units - ts as f64;
+        if let Some(p) = self.prev_transit {
+            let d = (transit - p).abs();
+            if d < 1e6 {
+                self.jitter += (d - self.jitter) / 16.0;
+            }
+        }
+        self.prev_transit = Some(transit);
+    }
+
+    /// The report block about the stream we receive, and our own loss/jitter view.
+    fn block(&mut self, clock: u32) -> Option<Vec<u8>> {
+        let ssrc = self.remote_ssrc?;
+        let (base, max) = (self.base_ext?, self.max_ext?);
+        let expected = (max - base + 1).max(0) as u64;
+        let lost = expected as i64 - self.received as i64;
+        let exp_int = expected.saturating_sub(self.expected_prior);
+        let rec_int = self.received.saturating_sub(self.received_prior);
+        self.expected_prior = expected;
+        self.received_prior = self.received;
+        let lost_int = exp_int as i64 - rec_int as i64;
+        let fraction = if exp_int == 0 || lost_int <= 0 {
+            0u8
+        } else {
+            ((lost_int << 8) / exp_int as i64).min(255) as u8
+        };
+        self.rx_loss_pct = if expected > 0 {
+            lost.max(0) as f64 * 100.0 / expected as f64
+        } else {
+            0.0
+        };
+        self.rx_jitter_ms = self.jitter * 1000.0 / clock.max(1) as f64;
+        let cum = lost.clamp(-0x80_0000, 0x7f_ffff) as i32;
+        let (lsr, dlsr) = match self.last_sr {
+            Some((mid, at)) => (mid, (at.elapsed().as_secs_f64() * 65536.0) as u32),
+            None => (0, 0),
+        };
+        let mut b = ssrc.to_be_bytes().to_vec();
+        b.extend_from_slice(&[fraction, (cum >> 16) as u8, (cum >> 8) as u8, cum as u8]);
+        b.extend_from_slice(&(max as u32).to_be_bytes());
+        b.extend_from_slice(&(self.jitter as u32).to_be_bytes());
+        b.extend_from_slice(&lsr.to_be_bytes());
+        b.extend_from_slice(&dlsr.to_be_bytes());
+        Some(b)
+    }
+
+    /// Takes what the far end says about our stream, and its SRs for our RTT.
+    fn on_rtcp(&mut self, our_ssrc: u32, clock: u32, data: &[u8]) {
+        use sidetone_core::rtcp::RtcpPacket;
+        let (now_s, now_f) = ntp_now();
+        let now_mid = (now_s << 16) | (now_f >> 16);
+        for p in sidetone_core::rtcp::parse_compound(data) {
+            let blocks = match p {
+                RtcpPacket::Sr {
+                    ntp_sec,
+                    ntp_frac,
+                    blocks,
+                    ..
+                } => {
+                    self.last_sr = Some(((ntp_sec << 16) | (ntp_frac >> 16), Instant::now()));
+                    blocks
+                }
+                RtcpPacket::Rr { blocks, .. } => blocks,
+                _ => continue,
+            };
+            for b in blocks.into_iter().filter(|b| b.ssrc == our_ssrc) {
+                self.reports_received += 1;
+                self.remote_loss_pct = Some(b.fraction_lost as f64 * 100.0 / 256.0);
+                self.remote_jitter_ms = Some(b.jitter as f64 * 1000.0 / clock.max(1) as f64);
+                if b.lsr != 0 {
+                    let rtt =
+                        now_mid.wrapping_sub(b.lsr).wrapping_sub(b.dlsr) as f64 * 1000.0 / 65536.0;
+                    if (0.0..10_000.0).contains(&rtt) {
+                        self.rtt_ms = Some(rtt);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One compound RTCP packet: SR (with a reception report when we receive)
+/// and SDES CNAME.
+fn build_rtcp(st: &mut MediaStats, clock: u32, last_ts: u32, cname: &str) -> Vec<u8> {
+    let block = st.rtcp.block(clock);
+    let rc = block.is_some() as u8;
+    let (sec, frac) = ntp_now();
+    let mut p = vec![0x80 | rc, 200, 0, 0];
+    p.extend_from_slice(&st.our_ssrc.to_be_bytes());
+    p.extend_from_slice(&sec.to_be_bytes());
+    p.extend_from_slice(&frac.to_be_bytes());
+    p.extend_from_slice(&last_ts.to_be_bytes());
+    p.extend_from_slice(&(st.sent_packets as u32).to_be_bytes());
+    p.extend_from_slice(&(st.sent_octets as u32).to_be_bytes());
+    if let Some(b) = block {
+        p.extend(b);
+    }
+    let words = p.len() / 4 - 1;
+    p[2..4].copy_from_slice(&(words as u16).to_be_bytes());
+    // SDES with the CNAME, padded to 32 bits.
+    let mut sd = vec![0x81, 202, 0, 0];
+    sd.extend_from_slice(&st.our_ssrc.to_be_bytes());
+    let name = &cname.as_bytes()[..cname.len().min(255)];
+    sd.push(1);
+    sd.push(name.len() as u8);
+    sd.extend_from_slice(name);
+    sd.push(0);
+    while sd.len() % 4 != 0 {
+        sd.push(0);
+    }
+    let words = sd.len() / 4 - 1;
+    sd[2..4].copy_from_slice(&(words as u16).to_be_bytes());
+    p.extend(sd);
+    st.rtcp.reports_sent += 1;
+    p
 }
 
 pub struct RtpSession {
@@ -1038,6 +1227,7 @@ impl RtpSession {
             let outbox = outbox.clone();
             let on_dtls_event = on_dtls_event.clone();
             let mut decoder = Decoder::new(codec);
+            let rx_start = Instant::now();
             let ctl = ctl.clone();
             let stop = stop.clone();
             let latched = latched.clone();
@@ -1075,12 +1265,23 @@ impl RtpSession {
                         None if dtls.is_some() => continue,
                         None => n,
                     };
+                    if sidetone_core::rtp::is_rtcp(&buf[..n]) {
+                        // RTCP multiplexed on the RTP port (rtcp-mux).
+                        let mut st = stats.lock().unwrap();
+                        let ours = st.our_ssrc;
+                        st.rtcp.on_rtcp(ours, codec.clock(), &buf[..n]);
+                        continue;
+                    }
                     let Some(h) = sidetone_core::rtp::parse_rtp(&buf[..n]) else {
                         continue;
                     };
                     {
                         let mut st = stats.lock().unwrap();
                         st.received_packets += 1;
+                        if Some(h.pt) != dtmf_pt {
+                            let units = rx_start.elapsed().as_secs_f64() * codec.clock() as f64;
+                            st.rtcp.on_rtp(h.ssrc, h.seq, h.ts, units);
+                        }
                         if symmetric && st.latched_remote.is_none() {
                             st.latched_remote = Some(from);
                             *latched.lock().unwrap() = Some(from);
@@ -1102,7 +1303,8 @@ impl RtpSession {
                         }
                         continue;
                     }
-                    if let Some(pcm) = decoder.decode(h.pt, &buf[h.payload_offset..n]) {
+                    let decoded = decoder.decode(h.pt, &buf[h.payload_offset..n]);
+                    if let Some(pcm) = decoded {
                         ctl.rx_level.store(peak(&pcm), Ordering::Relaxed);
                         for r in ctl.rx_copies.lock().unwrap().iter() {
                             r.push(&pcm);
@@ -1132,7 +1334,60 @@ impl RtpSession {
 
         let sent = self.sent.clone();
         let dtmf_queue = self.dtmf_queue.clone();
+        let last_ts_tx: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+        // RTCP on the next port (RFC 3550): reports every 5 s, and what the far
+        // end reports back. Plain RTP only; SRTP would need SRTCP.
+        if self.srtp.is_none() && self.dtls.is_none() {
+            let rtcp_local = SocketAddr::new(local.ip(), local.port().wrapping_add(1));
+            if let Ok(rs) = UdpSocket::bind(rtcp_local) {
+                let (stats, stop, tap, latched, ctl) = (
+                    stats.clone(),
+                    stop.clone(),
+                    tap.clone(),
+                    latched.clone(),
+                    ctl.clone(),
+                );
+                let last_ts_tx = last_ts_tx.clone();
+                let clock = codec.clock();
+                let cname = format!("sidetone@{}", local.ip());
+                self.handles.push(thread::spawn(move || {
+                    rs.set_read_timeout(Some(Duration::from_millis(200))).ok();
+                    let mut remote = remote;
+                    let mut next = Instant::now() + Duration::from_millis(1500);
+                    let mut buf = [0u8; 1500];
+                    while !stop.load(Ordering::Relaxed) {
+                        if let Some(r) = *ctl.remote_rtcp_hint.lock().unwrap() {
+                            remote = r;
+                        }
+                        if let Ok((n, from)) = rs.recv_from(&mut buf) {
+                            tap.record(from, rtcp_local, &buf[..n]);
+                            let mut st = stats.lock().unwrap();
+                            let ours = st.our_ssrc;
+                            st.rtcp.on_rtcp(ours, clock, &buf[..n]);
+                        }
+                        if Instant::now() >= next {
+                            next = Instant::now() + Duration::from_secs(5);
+                            let base = latched.lock().unwrap().unwrap_or(remote);
+                            let dest = SocketAddr::new(base.ip(), base.port().wrapping_add(1));
+                            let ts = *last_ts_tx.lock().unwrap();
+                            let pkt = {
+                                let mut st = stats.lock().unwrap();
+                                if st.our_ssrc == 0 {
+                                    continue;
+                                }
+                                build_rtcp(&mut st, clock, ts, &cname)
+                            };
+                            if rs.send_to(&pkt, dest).is_ok() {
+                                tap.record(rtcp_local, dest, &pkt);
+                            }
+                        }
+                    }
+                }));
+            }
+        }
+        let last_ts_tx2 = last_ts_tx.clone();
         self.handles.push(thread::spawn(move || {
+            let last_ts_tx = last_ts_tx2;
             let spp = SPMS * ptime_ms as usize; // samples per packet at AUDIO_RATE
             let ts_step = codec.clock() / 1000 * ptime_ms; // RTP timestamp units per packet
             let mut encoder = Encoder::new(codec);
@@ -1142,6 +1397,8 @@ impl RtpSession {
                 .unwrap_or(1);
             let mut seq: u16 = (ssrc >> 16) as u16;
             let mut ts: u32 = ssrc.rotate_left(7);
+            stats.lock().unwrap().our_ssrc = ssrc;
+            *last_ts_tx.lock().unwrap() = ts;
             let mut phase = 0f32;
             let mut sample_idx = 0usize;
             let start = Instant::now();
@@ -1157,6 +1414,7 @@ impl RtpSession {
             while !stop.load(Ordering::Relaxed) {
                 if let Some(r) = ctl.remote.lock().unwrap().take() {
                     remote = r;
+                    *ctl.remote_rtcp_hint.lock().unwrap() = Some(r);
                     *latched.lock().unwrap() = None;
                     stats.lock().unwrap().latched_remote = None;
                 }
@@ -1307,8 +1565,11 @@ impl RtpSession {
                 }
                 if send_sock.send_to(&pkt, dest).is_ok() {
                     tap.record(local, dest, &pkt);
-                    stats.lock().unwrap().sent_packets += 1;
+                    let mut st = stats.lock().unwrap();
+                    st.sent_packets += 1;
+                    st.sent_octets += pkt.len().saturating_sub(12) as u64;
                 }
+                *last_ts_tx.lock().unwrap() = ts;
                 seq = seq.wrapping_add(1);
                 ts = ts.wrapping_add(ts_step);
                 n += 1;
@@ -1442,7 +1703,10 @@ mod tests {
         }
         assert!(peak_out > 5000, "tone survives: {peak_out}");
         assert!(dec.decode(0, &[0xff; 160]).is_some(), "G.711 still decodes");
-        assert!(dec.decode(13, &[0; 10]).is_none(), "comfort noise is not audio we decode");
+        assert!(
+            dec.decode(13, &[0; 10]).is_none(),
+            "comfort noise is not audio we decode"
+        );
         assert_eq!(Codec::Opus(111), Codec::Opus(107));
         assert_eq!(c.clock(), 48000);
     }

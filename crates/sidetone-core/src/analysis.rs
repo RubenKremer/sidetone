@@ -98,6 +98,9 @@ pub struct Call {
     pub callee: String,
     pub errors: usize,
     pub warnings: usize,
+    /// Other dialogs of the same call (legs through a B2BUA/SBC), and why.
+    pub related: Vec<usize>,
+    pub related_by: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -127,6 +130,8 @@ pub struct Report {
     pub calls: Vec<Call>,
     pub messages: Vec<Message>,
     pub streams: Vec<RtpStream>,
+    /// Voice-quality reports carried in SIP PUBLISH (RFC 6035).
+    pub vq: Vec<crate::rtcp::VqReport>,
     pub findings: Vec<Finding>,
     #[serde(skip)]
     pub capture: Capture,
@@ -161,6 +166,13 @@ pub fn analyze_capture(cap: Capture) -> Report {
     let mut messages: Vec<Message> = Vec::new();
     let mut rtp_flows: BTreeMap<(SocketAddr, SocketAddr, u32), Vec<RtpObs>> = BTreeMap::new();
     let mut tcp: HashMap<FlowKey, TcpFlow> = HashMap::new();
+    let mut rtcp_obs: Vec<(
+        usize,
+        i64,
+        SocketAddr,
+        SocketAddr,
+        Vec<crate::rtcp::RtcpPacket>,
+    )> = Vec::new();
 
     for (i, p) in cap.packets.iter().enumerate() {
         let frame = i + 1;
@@ -185,12 +197,26 @@ pub fn analyze_capture(cap: Capture) -> Report {
                     }
                 } else if rtp::is_rtcp(d.payload) {
                     summary.rtcp_packets += 1;
+                    rtcp_obs.push((
+                        frame,
+                        p.ts_ns,
+                        d.src,
+                        d.dst,
+                        crate::rtcp::parse_compound(d.payload),
+                    ));
                 } else if let Some(h) = rtp::parse_rtp(d.payload) {
                     let mut head = [0u8; 4];
                     let pl = &d.payload[h.payload_offset..];
                     for (k, b) in pl.iter().take(4).enumerate() {
                         head[k] = *b;
                     }
+                    let (level_db, clipped) = match h.pt {
+                        0 | 8 => {
+                            let (l, c) = rtp::g711_level(pl, h.pt == 8);
+                            (Some(l), c)
+                        }
+                        _ => (None, 0.0),
+                    };
                     rtp_flows
                         .entry((d.src, d.dst, h.ssrc))
                         .or_default()
@@ -200,6 +226,8 @@ pub fn analyze_capture(cap: Capture) -> Report {
                             hdr: h,
                             payload_len: pl.len(),
                             head,
+                            level_db,
+                            clipped,
                         });
                 }
             }
@@ -341,6 +369,18 @@ pub fn analyze_capture(cap: Capture) -> Report {
         }
         streams.push(s);
     }
+    attach_rtcp(&mut streams, &rtcp_obs, start_ns);
+    correlate_legs(&mut calls, &messages);
+    let vq = messages
+        .iter()
+        .filter(|m| {
+            m.sip
+                .header("Content-Type")
+                .map(|c| c.to_ascii_lowercase().contains("vq-rtcpxr"))
+                .unwrap_or(false)
+        })
+        .flat_map(|m| crate::rtcp::parse_vq(&m.sip.body, m.index))
+        .collect();
     summary.rtp_streams = streams.len();
     summary.calls = calls.len();
 
@@ -351,6 +391,7 @@ pub fn analyze_capture(cap: Capture) -> Report {
         calls,
         messages,
         streams,
+        vq,
         findings: Vec::new(),
         capture: cap,
     };
@@ -508,6 +549,8 @@ fn build_call(index: usize, cid: &str, idxs: &[usize], msgs: &[Message], cap_sta
         callee,
         errors: 0,
         warnings: 0,
+        related: Vec::new(),
+        related_by: Vec::new(),
     };
 
     let ms: Vec<&Message> = idxs.iter().map(|&i| &msgs[i]).collect();
@@ -765,5 +808,232 @@ impl Report {
             }
         }
         self.calls.iter().position(|c| c.call_id == key)
+    }
+}
+
+/// Puts each RTCP report on the stream it describes: SRs on the sender's
+/// stream, report blocks and XR VoIP metrics on the stream they report on.
+fn attach_rtcp(
+    streams: &mut [RtpStream],
+    obs: &[(
+        usize,
+        i64,
+        SocketAddr,
+        SocketAddr,
+        Vec<crate::rtcp::RtcpPacket>,
+    )],
+    start_ns: i64,
+) {
+    use crate::rtcp::{RtcpPacket, RtcpView};
+    let key = |x: u32| format!("0x{x:08X}");
+    // When each SR was seen, by the middle 32 bits of its NTP time (for RTT).
+    let mut sr_seen: HashMap<u32, i64> = HashMap::new();
+    for (_, ts, _, _, pkts) in obs {
+        for p in pkts {
+            if let RtcpPacket::Sr {
+                ntp_sec, ntp_frac, ..
+            } = p
+            {
+                sr_seen.insert((ntp_sec << 16) | (ntp_frac >> 16), *ts);
+            }
+        }
+    }
+    for (frame, ts, src, _dst, pkts) in obs {
+        let t = (*ts - start_ns) as f64 / 1e9;
+        for p in pkts {
+            let (blocks, sender) = match p {
+                RtcpPacket::Sr {
+                    ssrc,
+                    packets,
+                    blocks,
+                    ..
+                } => {
+                    if let Some(s) = streams.iter_mut().find(|s| s.ssrc == key(*ssrc)) {
+                        s.rtcp.push(RtcpView {
+                            t,
+                            frame: *frame,
+                            from: src.to_string(),
+                            kind: "SR".into(),
+                            sender_packets: Some(*packets),
+                            ..Default::default()
+                        });
+                    }
+                    (blocks.as_slice(), true)
+                }
+                RtcpPacket::Rr { blocks, .. } => (blocks.as_slice(), false),
+                RtcpPacket::Xr { voip, .. } => {
+                    for v in voip {
+                        if let Some(s) = streams.iter_mut().find(|s| s.ssrc == key(v.ssrc)) {
+                            let some = |x: u8| (x != 127).then_some(x as f64 / 10.0);
+                            s.rtcp.push(RtcpView {
+                                t,
+                                frame: *frame,
+                                from: src.to_string(),
+                                kind: "XR".into(),
+                                fraction_lost_pct: Some(v.loss_rate as f64 * 100.0 / 256.0),
+                                discard_pct: Some(v.discard_rate as f64 * 100.0 / 256.0),
+                                rtt_ms: (v.round_trip_ms > 0).then_some(v.round_trip_ms as f64),
+                                mos_lq: some(v.mos_lq),
+                                mos_cq: some(v.mos_cq),
+                                r_factor: (v.r_factor != 127).then_some(v.r_factor as f64),
+                                jb_nominal_ms: Some(v.jb_nominal_ms),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                    continue;
+                }
+                _ => continue,
+            };
+            let _ = sender;
+            for b in blocks {
+                let Some(s) = streams.iter_mut().find(|s| s.ssrc == key(b.ssrc)) else {
+                    continue;
+                };
+                let clock = s.clock_rate.max(1) as f64;
+                let rtt = (b.lsr != 0)
+                    .then(|| sr_seen.get(&b.lsr))
+                    .flatten()
+                    .map(|sr_ts| (*ts - sr_ts) as f64 / 1e6 - b.dlsr as f64 * 1000.0 / 65536.0)
+                    .filter(|r| *r >= 0.0 && *r < 10_000.0);
+                s.rtcp.push(RtcpView {
+                    t,
+                    frame: *frame,
+                    from: src.to_string(),
+                    kind: if matches!(p, RtcpPacket::Sr { .. }) {
+                        "SR"
+                    } else {
+                        "RR"
+                    }
+                    .into(),
+                    fraction_lost_pct: Some(
+                        (b.fraction_lost as f64 * 10000.0 / 256.0).round() / 100.0,
+                    ),
+                    cumulative_lost: Some(b.cumulative_lost as i64),
+                    jitter_ms: Some((b.jitter as f64 * 100_000.0 / clock).round() / 100.0),
+                    rtt_ms: rtt.map(|r| (r * 100.0).round() / 100.0),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    for s in streams.iter_mut() {
+        let r = &s.rtcp;
+        s.remote_loss_pct = r
+            .iter()
+            .filter_map(|v| v.fraction_lost_pct)
+            .reduce(f64::max);
+        s.remote_jitter_ms = r.iter().filter_map(|v| v.jitter_ms).reduce(f64::max);
+        let rtts: Vec<f64> = r.iter().filter_map(|v| v.rtt_ms).collect();
+        s.rtt_ms = (!rtts.is_empty())
+            .then(|| (rtts.iter().sum::<f64>() / rtts.len() as f64 * 100.0).round() / 100.0);
+        s.xr_mos = r.iter().filter_map(|v| v.mos_lq).reduce(f64::min);
+    }
+}
+
+/// Headers a B2BUA or SBC uses to name the other leg of a call.
+const LEG_HEADERS: &[&str] = &[
+    "X-CID",
+    "X-Call-ID",
+    "X-Orig-Call-ID",
+    "X-Original-Call-ID",
+    "X-Leg-Call-ID",
+    "X-Correlation-ID",
+    "Session-ID",
+];
+
+/// Links dialogs that are legs of one call: by correlation headers carrying
+/// the other leg's Call-ID (as sngrep and Homer do), and by the same caller
+/// and number within two seconds (B2BUA without such headers).
+fn correlate_legs(calls: &mut [Call], messages: &[Message]) {
+    let n = calls.len();
+    let mut links: Vec<(usize, usize, String)> = Vec::new();
+    let by_cid: HashMap<String, usize> =
+        calls.iter().map(|c| (c.call_id.clone(), c.index)).collect();
+    for c in calls.iter() {
+        for &mi in &c.messages {
+            let m = &messages[mi];
+            for h in LEG_HEADERS {
+                if let Some(v) = m.sip.header(h) {
+                    let v = v.trim().trim_matches('"');
+                    // Session-ID (RFC 7989) is shared by every leg rather than naming one.
+                    if *h == "Session-ID" {
+                        let id = v
+                            .split(';')
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .to_ascii_lowercase();
+                        if id.len() >= 8 && id != "00000000000000000000000000000000" {
+                            for o in calls.iter() {
+                                if o.index != c.index
+                                    && o.messages.iter().any(|&k| {
+                                        messages[k]
+                                            .sip
+                                            .header("Session-ID")
+                                            .map(|x| {
+                                                x.split(';')
+                                                    .next()
+                                                    .unwrap_or("")
+                                                    .trim()
+                                                    .eq_ignore_ascii_case(&id)
+                                            })
+                                            .unwrap_or(false)
+                                    })
+                                {
+                                    links.push((c.index, o.index, "Session-ID".into()));
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    if let Some(&o) = by_cid.get(v) {
+                        if o != c.index {
+                            links.push((c.index, o, (*h).to_string()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Same caller and dialed number, INVITEs within 2 s: likely two legs.
+    let user = |s: &str| -> String {
+        let s = s
+            .split(['<', '>'])
+            .find(|x| x.contains("sip:") || x.contains("tel:"))
+            .unwrap_or(s);
+        s.trim_start_matches("sip:")
+            .trim_start_matches("sips:")
+            .trim_start_matches("tel:")
+            .split(['@', ';'])
+            .next()
+            .unwrap_or("")
+            .trim_start_matches('+')
+            .to_string()
+    };
+    for i in 0..n {
+        for j in i + 1..n {
+            let (a, b) = (&calls[i], &calls[j]);
+            if a.kind != "INVITE" || b.kind != "INVITE" {
+                continue;
+            }
+            let (fa, fb) = (user(&a.from), user(&b.from));
+            let (ta, tb) = (user(&a.to), user(&b.to));
+            let near = (a.start_ns - b.start_ns).abs() < 2_000_000_000;
+            let tail = |x: &str, y: &str| {
+                !x.is_empty() && !y.is_empty() && (x.ends_with(y) || y.ends_with(x))
+            };
+            if near && tail(&fa, &fb) && tail(&ta, &tb) {
+                links.push((i, j, "same caller and number".into()));
+            }
+        }
+    }
+    for (a, b, why) in links {
+        for (x, y) in [(a, b), (b, a)] {
+            if !calls[x].related.contains(&y) {
+                calls[x].related.push(y);
+                calls[x].related_by.push(why.clone());
+            }
+        }
     }
 }

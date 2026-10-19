@@ -63,6 +63,10 @@ pub struct RtpObs {
     pub payload_len: usize,
     /// First payload bytes, used for RFC 4733 telephone-event decoding.
     pub head: [u8; 4],
+    /// Level of the decoded audio in dBFS (G.711 only), for silence detection.
+    pub level_db: Option<f32>,
+    /// Share of samples at full scale (G.711 only), for clipping detection.
+    pub clipped: f32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -93,6 +97,25 @@ pub struct RtpStream {
     pub mos: Option<f64>,
     pub r_factor: Option<f64>,
     pub call: Option<usize>,
+    /// One row per second of the stream: [seconds from the stream start,
+    /// packets, lost, jitter ms, MOS] (MOS 0 when not enough packets).
+    pub series: Vec<[f64; 5]>,
+    /// Share of 20 ms of decoded audio that is silent (below -55 dBFS), G.711 only.
+    pub silence_pct: Option<f64>,
+    /// Share of samples clipped at full scale, G.711 only.
+    pub clipping_pct: Option<f64>,
+    /// Mean level of the audio when not silent, dBFS, G.711 only.
+    pub level_dbfs: Option<f64>,
+    /// RTCP reports about this stream (RR/XR from its receiver) and its own SRs.
+    pub rtcp: Vec<crate::rtcp::RtcpView>,
+    /// Worst loss the receiver reported in RTCP, percent.
+    pub remote_loss_pct: Option<f64>,
+    /// Worst jitter the receiver reported in RTCP, ms.
+    pub remote_jitter_ms: Option<f64>,
+    /// Mean round trip from RTCP (LSR/DLSR or XR), ms.
+    pub rtt_ms: Option<f64>,
+    /// Lowest MOS-LQ the receiver reported in RTCP XR.
+    pub xr_mos: Option<f64>,
     /// Frame numbers of the first and last packet.
     pub first_frame: usize,
     pub last_frame: usize,
@@ -160,6 +183,11 @@ pub fn compute_stream(
     let mut prev_ts: Option<(u32, u16)> = None;
     let mut dtmf_events: Vec<String> = Vec::new();
     let mut last_dtmf_ts: Option<u32> = None;
+    // Per-second windows: (packets, min ext seq, max ext seq, jitter at end).
+    let start_arrival = obs.first().map(|o| o.arrival_ns).unwrap_or(0);
+    let mut win: Vec<(u64, i64, i64, f64)> = Vec::new();
+    let (mut silent, mut voiced, mut clip_sum, mut level_sum, mut level_n) =
+        (0u64, 0u64, 0f64, 0f64, 0u64);
 
     for o in obs {
         received += 1;
@@ -196,6 +224,23 @@ pub fn compute_stream(
             base_ext = ext;
         }
 
+        let w = ((o.arrival_ns - start_arrival).max(0) / 1_000_000_000) as usize;
+        if win.len() <= w {
+            win.resize(w + 1, (0, i64::MAX, i64::MIN, -1.0));
+        }
+        win[w].0 += 1;
+        win[w].1 = win[w].1.min(ext);
+        win[w].2 = win[w].2.max(ext);
+        if let Some(l) = o.level_db {
+            if l < -55.0 {
+                silent += 1;
+            } else {
+                voiced += 1;
+                level_sum += l as f64;
+                level_n += 1;
+            }
+            clip_sum += o.clipped as f64;
+        }
         if let Some(pa) = prev_arrival {
             max_gap_ns = max_gap_ns.max(o.arrival_ns - pa);
         }
@@ -230,6 +275,9 @@ pub fn compute_stream(
             }
             jitter += (d - jitter) / 16.0;
             max_jitter = f64::max(max_jitter, jitter);
+            if let Some(last) = win.last_mut() {
+                last.3 = jitter * 1000.0 / clock as f64;
+            }
         }
         prev_transit = Some(transit);
         if let Some((pts, pseq)) = prev_ts {
@@ -264,6 +312,34 @@ pub fn compute_stream(
     } else {
         (None, None)
     };
+    // Windows: jitter carries over when a second had no audio packets.
+    let mut series = Vec::with_capacity(win.len());
+    let mut last_j = 0.0;
+    for (k, (n, lo, hi, j)) in win.iter().enumerate() {
+        if *j >= 0.0 {
+            last_j = *j;
+        }
+        let exp = if *hi >= *lo { (hi - lo + 1) as u64 } else { 0 };
+        let lost_w = exp.saturating_sub(*n);
+        let lp = if exp > 0 {
+            lost_w as f64 * 100.0 / exp as f64
+        } else {
+            0.0
+        };
+        let m = if *n >= 10 {
+            emodel(&codec, lp, last_j).1.unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        series.push([
+            k as f64,
+            *n as f64,
+            lost_w as f64,
+            round2(last_j),
+            round2(m),
+        ]);
+    }
+    let audio_frames = silent + voiced;
 
     RtpStream {
         id,
@@ -299,6 +375,16 @@ pub fn compute_stream(
         mos,
         r_factor: r,
         call: None,
+        series,
+        silence_pct: (audio_frames > 0)
+            .then(|| round2(silent as f64 * 100.0 / audio_frames as f64)),
+        clipping_pct: (audio_frames > 0).then(|| round2(clip_sum * 100.0 / audio_frames as f64)),
+        level_dbfs: (level_n > 0).then(|| round2(level_sum / level_n as f64)),
+        rtcp: Vec::new(),
+        remote_loss_pct: None,
+        remote_jitter_ms: None,
+        rtt_ms: None,
+        xr_mos: None,
         first_frame: obs.first().map(|o| o.frame).unwrap_or(0),
         last_frame: obs.last().map(|o| o.frame).unwrap_or(0),
         src_addr: Some(src),
@@ -351,6 +437,8 @@ mod tests {
 
     fn pkt(seq: u16, ts: u32, t_ms: i64) -> RtpObs {
         RtpObs {
+            level_db: None,
+            clipped: 0.0,
             frame: seq as usize,
             arrival_ns: t_ms * 1_000_000,
             hdr: RtpHeader {
@@ -398,4 +486,31 @@ mod tests {
         assert!(r.unwrap() > 90.0);
         assert!(mos.unwrap() > 4.3);
     }
+}
+
+/// Level (dBFS) and clipped share of one G.711 payload.
+pub fn g711_level(payload: &[u8], alaw: bool) -> (f32, f32) {
+    if payload.is_empty() {
+        return (-120.0, 0.0);
+    }
+    let mut sum = 0f64;
+    let mut clip = 0u32;
+    for &b in payload {
+        let s = if alaw {
+            crate::audio::alaw(b)
+        } else {
+            crate::audio::ulaw(b)
+        } as f64;
+        sum += s * s;
+        if s.abs() >= 32000.0 {
+            clip += 1;
+        }
+    }
+    let rms = (sum / payload.len() as f64).sqrt();
+    let db = if rms < 1.0 {
+        -120.0
+    } else {
+        20.0 * (rms / 32768.0).log10()
+    };
+    (db as f32, clip as f32 / payload.len() as f32)
 }

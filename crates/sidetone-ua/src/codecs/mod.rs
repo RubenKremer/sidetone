@@ -82,6 +82,7 @@ extern "C" {
     fn speex_bits_write(bits: *mut SpeexBits, bytes: *mut i8, max_len: i32) -> i32;
     fn speex_bits_read_from(bits: *mut SpeexBits, bytes: *const i8, len: i32);
     fn speex_bits_remaining(bits: *mut SpeexBits) -> i32;
+    fn speex_bits_peek_unsigned(bits: *mut SpeexBits, nb_bits: i32) -> u32;
 }
 
 const SPEEX_SET_ENH: i32 = 0;
@@ -94,6 +95,9 @@ pub struct Speex {
     ebits: Box<SpeexBits>,
     dbits: Box<SpeexBits>,
     pub frame: usize,
+    wide: bool,
+    /// Consecutive decoded frames at full scale (a runaway decoder).
+    saturated: u32,
 }
 
 unsafe impl Send for Speex {}
@@ -125,8 +129,15 @@ impl Speex {
                 ebits,
                 dbits,
                 frame: if wide { 320 } else { 160 },
+                wide,
+                saturated: 0,
             })
         }
+    }
+    /// Encoder quality 0..=10.
+    pub fn set_quality(&mut self, q: i32) {
+        let mut q = q;
+        unsafe { speex_encoder_ctl(self.enc, SPEEX_SET_QUALITY, &mut q as *mut i32 as *mut _) };
     }
     /// Whole frames of PCM to one RTP payload (frames packed back to back).
     pub fn encode(&mut self, pcm: &[i16]) -> Vec<u8> {
@@ -159,9 +170,34 @@ impl Speex {
                 if speex_bits_remaining(&mut *self.dbits) < 5 {
                     break;
                 }
+                // Padding after the last frame is a terminator: a narrowband
+                // flag 0 and sub-mode 15 (0b01111). Decoding it as a frame
+                // corrupts the decoder state.
+                if speex_bits_peek_unsigned(&mut *self.dbits, 5) == 0x0f {
+                    break;
+                }
                 let mut f = vec![0i16; self.frame];
                 if speex_decode_int(self.dec, &mut *self.dbits, f.as_mut_ptr()) != 0 {
                     break;
+                }
+                // Joining a stationary tone mid-stream can make the Speex
+                // long-term predictor run away; start a fresh decoder then.
+                if f.iter().any(|v| v.unsigned_abs() >= 32000) {
+                    self.saturated += 1;
+                    if self.saturated >= 4 {
+                        self.saturated = 0;
+                        let mode = speex_lib_get_mode(if self.wide { 1 } else { 0 });
+                        let fresh = speex_decoder_init(mode);
+                        if !fresh.is_null() {
+                            let mut on: i32 = 1;
+                            speex_decoder_ctl(fresh, SPEEX_SET_ENH, &mut on as *mut i32 as *mut _);
+                            speex_decoder_destroy(self.dec);
+                            self.dec = fresh;
+                        }
+                        f.iter_mut().for_each(|v| *v = 0);
+                    }
+                } else {
+                    self.saturated = 0;
                 }
                 out.extend(f);
             }
@@ -452,6 +488,27 @@ mod tests {
             assert_eq!(out.len(), pcm.len() / sx.frame * sx.frame);
             let c = corr(&pcm, &out);
             assert!(c > 0.6, "Speex wide={wide} correlation {c}");
+        }
+    }
+
+    #[test]
+    fn speex_terminator_is_not_a_frame() {
+        // A 20-byte narrowband frame followed by the terminator byte, as
+        // Asterisk sends at quality 3: one frame of 160 samples, not two.
+        let mut sx = Speex::new(false).unwrap();
+        let pcm = voice(8000, 0.5);
+        let mut enc = Speex::new(false).unwrap();
+        for f in pcm.chunks_exact(160) {
+            let mut p = enc.encode(f);
+            if p.len() < 40 {
+                p.push(0x7b);
+            }
+            let out = sx.decode(&p);
+            assert_eq!(out.len(), 160, "one frame per packet");
+            assert!(
+                out.iter().all(|v| v.unsigned_abs() < 30000),
+                "decoder stays stable"
+            );
         }
     }
 

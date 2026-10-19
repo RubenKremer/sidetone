@@ -25,6 +25,13 @@ fn main() {
         .define("EXPORT", Some(""))
         .define("USE_SMALLFT", None)
         .warnings(false);
+    // Scratch memory on the C stack (VLAs, or alloca on MSVC) instead of the
+    // fixed manual stack inside each state, which can overflow.
+    if target.contains("msvc") {
+        speex.define("USE_ALLOCA", None);
+    } else {
+        speex.define("VAR_ARRAYS", None);
+    }
     for f in sources("native/speex") {
         speex.file(format!("native/speex/libspeex/{f}"));
     }

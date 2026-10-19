@@ -184,6 +184,15 @@ pub struct CallView {
     pub recording: bool,
     pub rtp_sent: u64,
     pub rtp_received: u64,
+    /// Our view of the received stream (RFC 3550 counters).
+    pub rx_loss_pct: Option<f64>,
+    pub rx_jitter_ms: Option<f64>,
+    /// What the far end reports about our stream in RTCP, and the round trip.
+    pub remote_loss_pct: Option<f64>,
+    pub remote_jitter_ms: Option<f64>,
+    pub rtt_ms: Option<f64>,
+    pub rtcp_sent: u32,
+    pub rtcp_received: u32,
     pub tx_level: u32,
     pub rx_level: u32,
     pub final_code: Option<u16>,
@@ -1238,6 +1247,8 @@ impl Core {
             }
             None => (l.rtp_final.0, l.rtp_final.1, 0, 0, None),
         };
+        let rtcp = l.rtp.as_ref().map(|r| r.stats.lock().unwrap().rtcp.clone());
+        let round = |v: f64| (v * 10.0).round() / 10.0;
         let remote = Uri::parse(&l.remote_uri)
             .map(|u| u.short())
             .unwrap_or_else(|| l.remote_uri.clone());
@@ -1265,6 +1276,19 @@ impl Core {
             recording: l.recording,
             rtp_sent: sent,
             rtp_received: recv,
+            rx_loss_pct: rtcp
+                .as_ref()
+                .filter(|r| r.received > 0)
+                .map(|r| round(r.rx_loss_pct)),
+            rx_jitter_ms: rtcp
+                .as_ref()
+                .filter(|r| r.received > 0)
+                .map(|r| round(r.rx_jitter_ms)),
+            remote_loss_pct: rtcp.as_ref().and_then(|r| r.remote_loss_pct).map(round),
+            remote_jitter_ms: rtcp.as_ref().and_then(|r| r.remote_jitter_ms).map(round),
+            rtt_ms: rtcp.as_ref().and_then(|r| r.rtt_ms).map(round),
+            rtcp_sent: rtcp.as_ref().map(|r| r.reports_sent).unwrap_or(0),
+            rtcp_received: rtcp.as_ref().map(|r| r.reports_received).unwrap_or(0),
             tx_level,
             rx_level,
             final_code: l.final_code,

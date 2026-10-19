@@ -336,7 +336,7 @@ body.dragging .ws { outline: 2px dashed var(--mark); outline-offset: -8px; }
 .meters { display: grid; gap: 6px; margin: 10px 0; max-width: 420px; }
 
 /* ---------- calls page ---------- */
-.calls-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 14px; margin-bottom: 14px; align-items: start; }
+.calls-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 14px; margin-bottom: 14px; }
 .cd-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
 .badge { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; border-radius: 4px; padding: 1px 7px; background: var(--paper); color: var(--muted); }
 .badge.st-connected { background: rgba(22, 163, 74, 0.14); color: var(--ok); }
@@ -347,7 +347,7 @@ body.dragging .ws { outline: 2px dashed var(--mark); outline-offset: -8px; }
 .kv dd { margin: 0; word-break: break-all; }
 .recs { border-top: 1px solid var(--rule); margin-top: 12px; }
 .recs ul { margin: 0; padding-left: 18px; }
-.events-card { display: flex; flex-direction: column; max-height: 230px; }
+.events-card { display: flex; flex-direction: column; max-height: 380px; }
 .events { list-style: none; margin: 6px 0 0; padding: 0; overflow: auto; font-size: 12.5px; flex: 1; }
 .events li { display: grid; grid-template-columns: 62px 96px 1fr; gap: 8px; padding: 2px 0; border-bottom: 1px solid var(--rule); }
 .ev-t { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
@@ -836,7 +836,7 @@ table.hist tbody tr.sel { background: var(--mark-soft); }
 .fs-join .fs-l { color: var(--end, #7c3aed); }
 .fs-value .fs-l { color: var(--ok); font-weight: 500; }
 
-#call-detail .empty-note { margin: 2px 0 0; }
+#call-detail .kv.empty dd { color: var(--muted); }
 
 /* Codec lists */
 .codec-pick ol.codecs { list-style: none; margin: 6px 0 0; padding: 0; border: 1px solid var(--rule); border-radius: 8px; max-height: 360px; overflow-y: auto; background: var(--panel); }
@@ -851,3 +851,30 @@ table.hist tbody tr.sel { background: var(--mark-soft); }
 #opts .codec-pick li .muted, #opts .codec-pick li .kbps { display: none; }
 #opts .codec-pick ol.codecs { max-height: 180px; }
 .opt-h { font-size: 12px; font-weight: 600; }
+
+/* Quality over time */
+.qfig { position: relative; margin: 14px 0 6px; max-width: 1100px; }
+.qfig figcaption { font-size: 12.5px; margin-bottom: 4px; }
+svg.qchart { width: 100%; height: auto; display: block; overflow: visible; stroke: none; stroke-width: 0; }
+.qchart .ql { font: 600 11px var(--sans); fill: var(--ink); }
+.qchart .qv { font: 10px var(--sans); fill: var(--muted); }
+.qchart .qbase { stroke: var(--rule); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.qchart .qwarn { stroke: var(--warn); stroke-width: 1; stroke-dasharray: 4 4; vector-effect: non-scaling-stroke; opacity: 0.7; }
+.qchart .qline { fill: none; stroke: var(--req); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; stroke-linecap: round; }
+.qchart .qbar { fill: var(--bad); }
+.qchart .qev { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 3; vector-effect: non-scaling-stroke; }
+.qchart .qevl { font: 10px var(--mono); fill: var(--muted); }
+.qchart .qcross { stroke: var(--ink); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.qtip { position: absolute; top: 24px; background: var(--panel); border: 1px solid var(--rule-strong); border-radius: 6px; padding: 6px 8px; font-size: 12px; pointer-events: none; box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12); min-width: 150px; }
+.rtcp-reports { margin: 12px 0; }
+.rtcp-reports h4 { margin: 10px 0 4px; font-size: 12.5px; }
+.rtcp-cell { font-size: 12px; max-width: 220px; }
+
+.q-chip { font-size: 11px; font-weight: 600; padding: 0 6px; border-radius: 10px; border: 1px solid currentColor; line-height: 16px; }
+.q-chip.ok { color: var(--ok); }
+.q-chip.warn { color: var(--warn); }
+.q-chip.bad { color: var(--bad); }
+.c-legs { font-size: 11px; color: var(--req); cursor: pointer; text-decoration: underline dotted; }
+
+.c-meta { flex-wrap: wrap; row-gap: 3px; }
+.q-chip, .c-legs { white-space: nowrap; }

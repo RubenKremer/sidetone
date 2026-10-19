@@ -9,6 +9,7 @@ pub mod ladder;
 pub mod net;
 pub mod pcap;
 pub mod redact;
+pub mod rtcp;
 pub mod rtp;
 pub mod rules;
 pub mod sdp;

@@ -990,6 +990,17 @@ function announceActions() {
 }
 
 /// Live table of the calls on the phone: number, state, duration, codec.
+/// Live quality of a line: what we receive, what the far end reports, round trip.
+function liveQuality(l) {
+  const parts = [];
+  const cls = (v, w, b) => (v >= b ? "bad" : v >= w ? "warn" : "");
+  if (l.rx_loss_pct != null) parts.push(`<span class="${cls(l.rx_loss_pct, 1, 5)}">↓ ${l.rx_loss_pct.toFixed(1)}% · ${l.rx_jitter_ms.toFixed(0)} ms</span>`);
+  if (l.remote_loss_pct != null) parts.push(`<span class="${cls(l.remote_loss_pct, 1, 5)}" title="${esc(t("Reported by the far end in RTCP"))}">↑ ${l.remote_loss_pct.toFixed(1)}% · ${(l.remote_jitter_ms || 0).toFixed(0)} ms</span>`);
+  if (l.rtt_ms != null) parts.push(`<span class="${cls(l.rtt_ms, 200, 300)}">RTT ${l.rtt_ms.toFixed(0)} ms</span>`);
+  if (!parts.length && l.state === "connected") return `<span class="muted">${esc(t(l.rtcp_sent ? "waiting for RTCP" : "no RTCP"))}</span>`;
+  return parts.join("<br>");
+}
+
 function renderActive() {
   const box = $("#active-body");
   if (!box) return;
@@ -1011,7 +1022,7 @@ function renderActive() {
   const now = Date.now();
   const accs = S.st ? S.st.accounts : [];
   const tr = (acc) => (S.ctl.kind === "web" ? "WSS" : acc ? acc.transport || "UDP" : "");
-  box.innerHTML = `<table class="hist active"><thead><tr><th>${esc(t("Line"))}</th><th></th><th>${esc(t("Number"))}</th><th>${esc(t("State"))}</th><th>${esc(t("Duration"))}</th><th>${esc(t("Codec"))}</th><th>${esc(t("Transport"))}</th><th>${esc(t("Media"))}</th><th>RTP ↑ / ↓</th><th>${esc(t("Account"))}</th><th>${esc(t("Last action"))}</th></tr></thead><tbody>${ls
+  box.innerHTML = `<table class="hist active"><thead><tr><th>${esc(t("Line"))}</th><th></th><th>${esc(t("Number"))}</th><th>${esc(t("State"))}</th><th>${esc(t("Duration"))}</th><th>${esc(t("Codec"))}</th><th>${esc(t("Transport"))}</th><th>${esc(t("Media"))}</th><th>RTP ↑ / ↓</th><th title="${esc(t("Received: our loss and jitter. Far end: what it reports in RTCP about what we send. RTT from RTCP."))}">${esc(t("Quality"))}</th><th>${esc(t("Account"))}</th><th>${esc(t("Last action"))}</th></tr></thead><tbody>${ls
     .map((l) => {
       const d = l.answered_ms ? (l.ended_ms || now) - l.answered_ms : null;
       const acc = accs.find((a) => a.id === l.account);
@@ -1027,6 +1038,7 @@ function renderActive() {
         <td class="num">${esc(tr(acc))}</td>
         <td>${esc(media)}</td>
         <td class="num">${l.rtp_sent || 0} / ${l.rtp_received || 0}</td>
+        <td class="small">${liveQuality(l)}</td>
         <td>${esc(acc ? accLabel(acc) : l.account || "")}</td>
         <td class="${l.action_ok === false ? "bad" : l.action_ok ? "ok" : ""}">${esc(l.action ? t(l.action) : "")}</td></tr>`;
     })
@@ -1037,7 +1049,9 @@ function renderCallDetail() {
   const l = selLine() || lines()[lines().length - 1];
   const body = $("#call-detail-body");
   if (!l) {
-    body.innerHTML = `<p class="empty-note">Details of the selected line show here: media addresses, codec, packets, DTMF and transfer progress.</p>`;
+    // No call: the same fields, empty, so the card keeps its shape.
+    const keys = ["Direction", "Account", "Call-ID", "Talk time", "Codec", "Media encryption", "Local media", "Remote media", "RTP sent / received", "Result"];
+    body.innerHTML = `<div class="cd-head"><span class="badge">${esc(t("No call"))}</span></div><dl class="kv empty">${keys.map((k) => `<dt>${esc(t(k))}</dt><dd>-</dd>`).join("")}</dl>`;
     renderRecordings();
     return;
   }
@@ -1554,7 +1568,12 @@ function renderCalls() {
     .map((c) => {
       const st = c.state;
       const label = st === "non_invite" ? (c.final_status ? `${c.final_status}` : "no answer") : `${AN_STATE[st]}${c.final_status ? " " + c.final_status : ""}`;
-      const counts = `${c.errors ? `<span class="cnt-e">${c.errors} error${c.errors > 1 ? "s" : ""}</span>` : ""}${c.warnings ? `<span class="cnt-w">${c.warnings} warning${c.warnings > 1 ? "s" : ""}</span>` : ""}`;
+      const moss = c.streams.map((i) => r.streams[i].mos).filter((m) => m != null);
+      const mos = moss.length ? Math.min(...moss) : null;
+      const silent = c.streams.some((i) => r.streams[i].silence_pct >= 95);
+      const quality = `${mos != null ? `<span class="q-chip ${mos < 3.1 ? "bad" : mos < 3.6 ? "warn" : "ok"}" title="${esc(t("Lowest estimated MOS of the call's streams"))}">MOS ${mos.toFixed(1)}</span>` : ""}${silent ? `<span class="q-chip bad" title="${esc(t("RTP flows but carries silence"))}">${esc(t("silent"))}</span>` : ""}`;
+      const legs = c.related && c.related.length ? `<span class="c-legs" role="button" tabindex="0" data-legs="${c.index}" title="${esc(t("Legs of the same call") + ": " + c.related_by.join(", "))}">⛓ ${c.related.length + 1} ${esc(t("legs"))}</span>` : "";
+      const counts = `${quality}${legs}${c.errors ? `<span class="cnt-e">${c.errors} error${c.errors > 1 ? "s" : ""}</span>` : ""}${c.warnings ? `<span class="cnt-w">${c.warnings} warning${c.warnings > 1 ? "s" : ""}</span>` : ""}`;
       return `<li class="${S.picked.has(c.index) ? "picked" : ""}"><label class="c-pick" title="${esc(t("Add to the ladder"))}"><input type="checkbox" data-pick="${c.index}" ${S.picked.has(c.index) ? "checked" : ""}></label><button type="button" data-call="${c.index}">
         <span class="c-top"><span>${esc(c.kind)}</span><span class="state ${st}">${esc(label)}</span></span>
         <span class="c-parties">${esc(c.from)} → ${esc(c.to)}</span>
@@ -1774,7 +1793,7 @@ function renderMedia() {
   }
   const cls = (v, w, b) => (v >= b ? "bad" : v >= w ? "warn" : "");
   $("#tab-media").innerHTML = `<table class="media"><thead><tr>
-      <th></th><th>Stream</th><th>Codec</th><th>Packets</th><th>Lost</th><th>Loss</th><th>Jitter</th><th>Max jitter</th><th>Max gap</th><th>ptime</th><th>MOS est.</th><th>DTMF</th></tr></thead><tbody>
+      <th></th><th>Stream</th><th>Codec</th><th>Packets</th><th>Lost</th><th>Loss</th><th>Jitter</th><th>Max jitter</th><th>Max gap</th><th>ptime</th><th>MOS est.</th><th title="${esc(t("What the receiver reports in RTCP: loss, jitter, round trip; MOS from RTCP XR"))}">RTCP</th><th title="${esc(t("Share of the decoded audio that is silent (G.711)"))}">${esc(t("Silent"))}</th><th>DTMF</th></tr></thead><tbody>
     ${streams
       .map(
         (s) => `<tr data-stream="${s.id}"><td><button type="button" class="icon-btn play-btn" data-play="${s.id}" title="${esc(t("Listen and see the waveform"))}">▶</button></td><td>${esc(s.src)} → ${esc(s.dst)}<br><span class="muted">SSRC ${esc(s.ssrc)}</span></td>
@@ -1785,11 +1804,137 @@ function renderMedia() {
         <td class="${cls(s.max_gap_ms, 500, 1000)}">${s.max_gap_ms.toFixed(0)} ms</td>
         <td>${s.mean_ptime_ms ? s.mean_ptime_ms.toFixed(0) + " ms" : ""}</td>
         <td class="${s.mos == null ? "" : s.mos < 3.1 ? "bad" : s.mos < 3.6 ? "warn" : ""}">${s.mos == null ? "n/a" : s.mos.toFixed(2)}</td>
+        <td class="rtcp-cell">${rtcpCell(s)}</td>
+        <td class="${s.silence_pct >= 95 ? "bad" : ""}">${s.silence_pct == null ? "" : `${s.silence_pct.toFixed(0)}%`}${s.clipping_pct >= 1 ? `<br><span class="warn">${esc(t("clipped"))} ${s.clipping_pct.toFixed(1)}%</span>` : ""}</td>
         <td>${esc(s.dtmf_events.join(""))}</td></tr>`
       )
       .join("")}</tbody></table>
     <div class="rtp-player" id="rtp-player" hidden></div>
+    ${streams.filter((s) => s.series && s.series.length > 1).map(qualityChart).join("")}
+    ${rtcpTables(streams)}
     <p class="muted">MOS is an E-model (ITU-T G.107) estimate from loss and jitter at this capture point; network delay is approximated.</p>${webrtcBlock()}`;
+}
+
+// ---- Quality over time: three thin charts per stream (jitter, loss, MOS)
+// sharing one time axis, each with its own scale, with the SIP events of the
+// call marked and a crosshair that reads all three at the same second.
+
+function rtcpCell(s) {
+  const parts = [];
+  if (s.remote_loss_pct != null) parts.push(`${t("loss")} ${s.remote_loss_pct.toFixed(1)}%`);
+  if (s.remote_jitter_ms != null) parts.push(`jitter ${s.remote_jitter_ms.toFixed(0)} ms`);
+  if (s.rtt_ms != null) parts.push(`RTT ${s.rtt_ms.toFixed(0)} ms`);
+  if (s.xr_mos != null) parts.push(`MOS ${s.xr_mos.toFixed(1)} (XR)`);
+  return parts.length ? esc(parts.join(" · ")) : `<span class="muted">${s.rtcp && s.rtcp.length ? "SR" : "-"}</span>`;
+}
+
+function rtcpTables(streams) {
+  const withR = streams.filter((s) => s.rtcp && s.rtcp.some((v) => v.kind !== "SR"));
+  if (!withR.length) return "";
+  return `<details class="rtcp-reports"><summary>${esc(t("RTCP reports"))} (${withR.reduce((n, s) => n + s.rtcp.length, 0)})</summary>${withR
+    .map(
+      (s) => `<h4 class="mono">${esc(s.src)} → ${esc(s.dst)} <span class="muted">SSRC ${esc(s.ssrc)}</span></h4>
+      <table class="media"><thead><tr><th>${esc(t("Time"))}</th><th>${esc(t("Kind"))}</th><th>${esc(t("From"))}</th><th>${esc(t("Loss"))}</th><th>${esc(t("Cumulative"))}</th><th>Jitter</th><th>RTT</th><th>MOS-LQ</th><th>R</th></tr></thead><tbody>${s.rtcp
+        .map(
+          (v) => `<tr data-frame="${v.frame}"><td class="mono">+${v.t.toFixed(3)}s</td><td>${esc(v.kind)}</td><td class="mono">${esc(v.from)}</td><td>${v.fraction_lost_pct == null ? "" : v.fraction_lost_pct.toFixed(1) + "%"}</td><td>${v.cumulative_lost ?? ""}</td><td>${v.jitter_ms == null ? "" : v.jitter_ms.toFixed(1) + " ms"}</td><td>${v.rtt_ms == null ? "" : v.rtt_ms.toFixed(0) + " ms"}</td><td>${v.mos_lq ?? ""}</td><td>${v.r_factor ?? ""}</td></tr>`
+        )
+        .join("")}</tbody></table>`
+    )
+    .join("")}</details>`;
+}
+
+function qualityChart(s) {
+  const se = s.series;
+  const W = 900, H = 46, padL = 64, padR = 12, gap = 8;
+  const t0 = (s.start_ns - S.report.summary.start_ns) / 1e9;
+  const n = se.length;
+  const x = (i) => padL + (i / Math.max(1, n - 1)) * (W - padL - padR);
+  const rows = [
+    { key: 3, label: "Jitter", unit: "ms", max: Math.max(40, ...se.map((r) => r[3])), warn: 30 },
+    { key: 2, label: t("Lost"), unit: t("pkts"), max: Math.max(5, ...se.map((r) => r[2])), warn: null },
+    { key: 4, label: "MOS", unit: "", max: 5, min: 1, warn: 3.6 },
+  ];
+  // SIP events of this call inside the stream's time span.
+  const msgs = s.call != null ? S.report.calls[s.call].messages.map((i) => S.report.messages[i]) : [];
+  const evs = msgs
+    .filter((m) => (m.method && m.method !== "ACK") || (m.status && m.status >= 200 && /INVITE|BYE|UPDATE/.test(m.cseq || "")))
+    .map((m) => ({ at: m.rel_s - t0, label: m.label.replace(/ \(SDP\)/, "") }))
+    .filter((e) => e.at >= -0.5 && e.at <= n);
+  const totalH = rows.length * (H + gap) + 18;
+  let svg = `<svg class="qchart" viewBox="0 0 ${W} ${totalH}" data-stream="${s.id}" role="img" aria-label="${esc(t("Quality over time"))}">`;
+  rows.forEach((r, k) => {
+    const top = k * (H + gap);
+    const lo = r.min ?? 0;
+    const y = (v) => top + H - ((Math.min(r.max, Math.max(lo, v)) - lo) / (r.max - lo)) * H;
+    svg += `<text class="ql" x="0" y="${top + 13}">${esc(r.label)}</text><text class="qv" x="0" y="${top + 27}">${r.key === 4 ? "" : `max ${Math.round(r.max)} ${esc(r.unit)}`}</text>`;
+    svg += `<line class="qbase" x1="${padL}" x2="${W - padR}" y1="${top + H}" y2="${top + H}"/>`;
+    if (r.warn != null) svg += `<line class="qwarn" x1="${padL}" x2="${W - padR}" y1="${y(r.warn)}" y2="${y(r.warn)}"/>`;
+    if (r.key === 2) {
+      // Loss as bars: missing packets are counts, not a trend.
+      const bw = Math.max(1.5, (W - padL - padR) / n - 2);
+      se.forEach((row, i) => {
+        if (row[2] > 0) svg += `<rect class="qbar" x="${x(i) - bw / 2}" y="${y(row[2])}" width="${bw}" height="${top + H - y(row[2])}" rx="1"/>`;
+      });
+    } else {
+      const pts = se.map((row, i) => (r.key === 4 && !row[4] ? null : `${x(i).toFixed(1)},${y(row[r.key]).toFixed(1)}`));
+      let d = "";
+      pts.forEach((p, i) => {
+        if (!p) return;
+        d += `${!pts[i - 1] ? "M" : "L"}${p}`;
+      });
+      svg += `<path class="qline" d="${d}"/>`;
+    }
+  });
+  // Events at the same second share one marker; labels near the right edge
+  // are anchored to the end so they stay inside the chart.
+  const marks = [];
+  for (const e of evs) {
+    const ex = x(Math.max(0, Math.min(n - 1, e.at)));
+    const prev = marks[marks.length - 1];
+    if (prev && Math.abs(prev.x - ex) < 1) prev.labels.push(e.label);
+    else marks.push({ x: ex, labels: [e.label] });
+  }
+  let lastEnd = -Infinity;
+  for (const m of marks) {
+    const label = m.labels.join(" / ");
+    const wide = label.length * 6.2;
+    const atEnd = m.x + 3 + wide > W;
+    const start = atEnd ? m.x - 3 - wide : m.x + 3;
+    svg += `<line class="qev" x1="${m.x}" x2="${m.x}" y1="0" y2="${rows.length * (H + gap) - gap}"/>`;
+    if (start > lastEnd + 6) {
+      svg += `<text class="qevl" x="${atEnd ? m.x - 3 : m.x + 3}" y="${totalH - 4}"${atEnd ? ' text-anchor="end"' : ""}>${esc(label)}</text>`;
+      lastEnd = start + wide;
+    }
+  }
+  svg += `<line class="qcross" x1="0" x2="0" y1="0" y2="${rows.length * (H + gap) - gap}" visibility="hidden"/></svg>`;
+  return `<figure class="qfig"><figcaption><b class="mono">${esc(s.src)} → ${esc(s.dst)}</b> <span class="muted">${esc(s.codec)}, ${esc(t("per second"))}, +${t0.toFixed(1)} s</span></figcaption>${svg}<div class="qtip" hidden></div></figure>`;
+}
+
+/// Crosshair and tooltip for the quality charts.
+function bindQualityCharts() {
+  $("#tab-media").addEventListener("mousemove", (e) => {
+    const svg = e.target.closest && e.target.closest("svg.qchart");
+    $$("#tab-media .qcross").forEach((l) => l.setAttribute("visibility", "hidden"));
+    $$("#tab-media .qtip").forEach((d) => (d.hidden = true));
+    if (!svg || !S.report) return;
+    const s = S.report.streams[+svg.dataset.stream];
+    const r = svg.getBoundingClientRect();
+    const vx = ((e.clientX - r.left) / r.width) * 900;
+    const n = s.series.length;
+    const i = Math.round(((vx - 64) / (900 - 64 - 12)) * (n - 1));
+    if (i < 0 || i >= n) return;
+    const row = s.series[i];
+    const xx = 64 + (i / Math.max(1, n - 1)) * (900 - 64 - 12);
+    const cross = svg.querySelector(".qcross");
+    cross.setAttribute("x1", xx);
+    cross.setAttribute("x2", xx);
+    cross.setAttribute("visibility", "visible");
+    const tip = svg.parentElement.querySelector(".qtip");
+    tip.hidden = false;
+    tip.innerHTML = `<b>+${(i).toFixed(0)} s</b><br>${row[1]} ${esc(t("packets"))}, ${row[2]} ${esc(t("lost"))}<br>jitter ${row[3].toFixed(1)} ms<br>MOS ${row[4] ? row[4].toFixed(2) : "n/a"}`;
+    const fx = e.clientX - svg.parentElement.getBoundingClientRect().left;
+    tip.style.left = `${Math.min(fx + 12, svg.parentElement.clientWidth - 170)}px`;
+  });
 }
 
 // ---- RTP player: listen to a stream and see its waveform
@@ -2382,6 +2527,15 @@ function bindAnalysis() {
   });
   $("#calls").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-call]");
+    const lg = e.target.closest("[data-legs]");
+    if (lg) {
+      e.stopPropagation();
+      const c = S.report.calls[+lg.dataset.legs];
+      S.picked = new Set([c.index, ...c.related]);
+      renderCalls();
+      selectCall(null);
+      return;
+    }
     if (b) selectCall(+b.dataset.call, true);
   });
   $("#calls").addEventListener("change", (e) => {
@@ -2433,6 +2587,7 @@ function bindAnalysis() {
       if (sg.dataset.stream != null) openPlayer(+sg.dataset.stream);
     }
   });
+  bindQualityCharts();
   $("#tab-media").addEventListener("click", (e) => {
     const b = e.target.closest("[data-play]") || (!e.target.closest("button, a, input, .rtp-player") && e.target.closest("tr[data-stream]"));
     if (b) openPlayer(+(b.dataset.play ?? b.dataset.stream));

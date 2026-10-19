@@ -44,6 +44,23 @@ pub fn run_all(r: &Report) -> Vec<Finding> {
     for s in &r.streams {
         stream_level(r, s.id, &mut o);
     }
+    for v in &r.vq {
+        if let Some(m) = v.mos_lq.or(v.mos_cq) {
+            if m < 3.5 {
+                let call = v
+                    .call_id
+                    .as_ref()
+                    .and_then(|c| r.calls.iter().position(|x| &x.call_id == c));
+                o.add("vq.mos", Severity::Warning, format!("Phone reports MOS {m:.1} ({} metrics, PUBLISH vq-rtcpxr)", v.side),
+                    format!("A voice-quality report (RFC 6035) for {} says the call sounded poor: loss {}, jitter buffer {}, round trip {}.",
+                        v.codec.clone().unwrap_or_else(|| "this call".into()),
+                        v.loss_pct.map(|x| format!("{x:.1}%")).unwrap_or_else(|| "?".into()),
+                        v.jitter_ms.map(|x| format!("{x:.0} ms")).unwrap_or_else(|| "?".into()),
+                        v.rtt_ms.map(|x| format!("{x:.0} ms")).unwrap_or_else(|| "?".into())),
+                    call, vec![v.message], None);
+            }
+        }
+    }
     let mut v = o.0;
     // Errors first, then warnings, then info; stable within a severity.
     v.sort_by(|a, b| b.severity.cmp(&a.severity));
@@ -844,6 +861,56 @@ fn stream_level(r: &Report, si: usize, o: &mut Out) {
         o.add("rtp.jitter", sev, format!("High jitter on {name}: {:.1} ms (max {:.1} ms)", s.jitter_ms, s.max_jitter_ms),
             "Interarrival jitter (RFC 3550) above ~30 ms forces large jitter buffers or causes late-packet discards. Typical causes: congestion without QoS, VPN/Wi-Fi, CPU-starved media servers.",
             call, vec![], Some(si));
+    }
+    // The audio itself: RTP that flows but carries silence is one-way audio
+    // the packet counters cannot see (muted gateway, wrong codec mapping,
+    // SRTP keys that do not match, a media server playing nothing).
+    let held = call.is_some_and(|c| {
+        r.calls[c].messages.iter().any(|&m| {
+            r.messages[m].sdp.as_ref().is_some_and(|sd| {
+                sd.media.iter().any(|md| {
+                    md.direction == "sendonly"
+                        || md.direction == "inactive"
+                        || md.direction == "recvonly"
+                })
+            })
+        })
+    });
+    if let Some(sp) = s.silence_pct {
+        if sp >= 95.0 && s.packets >= 100 && !held {
+            o.add("rtp.silent", Severity::Warning, format!("RTP flows but carries silence on {name} ({sp:.0}% silent)"),
+                "Packets keep arriving but the decoded audio is below -55 dBFS almost all the time. The other side hears nothing although the counters look fine: a muted gateway or phone, a codec or payload type mapped wrong, SRTP keys that do not match, or a media server sending silence.",
+                call, vec![], Some(si));
+        }
+    }
+    if let Some(cp) = s.clipping_pct {
+        if cp >= 1.0 {
+            o.add("rtp.clipping", Severity::Warning, format!("Clipped audio on {name} ({cp:.1}% of samples at full scale)"),
+                "The audio hits full scale often: it sounds distorted. Lower the microphone or line gain, or the gain of the gateway that feeds this stream.",
+                call, vec![], Some(si));
+        }
+    }
+    // What the receiver says in RTCP: the only view of the far side of the path.
+    if let Some(l) = s.remote_loss_pct {
+        if l >= 5.0 {
+            o.add("rtcp.loss", Severity::Warning, format!("Receiver reports {l:.1}% loss on {name} (RTCP)"),
+                "The receiver of this stream counted the loss in its RTCP reports, so the packets were lost after this capture point (or before it if this is the receiving side). Compare with the loss measured here to tell which half of the path drops packets.",
+                call, vec![], Some(si));
+        }
+    }
+    if let Some(rtt) = s.rtt_ms {
+        if rtt >= 300.0 {
+            o.add("rtcp.rtt", Severity::Warning, format!("Round trip {rtt:.0} ms on {name} (RTCP)"),
+                "Above about 300 ms round trip people talk over each other. Look for long routes, satellite or mobile links, or large jitter buffers.",
+                call, vec![], Some(si));
+        }
+    }
+    if let Some(m) = s.xr_mos {
+        if m < 3.5 {
+            o.add("rtcp.xr_mos", Severity::Warning, format!("Receiver estimates MOS {m:.1} on {name} (RTCP XR)"),
+                "The receiving endpoint computed this voice quality itself (RFC 3611 VoIP metrics) including its jitter buffer and codec: what the user heard.",
+                call, vec![], Some(si));
+        }
     }
     let has_cn = s.payload_types.contains(&13);
     if s.max_gap_ms >= 1000.0 && !has_cn {
