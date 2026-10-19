@@ -107,6 +107,16 @@ export class NativeController extends Emitter {
   async sniffPcap() { return new Uint8Array(await (await this.http.get("api/sniff/pcap")).arrayBuffer()); }
   async audioStatus() { return (await this.http.get("api/audio/status")).json(); }
   async loopback(on) { return (await this.http.post("api/audio/loopback", JSON.stringify({ on }), "application/json")).json(); }
+  async audioTone(hz, ms) {
+    const j = await (await this.http.post("api/audio/tone", JSON.stringify({ hz, ms }), "application/json")).json();
+    if (j.error) throw new Error(j.error);
+    return j;
+  }
+  async audioRecordTest(seconds) {
+    const j = await (await this.http.post("api/audio/record_test", JSON.stringify({ seconds }), "application/json")).json();
+    if (j.error) throw new Error(j.error);
+    return j;
+  }
 }
 
 // ---------------------------------------------------------------------------

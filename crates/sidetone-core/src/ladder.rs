@@ -7,6 +7,9 @@ use std::fmt::Write;
 pub struct LadderOptions {
     /// Restrict to one call; `None` draws every SIP message.
     pub call: Option<usize>,
+    /// Several calls in one diagram (call legs side by side); when not
+    /// empty it takes precedence over `call`.
+    pub calls: Vec<usize>,
     /// Columns per IP instead of per IP:port. `None` picks automatically.
     pub group_by_ip: Option<bool>,
     pub include_rtp: bool,
@@ -16,6 +19,7 @@ impl Default for LadderOptions {
     fn default() -> Self {
         LadderOptions {
             call: None,
+            calls: Vec::new(),
             group_by_ip: None,
             include_rtp: true,
         }
@@ -100,7 +104,33 @@ fn color_for(method: Option<&str>, status: Option<u16>) -> &'static str {
     }
 }
 
+/// Messages of several calls, in capture order.
+pub fn ladder_messages_of(r: &Report, calls: &[usize]) -> Vec<usize> {
+    let mut v: Vec<usize> = calls
+        .iter()
+        .filter_map(|c| r.calls.get(*c))
+        .flat_map(|c| c.messages.iter().copied())
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
 pub fn render_svg(r: &Report, opt: &LadderOptions) -> String {
+    if !opt.calls.is_empty() {
+        let mut streams: Vec<usize> = if opt.include_rtp {
+            opt.calls
+                .iter()
+                .filter_map(|c| r.calls.get(*c))
+                .flat_map(|c| c.streams.iter().copied())
+                .collect()
+        } else {
+            vec![]
+        };
+        streams.sort_unstable();
+        streams.dedup();
+        return render_with(r, ladder_messages_of(r, &opt.calls), streams, opt);
+    }
     let msgs = ladder_messages(r, opt.call);
     let streams: Vec<usize> = if opt.include_rtp {
         match opt.call {
@@ -114,6 +144,10 @@ pub fn render_svg(r: &Report, opt: &LadderOptions) -> String {
     } else {
         vec![]
     };
+    render_with(r, msgs, streams, opt)
+}
+
+fn render_with(r: &Report, msgs: Vec<usize>, streams: Vec<usize>, opt: &LadderOptions) -> String {
     let by_ip = decide_by_ip(r, &msgs, opt.group_by_ip);
     let cols = columns(r, &msgs, &streams, by_ip);
     let col_w = 210.0;

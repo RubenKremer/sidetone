@@ -410,7 +410,13 @@ tr.missed .hi { color: var(--bad); }
 .calls-head { display: flex; justify-content: space-between; align-items: baseline; padding: 10px 14px 6px; color: var(--muted); }
 .calls-head h2 { color: var(--ink); }
 #calls { list-style: none; margin: 0; padding: 0 0 12px; }
-#calls li { border-bottom: 1px solid var(--rule); }
+#calls li { border-bottom: 1px solid var(--rule); display: grid; grid-template-columns: auto 1fr; align-items: stretch; }
+#calls li.picked { background: var(--mark-soft); }
+.c-pick { display: flex; align-items: flex-start; padding: 10px 0 0 10px; cursor: pointer; }
+.c-pick input { margin: 0; cursor: pointer; }
+.calls-head { gap: 8px; }
+.calls-head .grow { flex: 1; }
+.calls-hint { margin: 0; padding: 0 14px 6px; font-size: 12px; }
 #calls button { width: 100%; font: inherit; text-align: left; color: var(--ink); background: none; border: 0; padding: 8px 14px 8px 11px; border-left: 3px solid transparent; cursor: pointer; display: grid; gap: 1px; }
 #calls button:hover { background: var(--paper); }
 #calls button[aria-current="true"] { border-left-color: var(--mark); background: var(--mark-soft); }
@@ -695,3 +701,15 @@ body.web-mode [data-native] { display: none !important; }
 body.resizing, body.resizing * { user-select: none !important; }
 body.resizing.col { cursor: col-resize; }
 body.resizing.row { cursor: row-resize; }
+
+/* Live calls table on the Calls page */
+.active-card { margin-bottom: 14px; }
+table.hist.active tbody tr { cursor: pointer; }
+table.hist.active tr.sel td { background: var(--mark-soft); }
+table.hist.active tr.ended td { color: var(--muted); }
+#active-count { font-weight: 600; color: var(--muted); margin-left: 4px; }
+
+/* Message summary above the raw SIP */
+.msg-sum { background: var(--sunk); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 14px 4px; margin: 8px 0 10px; max-width: 1100px; }
+.msg-sum .kv { margin-bottom: 6px; }
+.msg-sum .kv dd { word-break: break-word; }

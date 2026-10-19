@@ -32,6 +32,7 @@ async function wasmBackend() {
     features: [],
     analyze: async (b) => JSON.parse(w.analyze(b)),
     ladder: async (b, call) => w.ladder_svg(b, call ?? -1),
+    ladderCalls: async (b, calls) => w.ladder_svg_calls(b, calls.join(",")),
     exportPcap: async (b, opts) => w.export_capture(b, JSON.stringify(opts)),
     prompt: async (b, call, redact, lang, q) => JSON.parse(w.ai_prompt(b, call ?? -1, redact, lang, q || "")),
     ai: async (cfg, system, prompt) => {
@@ -71,6 +72,7 @@ async function httpBackend() {
     post,
     analyze: async (b) => (await post("api/analyze", b)).json(),
     ladder: async (b, call) => (await post(`api/ladder?${q({ call })}`, b)).text(),
+    ladderCalls: async (b, calls) => (await post(`api/ladder?${q({ calls: calls.join(",") })}`, b)).text(),
     exportPcap: async (b, o) => new Uint8Array(await (await post(`api/export?${q({ call: o.call, redact: o.redact, sip_only: o.sip_only, no_annotate: o.annotate === false })}`, b)).arrayBuffer()),
     prompt: async (b, call, redact, lang, question) => (await post(`api/prompt?${q({ call, redact, lang, question })}`, b)).json(),
     ai: async (cfg, _system, prompt) => (await (await post("api/ai", JSON.stringify({ config: cfg, prompt }), "application/json")).json()).text,
@@ -100,6 +102,7 @@ async function pickBackend() {
 // ---------- state ----------
 
 const S = {
+  picked: new Set(), // dialogs ticked for a combined ladder
   be: null,
   ctl: null,
   st: null, // latest PhoneState
@@ -175,7 +178,10 @@ function showWs(name) {
   if (name === "trace") renderTrace(true);
   if (name === "diag") diagOpen();
   if (name === "settings") settingsOpen();
-  if (name === "calls") renderHistory();
+  if (name === "calls") {
+    renderHistory();
+    renderActive();
+  }
   if (name === "help") {
     renderHelp($("#help-page"), {
       lang: currentLang(),
@@ -448,6 +454,7 @@ function onState(st) {
   renderMeters();
   renderStatus();
   if (S.page === "calls") renderCallDetail();
+  if (S.page === "calls") renderActive();
   if (S.page === "calls" && !prev) renderHistory();
   if (S.page === "settings" && SET.cfg) renderSetNav();
 }
@@ -523,10 +530,13 @@ async function dial(target) {
   return r;
 }
 
-function callOrAnswer() {
+async function callOrAnswer() {
   const l = selLine();
   if (l && l.state === "incoming") return cmd({ cmd: "answer", line: l.line });
-  return dial();
+  const r = await dial();
+  // Follow the call on the Calls page.
+  if (r && r.line && store.get("sidetone.follow_calls", true)) showWs("calls");
+  return r;
 }
 
 function hangupSel() {
@@ -536,7 +546,37 @@ function hangupSel() {
   return cmd({ cmd: "hangup", line: l.line });
 }
 
+// DTMF frequencies (ITU-T Q.23) for the keypad's local feedback tone.
+const DTMF_HZ = { 1: [697, 1209], 2: [697, 1336], 3: [697, 1477], A: [697, 1633], 4: [770, 1209], 5: [770, 1336], 6: [770, 1477], B: [770, 1633], 7: [852, 1209], 8: [852, 1336], 9: [852, 1477], C: [852, 1633], "*": [941, 1209], 0: [941, 1336], "#": [941, 1477], D: [941, 1633] };
+let keyCtx = null;
+function keyTone(k) {
+  if (!store.get("sidetone.key_tones", true)) return;
+  const f = DTMF_HZ[k];
+  if (!f) return;
+  try {
+    keyCtx ||= new (window.AudioContext || window.webkitAudioContext)();
+    if (keyCtx.state === "suspended") keyCtx.resume();
+    const t0 = keyCtx.currentTime;
+    const g = keyCtx.createGain();
+    g.gain.setValueAtTime(0, t0);
+    g.gain.linearRampToValueAtTime(0.12, t0 + 0.005);
+    g.gain.setValueAtTime(0.12, t0 + 0.13);
+    g.gain.linearRampToValueAtTime(0, t0 + 0.15);
+    g.connect(keyCtx.destination);
+    for (const hz of f) {
+      const o = keyCtx.createOscillator();
+      o.frequency.value = hz;
+      o.connect(g);
+      o.start(t0);
+      o.stop(t0 + 0.16);
+    }
+  } catch {
+    /* no audio output available */
+  }
+}
+
 function keyPress(k) {
+  keyTone(k);
   const b = $(`#keypad [data-key="${CSS.escape(k)}"]`);
   if (b) {
     b.classList.add("hit");
@@ -695,6 +735,7 @@ function bindPhone() {
     renderControls();
     renderMeters();
     if (S.page === "calls") renderCallDetail();
+    if (S.page === "calls") renderActive();
   });
 
   $("#xfer-blind").addEventListener("click", async () => {
@@ -769,8 +810,20 @@ function bindPhone() {
   }
   renderDialHistory();
   setInterval(() => {
-    if (liveLines().length) renderLines();
+    if (liveLines().length) {
+      renderLines();
+      if (S.page === "calls") renderActive();
+    }
   }, 1000);
+  $("#active-body").addEventListener("click", (e) => {
+    const tr = e.target.closest("tr[data-line]");
+    if (!tr) return;
+    S.sel = +tr.dataset.line;
+    renderLines();
+    renderControls();
+    renderCallDetail();
+    renderActive();
+  });
 }
 
 // ============================================================================
@@ -781,6 +834,38 @@ function kv(rows) {
     .filter(([, v]) => v !== null && v !== undefined && v !== "")
     .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`)
     .join("")}</dl>`;
+}
+
+/// Live table of the calls on the phone: number, state, duration, codec.
+function renderActive() {
+  const box = $("#active-body");
+  if (!box) return;
+  const ls = lines();
+  $("#active-count").textContent = ls.filter((l) => l.state !== "ended").length || "";
+  if (!ls.length) {
+    box.innerHTML = `<p class="empty-note">${esc(t("No calls right now."))}</p>`;
+    return;
+  }
+  const now = Date.now();
+  const accs = S.st ? S.st.accounts : [];
+  box.innerHTML = `<table class="hist active"><thead><tr><th>${esc(t("Line"))}</th><th></th><th>${esc(t("Number"))}</th><th>${esc(t("State"))}</th><th>${esc(t("Duration"))}</th><th>${esc(t("Codec"))}</th><th>${esc(t("Media"))}</th><th>RTP ↑ / ↓</th><th>${esc(t("Account"))}</th></tr></thead><tbody>${ls
+    .map((l) => {
+      const d = l.answered_ms ? (l.ended_ms || now) - l.answered_ms : null;
+      const acc = accs.find((a) => a.id === l.account);
+      const media = l.srtp ? (l.security || "SRTP").replace(/, fingerprint verified$/, " ✓") : l.state === "connected" ? "RTP" : "";
+      const flags = [l.held ? t("on hold") : "", l.remote_held ? t("held by far end") : "", l.muted ? t("muted") : "", l.conference ? `${t("Conference")} L${l.conference}` : ""].filter(Boolean).join(", ");
+      return `<tr data-line="${l.line}" class="${l.line === S.sel ? "sel" : ""} ${l.state === "ended" ? "ended" : ""}">
+        <td class="num">L${l.line}</td>
+        <td><svg class="hi"><use href="#i-${l.direction === "in" ? "in" : "out"}"/></svg></td>
+        <td><b>${esc(l.remote_name || "")}</b> <span class="mono">${esc(l.remote)}</span></td>
+        <td><span class="badge st-${l.state}">${esc(t(STATE_TEXT[l.state] || l.state))}</span>${flags ? ` <span class="muted">${esc(flags)}</span>` : ""}</td>
+        <td class="num">${d == null ? "" : dur(d)}</td>
+        <td class="num">${esc(l.codec || "")}</td>
+        <td>${esc(media)}</td>
+        <td class="num">${l.rtp_sent || 0} / ${l.rtp_received || 0}</td>
+        <td>${esc(acc ? accLabel(acc) : l.account || "")}</td></tr>`;
+    })
+    .join("")}</tbody></table>`;
 }
 
 function renderCallDetail() {
@@ -813,9 +898,16 @@ function renderCallDetail() {
     ])}
     <div class="row">
       <button type="button" class="btn small" id="cd-analyze">Analyze this call</button>
+      <button type="button" class="btn small" id="cd-trace">${esc(t("Show in SIP trace"))}</button>
       ${l.recording && S.ctl.features.record ? `<button type="button" class="btn small" id="cd-rec">Download recording</button>` : ""}
     </div>`;
   $("#cd-analyze").addEventListener("click", () => analyzeLine(l.call_id));
+  $("#cd-trace").addEventListener("click", () => {
+    showWs("trace");
+    const sel = $("#tr-call");
+    if ([...sel.options].some((o) => o.value === l.call_id)) sel.value = l.call_id;
+    renderTrace(true);
+  });
   const rb = $("#cd-rec");
   if (rb) rb.addEventListener("click", () => downloadRecording(l.line, l.remote));
   renderRecordings();
@@ -921,7 +1013,70 @@ async function renderHistory() {
 // ============================================================================
 // SIP trace
 
+// ---- calls in the trace: one entry per Call-ID that carries an INVITE
+
+const uriUser = (h) => ((h || "").match(/<?sips?:([^@;>]+)/i) || [])[1] || "";
+const hdr = (raw, name) => ((raw.match(new RegExp(`^(?:${name}):[ \\t]*(.*)$`, "mi")) || [])[1] || "").trim();
+
+function traceCalls() {
+  const calls = new Map();
+  for (const t of S.trace) {
+    if (!t.call_id) continue;
+    let c = calls.get(t.call_id);
+    if (!c && t.method === "INVITE" && !t.status) {
+      const ruri = (t.first_line.split(" ")[1] || "");
+      c = {
+        id: t.call_id, ts: t.ts_ms, out: t.dir === "out",
+        dialed: uriUser(ruri) || uriUser(hdr(t.raw, "To|t")),
+        from: uriUser(hdr(t.raw, "From|f")), to: uriUser(hdr(t.raw, "To|t")),
+        status: null, links: new Set(),
+      };
+      calls.set(t.call_id, c);
+    }
+    if (!c) continue;
+    // The last final answer counts: a 401 challenge is followed by the real result.
+    if (t.method === "INVITE" && t.status >= 200) c.status = t.status;
+    // Transfers name the other leg: Replaces in an INVITE, Refer-To ...?Replaces= in a REFER.
+    for (const v of [hdr(t.raw, "Replaces"), decodeURIComponent(((hdr(t.raw, "Refer-To|r").match(/Replaces=([^;>&]+)/i) || [])[1]) || "")]) {
+      const other = (v || "").split(";")[0].trim();
+      if (other) c.links.add(other);
+    }
+  }
+  // Links work both ways.
+  for (const c of calls.values()) for (const o of c.links) calls.get(o)?.links.add(c.id);
+  return calls;
+}
+
+function traceCallOptions() {
+  const sel = $("#tr-call");
+  const calls = traceCalls();
+  const sig = [...calls.values()].map((c) => `${c.id}:${c.status}`).join("|");
+  if (sel.dataset.sig === sig) return;
+  sel.dataset.sig = sig;
+  const keep = sel.value;
+  const res = (c) => (c.status == null ? t("in progress") : c.status < 300 ? t("answered") : String(c.status));
+  sel.innerHTML = [`<option value="">${esc(t("All messages"))}</option>`, `<option value="*calls">${esc(t("Calls only"))}</option>`,
+    ...[...calls.values()].reverse().map((c) => `<option value="${esc(c.id)}">${clock(c.ts)} ${c.out ? "→" : "←"} ${esc(c.out ? c.dialed : c.from || c.dialed)} (${esc(res(c))})</option>`)].join("");
+  sel.value = [...sel.options].some((o) => o.value === keep) ? keep : "";
+}
+
+/// Call-IDs the trace shows for the chosen call (and its related legs).
+function traceCallSet() {
+  const v = $("#tr-call").value;
+  if (!v) return null;
+  const calls = traceCalls();
+  if (v === "*calls") return new Set(calls.keys());
+  const set = new Set([v]);
+  if ($("#tr-legs").checked) {
+    // Follow links transitively: A replaced by B, B transferred to C...
+    const todo = [v];
+    while (todo.length) for (const o of calls.get(todo.pop())?.links || []) if (!set.has(o)) { set.add(o); todo.push(o); }
+  }
+  return set;
+}
+
 function traceVisible(t) {
+  if (S.trCalls && !S.trCalls.has(t.call_id)) return false;
   if ($("#tr-hide-reg").checked && t.method === "REGISTER") return false;
   if ($("#tr-hide-opt").checked && ["OPTIONS", "NOTIFY", "SUBSCRIBE", "PUBLISH"].includes(t.method)) return false;
   const f = $("#tr-filter").value.trim().toLowerCase();
@@ -945,6 +1100,8 @@ function onTrace(items) {
   for (const t of items) S.trace.push(t);
   if (S.trace.length > 5000) S.trace.splice(0, S.trace.length - 5000);
   if (S.page === "trace" && !S.trPaused) {
+    traceCallOptions();
+    if ($("#tr-call").value) S.trCalls = traceCallSet();
     const list = $("#tr-list");
     const atEnd = list.scrollTop + list.clientHeight >= list.scrollHeight - 30;
     list.insertAdjacentHTML("beforeend", items.filter(traceVisible).map(traceRow).join(""));
@@ -955,6 +1112,8 @@ function onTrace(items) {
 }
 
 function renderTrace(scroll) {
+  traceCallOptions();
+  S.trCalls = traceCallSet();
   const list = $("#tr-list");
   const rows = S.trace.filter(traceVisible).slice(-3000);
   list.innerHTML = rows.length ? rows.map(traceRow).join("") : `<p class="empty-note pad">${S.trace.length ? "No messages match the filter." : "SIP messages sent and received by the phone appear here live."}</p>`;
@@ -962,7 +1121,8 @@ function renderTrace(scroll) {
 }
 
 function bindTrace() {
-  ["tr-filter", "tr-hide-reg", "tr-hide-opt"].forEach((id) => $("#" + id).addEventListener("input", () => renderTrace(false)));
+  ["tr-filter", "tr-hide-reg", "tr-hide-opt", "tr-legs"].forEach((id) => $("#" + id).addEventListener("input", () => renderTrace(false)));
+  $("#tr-call").addEventListener("change", () => renderTrace(true));
   $("#tr-list").addEventListener("click", (e) => {
     const r = e.target.closest(".tr-row");
     if (!r) return;
@@ -1016,7 +1176,7 @@ function bindTrace() {
 async function load(bytes, name, webrtc = null) {
   try {
     const report = await S.be.analyze(bytes);
-    Object.assign(S, { bytes, name, report, call: null, msg: null, webrtc });
+    Object.assign(S, { bytes, name, report, call: null, msg: null, webrtc, picked: new Set() });
   } catch (e) {
     toast(`Could not read ${name}: ${e.message || e}`, 5000);
     return;
@@ -1039,15 +1199,26 @@ async function loadFile(f) {
 
 const AN_STATE = { answered: "Answered", failed: "Failed", cancelled: "Cancelled", in_progress: "No answer", non_invite: "" };
 
+/// Dialogs ticked in the list: with two or more, one ladder shows them together.
+function pickedCalls() {
+  return [...S.picked].filter((i) => S.report && i < S.report.calls.length).sort((a, b) => a - b);
+}
+function inView(call) {
+  const p = pickedCalls();
+  if (p.length > 1) return p.includes(call);
+  return S.call == null || call === S.call;
+}
+
 function renderCalls() {
   const r = S.report;
-  $("#calls-count").textContent = r.calls.length;
+  $("#calls-count").textContent = S.picked.size > 1 ? `${S.picked.size} / ${r.calls.length}` : r.calls.length;
+  $("#calls-clear").hidden = !S.picked.size;
   $("#calls").innerHTML = r.calls
     .map((c) => {
       const st = c.state;
       const label = st === "non_invite" ? (c.final_status ? `${c.final_status}` : "no answer") : `${AN_STATE[st]}${c.final_status ? " " + c.final_status : ""}`;
       const counts = `${c.errors ? `<span class="cnt-e">${c.errors} error${c.errors > 1 ? "s" : ""}</span>` : ""}${c.warnings ? `<span class="cnt-w">${c.warnings} warning${c.warnings > 1 ? "s" : ""}</span>` : ""}`;
-      return `<li><button type="button" data-call="${c.index}">
+      return `<li class="${S.picked.has(c.index) ? "picked" : ""}"><label class="c-pick" title="${esc(t("Add to the ladder"))}"><input type="checkbox" data-pick="${c.index}" ${S.picked.has(c.index) ? "checked" : ""}></label><button type="button" data-call="${c.index}">
         <span class="c-top"><span>${esc(c.kind)}</span><span class="state ${st}">${esc(label)}</span></span>
         <span class="c-parties">${esc(c.from)} → ${esc(c.to)}</span>
         <span class="c-meta"><span>+${c.start_rel_s.toFixed(1)} s</span>${c.talk_s != null ? `<span>${c.talk_s.toFixed(1)} s talk</span>` : ""}${counts}</span>
@@ -1059,10 +1230,14 @@ function renderCalls() {
 async function selectCall(i) {
   S.call = i;
   S.msg = null;
-  $$("#calls button").forEach((b) => b.setAttribute("aria-current", String(+b.dataset.call === i)));
+  const picked = pickedCalls();
+  const multi = picked.length > 1;
+  $$("#calls button").forEach((b) => b.setAttribute("aria-current", String(multi ? picked.includes(+b.dataset.call) : +b.dataset.call === i)));
   const r = S.report;
-  const c = i == null ? null : r.calls[i];
-  $("#call-head").innerHTML = c
+  const c = i == null || multi ? null : r.calls[i];
+  $("#call-head").innerHTML = multi
+    ? `<h2>${picked.length} ${esc(t("dialogs together"))}</h2><dl>${picked.map((k) => `<div><dt>${esc(r.calls[k].kind)}</dt><dd class="mono">${esc(r.calls[k].call_id)}</dd></div>`).join("")}</dl>`
+    : c
     ? `<h2>${esc(c.call_id)}</h2><dl>
         ${c.final_status ? `<div><dt>Final</dt><dd>${c.final_status} ${esc(c.final_reason || "")}</dd></div>` : ""}
         ${c.pdd_ms != null ? `<div><dt>Post-dial delay</dt><dd>${(c.pdd_ms / 1000).toFixed(2)} s</dd></div>` : ""}
@@ -1073,7 +1248,7 @@ async function selectCall(i) {
         ${c.user_agents.length ? `<div><dt>Agents</dt><dd>${esc(c.user_agents.join(" / "))}</dd></div>` : ""}
       </dl>`
     : `<h2>All messages</h2>`;
-  $("#ladder").innerHTML = await S.be.ladder(S.bytes, i);
+  $("#ladder").innerHTML = multi && S.be.ladderCalls ? await S.be.ladderCalls(S.bytes, picked) : await S.be.ladder(S.bytes, i);
   renderFindings();
   renderMedia();
   renderLog();
@@ -1081,7 +1256,7 @@ async function selectCall(i) {
 }
 
 function callFindings() {
-  return S.report.findings.filter((f) => S.call == null || f.call === S.call || f.call == null);
+  return S.report.findings.filter((f) => f.call == null || inView(f.call));
 }
 
 function renderFindings() {
@@ -1117,6 +1292,65 @@ function highlightSip(raw) {
   return out.join("\n") + (body ? `\n\n<span class="sdp">${esc(body)}</span>` : "");
 }
 
+/// Plain-language summary of one SIP message in its call: who called whom,
+/// what was dialed, what this message is, how long the answer took.
+function messageSummary(m) {
+  const r = S.report;
+  const c = m.call != null ? r.calls[m.call] : null;
+  const H = (n) => hdr(m.raw, n);
+  const user = (h) => uriUser(h);
+  const name = (h) => ((h || "").match(/^\s*"([^"]*)"/) || (h || "").match(/^\s*([^<"]+?)\s*</) || [])[1] || "";
+  const party = (h) => (h ? `${name(h) ? `<b>${esc(name(h))}</b> ` : ""}<span class="mono">${esc(user(h) || h)}</span>` : "");
+  const mono = (v) => (v ? `<span class="mono">${esc(v)}</span>` : "");
+  const cseq = m.cseq || H("CSeq");
+  const method = m.method || (cseq.split(" ")[1] || "");
+  let what;
+  let timing = "";
+  if (m.status) {
+    what = `${t("Response")} <b>${esc(m.raw.split(/\r?\n/)[0])}</b> ${t("to")} ${esc(method)}`;
+    // The request this response answers: same branch and CSeq, sent the other way.
+    const req = (c ? c.messages : r.messages.map((x) => x.index))
+      .map((i) => r.messages[i])
+      .find((x) => !x.status && x.branch === m.branch && x.cseq === m.cseq && x.index < m.index);
+    if (req) timing = `${((m.ts_ns - req.ts_ns) / 1e6).toFixed(0)} ms ${t("after the request")} (#${req.index})`;
+  } else {
+    what = `${t("Request")} <b>${esc(method)}</b>${m.retransmission ? ` <span class="warn">${t("retransmission")}</span>` : ""}`;
+    const resp = r.messages.filter((x) => x.status && x.branch === m.branch && x.cseq === m.cseq && x.index > m.index);
+    const fin = resp.find((x) => x.status >= 200);
+    if (fin) timing = `${t("answered")} ${fin.status} ${t("in")} ${((fin.ts_ns - m.ts_ns) / 1e6).toFixed(0)} ms (#${fin.index})`;
+    else if (resp.length) timing = `${resp.length} ${t("provisional responses, no final answer")}`;
+    else timing = t("no response in the capture");
+  }
+  const ruriUser = c ? user(c.request_uri) : "";
+  const sdp = m.sdp && m.sdp.media && m.sdp.media.length ? m.sdp : null;
+  const media = sdp
+    ? sdp.media
+        .map((md) => {
+          const ip = md.connection || sdp.connection || "";
+          const sec = md.fingerprint ? " DTLS-SRTP" : md.crypto && md.crypto.length ? " SRTP (SDES)" : "";
+          return `${esc(md.kind)} ${mono(`${ip}:${md.port}`)} ${esc(md.proto)} ${esc((md.codecs || []).map((x) => x.name).join(", "))}, ${esc(md.direction)}${sec}`;
+        })
+        .join("<br>")
+    : "";
+  const rows = [
+    [t("Message"), what],
+    [t("Timing"), esc(timing)],
+    [t("Dialed"), ruriUser ? `<b class="mono">${esc(ruriUser)}</b> <span class="muted mono">${esc(c.request_uri)}</span>` : ""],
+    [t("Caller"), party(H("From|f"))],
+    [t("Called"), party(H("To|t"))],
+    [t("Identity"), party(H("P-Asserted-Identity")) || party(H("Remote-Party-ID"))],
+    [t("Diverted by"), party(H("Diversion")) || party(H("History-Info"))],
+    [t("Agent"), esc(H("User-Agent") || H("Server"))],
+    [t("Contact"), mono(H("Contact|m"))],
+    [t("Reason"), esc(H("Reason") || H("Warning"))],
+    [t("Media"), media],
+    ["Call-ID", mono(m.call_id || H("Call-ID|i"))],
+    ["CSeq", mono(cseq)],
+    [t("Call result"), c ? esc([c.final_status ? `${c.final_status} ${c.final_reason || ""}`.trim() : t("no final response"), c.pdd_ms != null ? `${t("post-dial delay")} ${(c.pdd_ms / 1000).toFixed(2)} s` : "", c.talk_s != null ? `${t("talk")} ${c.talk_s.toFixed(1)} s` : "", c.ended_by ? `${t("ended by")} ${c.ended_by}` : ""].filter(Boolean).join(" · ")) : ""],
+  ];
+  return `<section class="msg-sum">${kv(rows)}</section>`;
+}
+
 function selectMessage(idx, switchTab = true) {
   S.msg = idx;
   $$("#ladder .msg").forEach((g) => g.classList.toggle("sel", +g.dataset.msg === idx));
@@ -1127,6 +1361,7 @@ function selectMessage(idx, switchTab = true) {
   $("#tab-message").innerHTML = `
     <div class="msg-meta"><span>#${m.index}</span><span>frame ${m.frame}</span><span>+${m.rel_s.toFixed(3)} s</span><span>${esc(m.src)} → ${esc(m.dst)}</span><span>${m.transport}</span>${m.retransmission ? "<span>retransmission</span>" : ""}</div>
     ${m.parse_notes.length ? `<p class="msg-notes">${esc(m.parse_notes.join("; "))}</p>` : ""}
+    ${messageSummary(m)}
     ${related.length ? `<ul class="findings" style="margin-bottom:10px">${related.map((f) => `<li class="${f.severity}"><span class="f-title">${esc(f.title)}</span><div class="f-detail">${esc(f.detail)}</div></li>`).join("")}</ul>` : ""}
     <pre class="sipmsg">${highlightSip(m.raw)}</pre>`;
   if (switchTab) showTab("message");
@@ -1145,7 +1380,7 @@ function webrtcBlock() {
 
 function renderMedia() {
   const r = S.report;
-  const streams = r.streams.filter((s) => S.call == null || s.call === S.call);
+  const streams = r.streams.filter((s) => inView(s.call));
   $("#n-media").textContent = streams.length || (S.webrtc ? "1" : "");
   if (S.webrtc && !streams.length) {
     $("#tab-media").innerHTML = webrtcBlock();
@@ -1176,7 +1411,10 @@ function renderMedia() {
 
 function renderLog() {
   const r = S.report;
-  const idxs = S.call == null ? r.messages.map((m) => m.index) : r.calls[S.call].messages;
+  const p = pickedCalls();
+  const idxs = p.length > 1
+    ? [...new Set(p.flatMap((k) => r.calls[k].messages))].sort((a, b) => a - b)
+    : S.call == null ? r.messages.map((m) => m.index) : r.calls[S.call].messages;
   $("#tab-log").innerHTML = `<div class="trace">${idxs
     .map((i) => {
       const m = r.messages[i];
@@ -1584,6 +1822,21 @@ function bindAnalysis() {
     const b = e.target.closest("button[data-call]");
     if (b) selectCall(+b.dataset.call);
   });
+  $("#calls").addEventListener("change", (e) => {
+    const cb = e.target.closest("input[data-pick]");
+    if (!cb) return;
+    const i = +cb.dataset.pick;
+    if (cb.checked) S.picked.add(i);
+    else S.picked.delete(i);
+    renderCalls();
+    selectCall(S.picked.size === 1 ? [...S.picked][0] : S.picked.size ? null : S.call ?? i);
+  });
+  $("#calls-clear").addEventListener("click", () => {
+    const keep = S.call ?? pickedCalls()[0] ?? null;
+    S.picked.clear();
+    renderCalls();
+    selectCall(keep);
+  });
   $("#ladder").addEventListener("click", (e) => {
     const g = e.target.closest(".msg");
     if (g) selectMessage(+g.dataset.msg);
@@ -1612,7 +1865,11 @@ function bindAnalysis() {
       const base = S.name.replace(/\.(pcapng|pcap|cap)$/i, "");
       try {
         if (kind === "json") return download(JSON.stringify(S.report, null, 2), `${base}-report.json`, "application/json");
-        if (kind === "svg") return download(await S.be.ladder(S.bytes, S.call), `${base}-call${S.call ?? "s"}.svg`, "image/svg+xml");
+        if (kind === "svg") {
+          const p = pickedCalls();
+          const svg = p.length > 1 && S.be.ladderCalls ? await S.be.ladderCalls(S.bytes, p) : await S.be.ladder(S.bytes, S.call);
+          return download(svg, `${base}-${p.length > 1 ? "calls" + p.join("-") : "call" + (S.call ?? "s")}.svg`, "image/svg+xml");
+        }
         const opts = { annotate: true, redact: kind === "redacted", call: kind === "all" ? null : S.call, sip_only: false };
         const data = await S.be.exportPcap(S.bytes, opts);
         const suffix = kind === "all" ? "annotated" : kind === "redacted" ? `call${S.call}-redacted` : `call${S.call}`;
@@ -1628,6 +1885,57 @@ function bindAnalysis() {
     askAI(false);
   });
   $("#ai-preview").addEventListener("click", () => askAI(true));
+}
+
+// Sound card self-test in Settings, Audio.
+let audioTestPoll = null;
+function bindAudioTest() {
+  const busy = (on) => ["#at-rec", "#at-tone"].forEach((s) => ($(s).disabled = on));
+  const db = (v) => (v > 0 ? `${(20 * Math.log10(v / 32767)).toFixed(0)} dBFS` : "");
+  $("#at-rec").addEventListener("click", async () => {
+    try {
+      await S.ctl.audioRecordTest(4);
+    } catch (e) {
+      toast(e.message || String(e), 4000);
+    }
+  });
+  $("#at-tone").addEventListener("click", async () => {
+    try {
+      await S.ctl.audioTone(Number($("#au-hz").value) || 440, 1500);
+    } catch (e) {
+      toast(e.message || String(e), 4000);
+    }
+  });
+  $("#at-loop").addEventListener("change", async (e) => {
+    try {
+      await S.ctl.loopback(e.target.checked);
+    } catch (err) {
+      toast(err.message || String(err), 4000);
+      e.target.checked = false;
+    }
+  });
+  const label = { recording: "Recording… speak now", playing: "Playing back what was recorded", tone: "Playing the test tone" };
+  clearInterval(audioTestPoll);
+  audioTestPoll = setInterval(async () => {
+    if (!$("#at-in")) {
+      clearInterval(audioTestPoll);
+      S.ctl.loopback(false).catch(() => {});
+      return;
+    }
+    try {
+      const s = await S.ctl.audioStatus();
+      if (s.status) {
+        setMeter($("#at-in"), levelPct(s.status.mic_level));
+        setMeter($("#at-out"), levelPct(s.status.speaker_level));
+        $("#at-in-db").textContent = db(s.status.mic_level);
+        $("#at-out-db").textContent = db(s.status.speaker_level);
+      }
+      busy(!!s.test);
+      $("#at-state").textContent = s.test ? t(label[s.test] || s.test) : s.error ? s.error : "";
+    } catch {
+      /* server busy; next tick */
+    }
+  }, 150);
 }
 
 // ============================================================================
@@ -2239,10 +2547,15 @@ async function renderGlobal(section) {
   if (section === "calls") {
     const fields = CALL_SETTINGS.filter((f) => native || f[5] !== "native");
     body.innerHTML = `<div class="set-head"><h1>Call handling</h1></div>
-      <form class="set-form" id="g-form"><div class="fields">${fields.map((f, i) => fieldHtml(f, get(st, f[0]), `gf-${i}`)).join("")}</div>
+      <form class="set-form" id="g-form"><div class="fields">${fields.map((f, i) => fieldHtml(f, get(st, f[0]), `gf-${i}`)).join("")}
+        <label class="check fld"><input type="checkbox" id="lp-follow" ${store.get("sidetone.follow_calls", true) ? "checked" : ""}> ${esc(t("Open the Calls page when you press Call"))}</label>
+        <label class="check fld"><input type="checkbox" id="lp-keys" ${store.get("sidetone.key_tones", true) ? "checked" : ""}> ${esc(t("Play keypad tones"))}</label>
+      </div>
       <div class="set-actions"><button type="submit" class="btn primary">Save</button></div></form>`;
     $("#g-form").addEventListener("submit", async (e) => {
       e.preventDefault();
+      store.set("sidetone.follow_calls", $("#lp-follow").checked);
+      store.set("sidetone.key_tones", $("#lp-keys").checked);
       fields.forEach((f, i) => readField(f, `gf-${i}`, st));
       await S.ctl.setConfig({ settings: st });
       toast("Saved");
@@ -2265,7 +2578,21 @@ async function renderGlobal(section) {
         ${fieldHtml(["tone_hz", "Test tone frequency (Hz)", "number"], st.tone_hz, "au-hz")}
       </div>
       <p class="hint">${esc(dev.audio && dev.audio.error ? `Sound card: ${dev.audio.error}` : dev.audio && dev.audio.status ? `Open: ${dev.audio.status.input || "no microphone"} / ${dev.audio.status.output || "no speaker"}` : "")}</p>
-      <div class="set-actions"><button type="submit" class="btn primary">Save</button></div></form>`;
+      <div class="set-actions"><button type="submit" class="btn primary">Save</button></div></form>
+      <section class="set-form audio-test">
+        <h2>${esc(t("Test the microphone and speaker"))}</h2>
+        <p class="muted">${esc(t("Speak and watch the microphone meter. Record plays back what the far end would hear; use headphones for the live check to avoid feedback."))}</p>
+        <div class="meters">
+          <div class="meter-row"><svg><use href="#i-mic"/></svg><div class="meter"><i id="at-in"></i></div><span class="hint" id="at-in-db"></span></div>
+          <div class="meter-row"><svg><use href="#i-spk"/></svg><div class="meter"><i id="at-out"></i></div><span class="hint" id="at-out-db"></span></div>
+        </div>
+        <div class="row">
+          <button type="button" class="btn" id="at-rec">${esc(t("Record 4 s and play back"))}</button>
+          <button type="button" class="btn" id="at-tone">${esc(t("Play a test tone"))}</button>
+          <label class="check"><input type="checkbox" id="at-loop"> ${esc(t("Hear the microphone live"))}</label>
+        </div>
+        <p class="hint" id="at-state"></p>
+      </section>`;
     $("#g-form").addEventListener("submit", async (e) => {
       e.preventDefault();
       st.audio_source = $("#au-src").value;
@@ -2276,6 +2603,7 @@ async function renderGlobal(section) {
       toast("Saved");
       renderGlobal("audio");
     });
+    bindAudioTest();
   } else if (section === "capture") {
     if (!native) {
       body.innerHTML = `<div class="set-head"><h1>Capture and recording</h1></div><p class="muted">The browser phone logs every SIP message and rebuilds a pcapng from it for analysis. Media is DTLS-SRTP inside the browser, so quality comes from WebRTC statistics instead of RTP packets.</p>`;

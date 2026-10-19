@@ -73,6 +73,24 @@ pub fn ladder_svg(bytes: &[u8], call: i32) -> Result<String, JsError> {
     })
 }
 
+/// Ladder SVG for several calls at once (call legs), `calls` like "0,2,5".
+#[wasm_bindgen]
+pub fn ladder_svg_calls(bytes: &[u8], calls: &str) -> Result<String, JsError> {
+    with_report(bytes, |r| {
+        render_svg(
+            r,
+            &LadderOptions {
+                calls: calls
+                    .split(',')
+                    .filter_map(|x| x.trim().parse().ok())
+                    .filter(|c: &usize| *c < r.calls.len())
+                    .collect(),
+                ..Default::default()
+            },
+        )
+    })
+}
+
 /// Annotated pcapng. `opts_json`: {"annotate":true,"redact":bool,"call":n|null,"sip_only":bool}
 #[wasm_bindgen]
 pub fn export_capture(bytes: &[u8], opts_json: &str) -> Result<Vec<u8>, JsError> {

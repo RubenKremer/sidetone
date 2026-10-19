@@ -109,7 +109,7 @@ impl Default for PhoneSettings {
     }
 }
 
-/// Microphone and speaker queues at 8 kHz, filled and drained by the audio layer.
+/// Microphone and speaker queues at AUDIO_RATE, filled and drained by the audio layer.
 #[derive(Clone)]
 pub struct AudioIo {
     pub mic: Arc<Ring>,

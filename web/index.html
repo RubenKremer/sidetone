@@ -166,6 +166,10 @@
           <button type="button" class="btn small" id="hist-clear">Clear history</button>
         </div>
       </div>
+      <section class="card active-card">
+        <div class="sect-head"><h2>Calls now <b id="active-count"></b></h2></div>
+        <div id="active-body"></div>
+      </section>
       <div class="calls-grid">
         <section class="card" id="call-detail">
           <h2>Current call</h2>
@@ -191,6 +195,8 @@
       <div class="page-head">
         <h1>SIP trace</h1>
         <div class="row">
+          <select id="tr-call" aria-label="Show messages of"><option value="">All messages</option></select>
+          <label class="check" title="Calls joined by a transfer (Replaces, Refer-To) are shown together"><input type="checkbox" id="tr-legs" checked> Related legs</label>
           <input id="tr-filter" placeholder="Filter: method, number, Call-ID, address" spellcheck="false" aria-label="Filter trace">
           <label class="check"><input type="checkbox" id="tr-hide-reg" checked> Hide REGISTER</label>
           <label class="check"><input type="checkbox" id="tr-hide-opt" checked> Hide OPTIONS and NOTIFY</label>
@@ -233,7 +239,8 @@
         </div>
         <div class="an-grid">
           <aside class="calls" aria-label="Calls in the capture">
-            <div class="calls-head"><h2>Dialogs</h2><span id="calls-count"></span></div>
+            <div class="calls-head"><h2>Dialogs</h2><span class="grow"></span><button type="button" class="linklike" id="calls-clear" hidden>Clear selection</button><span id="calls-count"></span></div>
+            <p class="calls-hint hint">Tick two or more to see the call legs in one ladder.</p>
             <ol id="calls"></ol>
           </aside>
           <section class="ladder-wrap" aria-label="Ladder diagram">

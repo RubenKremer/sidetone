@@ -223,6 +223,13 @@ fn handle(
                         &r,
                         &LadderOptions {
                             call: c,
+                            // calls=0,2,5: several dialogs (call legs) in one ladder.
+                            calls: q
+                                .get("calls")
+                                .map(|v| {
+                                    v.split(',').filter_map(|x| x.trim().parse().ok()).collect()
+                                })
+                                .unwrap_or_default(),
                             ..Default::default()
                         },
                     )
@@ -470,6 +477,33 @@ fn phone_api(m: &Method, path: &str, q: &HashMap<String, String>, body: &[u8]) -
             json_resp(json!({"devices": d, "audio": st}))
         }
         (Method::Get, "/api/audio/status") => json_resp(phone::get().audio_status()),
+        (Method::Post, "/api/audio/tone") => {
+            let v = match body_json(body) {
+                Ok(v) => v,
+                Err(r) => return r,
+            };
+            let hz = v.get("hz").and_then(|x| x.as_f64()).unwrap_or(440.0) as f32;
+            let ms = v
+                .get("ms")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(1500)
+                .min(10_000);
+            match phone::get().audio_tone(hz.clamp(50.0, 7000.0), ms) {
+                Ok(()) => json_resp(json!({"ok": true})),
+                Err(e) => err(409, e),
+            }
+        }
+        (Method::Post, "/api/audio/record_test") => {
+            let v = match body_json(body) {
+                Ok(v) => v,
+                Err(r) => return r,
+            };
+            let secs = v.get("seconds").and_then(|x| x.as_u64()).unwrap_or(4);
+            match phone::get().audio_record_test(secs) {
+                Ok(()) => json_resp(json!({"ok": true})),
+                Err(e) => err(409, e),
+            }
+        }
         (Method::Post, "/api/audio/loopback") => {
             let v = match body_json(body) {
                 Ok(v) => v,

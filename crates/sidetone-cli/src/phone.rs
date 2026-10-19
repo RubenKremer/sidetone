@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use sidetone_ua::audio::{self, Audio};
 use sidetone_ua::engine::{AccountCfg, CallRequest, Cmd, Engine, HistoryEntry, PhoneSettings};
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -39,6 +39,8 @@ pub struct Phone {
     pub engine: Engine,
     audio: Mutex<Option<Audio>>,
     audio_error: Mutex<Option<String>>,
+    /// Sound card self-test in progress: "recording", "playing" or "tone".
+    audio_test: Arc<Mutex<Option<String>>>,
     config: Mutex<PhoneConfig>,
     dir: Option<PathBuf>,
 }
@@ -128,6 +130,7 @@ impl Phone {
             engine,
             audio: Mutex::new(aud),
             audio_error: Mutex::new(aerr),
+            audio_test: Arc::new(Mutex::new(None)),
             config: Mutex::new(cfg),
             dir,
         };
@@ -222,6 +225,7 @@ impl Phone {
         let st = g.as_ref().map(|a| a.status());
         json!({
             "status": st,
+            "test": self.audio_test.lock().unwrap().clone(),
             "error": self.audio_error.lock().unwrap().clone(),
             "prefs": self.config.lock().unwrap().audio,
         })
@@ -234,6 +238,86 @@ impl Phone {
                 Ok(())
             }
             None => Err(anyhow!("no sound card is open")),
+        }
+    }
+
+    /// Plays a tone on the speaker: checks the output device and its volume.
+    pub fn audio_tone(&self, hz: f32, ms: u64) -> Result<()> {
+        let io = self.sound_io()?;
+        let state = self.audio_test.clone();
+        *state.lock().unwrap() = Some("tone".into());
+        std::thread::spawn(move || {
+            let rate = sidetone_ua::media::AUDIO_RATE as f32;
+            let chunk = sidetone_ua::media::SPMS * 20;
+            let total = (ms as usize * sidetone_ua::media::SPMS).max(chunk);
+            let mut n = 0usize;
+            let start = std::time::Instant::now();
+            while n < total {
+                let buf: Vec<i16> = (n..(n + chunk).min(total))
+                    .map(|i| {
+                        // Short fades avoid clicks at both ends.
+                        let fade = (i.min(total - i) as f32 / (rate * 0.01)).min(1.0);
+                        ((i as f32 * 2.0 * std::f32::consts::PI * hz / rate).sin() * 9000.0 * fade)
+                            as i16
+                    })
+                    .collect();
+                io.speaker.push(&buf);
+                n += buf.len();
+                let due =
+                    start + std::time::Duration::from_millis((n / sidetone_ua::media::SPMS) as u64);
+                if let Some(d) = due.checked_duration_since(std::time::Instant::now()) {
+                    std::thread::sleep(d.saturating_sub(std::time::Duration::from_millis(60)));
+                }
+            }
+            *state.lock().unwrap() = None;
+        });
+        Ok(())
+    }
+
+    /// Records the microphone for a few seconds, then plays it back: the
+    /// quickest way to hear what the far end will hear.
+    pub fn audio_record_test(&self, secs: u64) -> Result<()> {
+        if self.engine.state().calls.iter().any(|c| c.state != "ended") {
+            return Err(anyhow!("hang up first: a call is using the microphone"));
+        }
+        let io = self.sound_io()?;
+        let state = self.audio_test.clone();
+        if state.lock().unwrap().is_some() {
+            return Err(anyhow!("a test is already running"));
+        }
+        *state.lock().unwrap() = Some("recording".into());
+        std::thread::spawn(move || {
+            let ms = sidetone_ua::media::SPMS;
+            let want = secs.clamp(1, 10) as usize * 1000 * ms;
+            let mut rec: Vec<i16> = Vec::with_capacity(want);
+            io.mic.clear();
+            let mut buf = vec![0i16; ms * 20];
+            while rec.len() < want {
+                let n = io.mic.pop_into(&mut buf);
+                rec.extend_from_slice(&buf[..n]);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            *state.lock().unwrap() = Some("playing".into());
+            let start = std::time::Instant::now();
+            for (k, c) in rec.chunks(ms * 20).enumerate() {
+                io.speaker.push(c);
+                let due = start + std::time::Duration::from_millis(20 * (k as u64 + 1));
+                if let Some(d) = due.checked_duration_since(std::time::Instant::now()) {
+                    std::thread::sleep(d.saturating_sub(std::time::Duration::from_millis(60)));
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            *state.lock().unwrap() = None;
+        });
+        Ok(())
+    }
+
+    fn sound_io(&self) -> Result<sidetone_ua::engine::AudioIo> {
+        match self.audio.lock().unwrap().as_ref() {
+            Some(a) => Ok(a.io.clone()),
+            None => Err(anyhow!(
+                "no sound card is open: tick Use the sound card in Settings, Audio"
+            )),
         }
     }
 
