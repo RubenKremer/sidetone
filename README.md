@@ -314,6 +314,47 @@ hints, echo, busy and unallocated numbers).
 > lab does not cover, and please report them. MOS is an estimate from one
 > capture point, as any single-point measurement is.
 
+## Provisioning
+
+Sidetone can load account settings from a small XML file served over HTTP(S).
+In Settings, open an account and press **Provision**, paste the URL, and save.
+The format is Sidetone-specific (not a Yealink phone file): unknown keys fail
+verification. Every key, the desktop and browser samples, and the resync
+rules are in [docs/provisioning.md](docs/provisioning.md).
+
+Example (`sidetone-provision` version 1; `display_name` is required):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<sidetone-provision version="1">
+  <account.1.user>2001</account.1.user>
+  <account.1.display_name>Lab 2001</account.1.display_name>
+  <account.1.domain>pbx.example.com</account.1.domain>
+  <account.1.password>secret</account.1.password>
+  <account.1.transport>udp</account.1.transport>
+</sidetone-provision>
+```
+
+Browser accounts also need `account.1.ws` and usually `account.1.ice`.
+
+When the registrar sends SIP NOTIFY with `Event: check-sync` or `Event: resync`,
+Sidetone re-downloads the stored provisioning URL for that account. If
+**Accept requests only from the registrar** is on, check-sync applies only when
+the NOTIFY comes from the registrar. A resync during a call is deferred until
+that account's last call ends; if a new call starts while the file is
+downloading, apply waits again. Downloads for the same account are at least
+10 seconds apart, measured from the start of the last attempt.
+
+The desktop app fetches provisioning URLs directly (it does not use
+`HTTPS_PROXY`). TLS is checked against public roots unless you turn off
+**Check the server's TLS certificate** in the provision dialog; the browser
+phone always uses the browser's TLS rules and cannot disable verification. An
+HTTPS-hosted page cannot fetch an `http://` provisioning URL (mixed content);
+use the desktop app for a LAN HTTP server.
+
+In the browser, `account.1.remember_password` set to `0` keeps the password only
+until you reload the page (unless you save with remember enabled in Settings).
+
 ## Help wanted
 
 - **Try it on your own traces.** A capture Sidetone reads wrong, or a
@@ -384,6 +425,7 @@ the `sidetone` CLI), or run it with `sudo`. Everything else works without it.
 
 | Where | What it covers |
 |---|---|
+| [`docs/provisioning.md`](docs/provisioning.md) | provisioning XML, samples, and SIP resync |
 | `sidetone --help`, `sidetone test-format` | every command and the test suite format |
 | [`examples/`](examples/) | test suites, including one that fails on purpose |
 | [`lab/`](lab/) | the Asterisk lab used by CI and the screenshots |

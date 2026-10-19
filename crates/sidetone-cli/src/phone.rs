@@ -1,13 +1,16 @@
 //! Native softphone behind the local HTTP API: one engine, sound card,
 //! persisted accounts, settings and call history.
 
+use crate::provision::{account_from_provision_json, fetch_provision};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sidetone_ua::audio::{self, Audio};
 use sidetone_ua::engine::{AccountCfg, CallRequest, Cmd, Engine, HistoryEntry, PhoneSettings};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -88,6 +91,24 @@ fn write_private(path: &PathBuf, data: &[u8]) -> std::io::Result<()> {
 
 static PHONE: OnceLock<Phone> = OnceLock::new();
 
+struct ProvisionRuntime {
+    cursor: u64,
+    last_attempt: HashMap<String, Instant>,
+    due: HashMap<String, Instant>,
+    in_flight: HashSet<String>,
+    rerun: HashSet<String>,
+    held: HashMap<String, Value>,
+}
+
+static PROVISION: Mutex<Option<ProvisionRuntime>> = Mutex::new(None);
+
+fn accounts_json_equal(a: &AccountCfg, b: &AccountCfg) -> bool {
+    match (serde_json::to_value(a), serde_json::to_value(b)) {
+        (Ok(va), Ok(vb)) => va == vb,
+        _ => false,
+    }
+}
+
 /// The phone, started on first use.
 pub fn get() -> &'static Phone {
     PHONE.get_or_init(Phone::start)
@@ -124,6 +145,7 @@ impl Phone {
             aud.as_ref().map(|a| a.io.clone()),
         );
         engine.set_history(history);
+        let cursor = engine.seq();
         let p = Phone {
             engine,
             audio: Mutex::new(aud),
@@ -140,13 +162,26 @@ impl Phone {
                 }
             }
         });
+        *PROVISION.lock().unwrap() = Some(ProvisionRuntime {
+            cursor,
+            last_attempt: HashMap::new(),
+            due: HashMap::new(),
+            in_flight: HashSet::new(),
+            rerun: HashSet::new(),
+            held: HashMap::new(),
+        });
+        std::thread::spawn(|| loop {
+            std::thread::sleep(Duration::from_millis(250));
+            if let Some(p) = PHONE.get() {
+                p.poll_provisioning();
+            }
+        });
         p
     }
 
-    fn save_config(&self) {
+    fn save_config(&self, c: &PhoneConfig) {
         if let Some(d) = &self.dir {
-            let c = self.config.lock().unwrap().clone();
-            if let Ok(b) = serde_json::to_vec_pretty(&c) {
+            if let Ok(b) = serde_json::to_vec_pretty(c) {
                 let _ = write_private(&d.join("phone.json"), &b);
             }
         }
@@ -166,39 +201,276 @@ impl Phone {
 
     /// Applies a partial configuration {accounts?, settings?, audio?} and saves it.
     pub fn set_config(&self, v: &Value) -> Result<()> {
-        let mut c = self.config.lock().unwrap().clone();
-        if let Some(a) = v.get("accounts") {
-            c.accounts = serde_json::from_value(a.clone()).map_err(|e| anyhow!("accounts: {e}"))?;
+        // Parse before taking the lock so a bad payload cannot replace the
+        // live config, and so a later error does not hold the mutex.
+        let accounts = if let Some(a) = v.get("accounts") {
+            let accounts: Vec<AccountCfg> =
+                serde_json::from_value(a.clone()).map_err(|e| anyhow!("accounts: {e}"))?;
             let mut seen = std::collections::HashSet::new();
-            for a in &c.accounts {
+            for a in &accounts {
                 if !seen.insert(a.id.clone()) {
                     return Err(anyhow!("duplicate account id {}", a.id));
                 }
             }
-            self.engine.cmd(Cmd::SetAccounts(c.accounts.clone()));
-        }
-        if let Some(s) = v.get("settings") {
-            c.settings = serde_json::from_value(s.clone()).map_err(|e| anyhow!("settings: {e}"))?;
-            self.engine.cmd(Cmd::SetSettings(c.settings.clone()));
-        }
-        let audio_changed = match v.get("audio") {
-            Some(a) => {
-                let new: AudioPrefs =
-                    serde_json::from_value(a.clone()).map_err(|e| anyhow!("audio: {e}"))?;
-                let changed = new.enabled != c.audio.enabled
-                    || new.input != c.audio.input
-                    || new.output != c.audio.output;
-                c.audio = new;
-                changed
-            }
-            None => false,
+            Some(accounts)
+        } else {
+            None
         };
-        *self.config.lock().unwrap() = c.clone();
+        let settings = if let Some(s) = v.get("settings") {
+            Some(
+                serde_json::from_value(s.clone()).map_err(|e| anyhow!("settings: {e}"))?,
+            )
+        } else {
+            None
+        };
+        let audio: Option<AudioPrefs> = if let Some(a) = v.get("audio") {
+            Some(serde_json::from_value(a.clone()).map_err(|e| anyhow!("audio: {e}"))?)
+        } else {
+            None
+        };
+        let (audio_changed, audio_prefs, snapshot) = {
+            let mut c = self.config.lock().unwrap();
+            if let Some(accounts) = accounts {
+                c.accounts = accounts;
+                self.engine.cmd(Cmd::SetAccounts(c.accounts.clone()));
+            }
+            if let Some(settings) = settings {
+                c.settings = settings;
+                self.engine.cmd(Cmd::SetSettings(c.settings.clone()));
+            }
+            let audio_changed = match audio {
+                Some(new) => {
+                    let changed = new.enabled != c.audio.enabled
+                        || new.input != c.audio.input
+                        || new.output != c.audio.output;
+                    c.audio = new;
+                    changed
+                }
+                None => false,
+            };
+            let audio_prefs = c.audio.clone();
+            let snapshot = c.clone();
+            (audio_changed, audio_prefs, snapshot)
+        };
         if audio_changed {
-            self.restart_audio(&c.audio);
+            self.restart_audio(&audio_prefs);
         }
-        self.save_config();
+        self.save_config(&snapshot);
         Ok(())
+    }
+
+    /// Replaces one account from provisioning while preserving id, URL, TLS, and profile name.
+    pub fn replace_account(&self, id: &str, next: AccountCfg) -> Result<()> {
+        let snapshot = {
+            let mut c = self.config.lock().unwrap();
+            let Some(idx) = c.accounts.iter().position(|a| a.id == id) else {
+                drop(c);
+                self.engine.emit(
+                    "info",
+                    Some(id.to_string()),
+                    "provisioning skipped: account was deleted",
+                );
+                return Ok(());
+            };
+            let stored = &c.accounts[idx];
+            let merged = AccountCfg {
+                id: stored.id.clone(),
+                label: next.label,
+                enabled: next.enabled,
+                register: next.register,
+                retry_s: next.retry_s,
+                blf: next.blf,
+                profile: sidetone_ua::Profile {
+                    name: stored.profile.name.clone(),
+                    account: next.profile.account,
+                    behavior: next.profile.behavior,
+                },
+                provision_url: stored.provision_url.clone(),
+                provision_tls_verify: stored.provision_tls_verify,
+            };
+            if accounts_json_equal(&merged, &c.accounts[idx]) {
+                return Ok(());
+            }
+            c.accounts[idx] = merged;
+            self.engine.cmd(Cmd::SetAccounts(c.accounts.clone()));
+            c.clone()
+        };
+        self.engine.emit(
+            "provisioned",
+            Some(id.to_string()),
+            "provisioning applied",
+        );
+        self.save_config(&snapshot);
+        Ok(())
+    }
+
+    fn account_has_live_call(&self, account_id: &str) -> bool {
+        self.engine.state().calls.iter().any(|c| {
+            c.account == account_id && c.state != "ended"
+        })
+    }
+
+    fn poll_provisioning(&self) {
+        let fetch_now = {
+            let mut guard = PROVISION.lock().unwrap();
+            let Some(rt) = guard.as_mut() else {
+                return;
+            };
+            let events = self.engine.events_since(rt.cursor);
+            for e in &events {
+                rt.cursor = rt.cursor.max(e.seq);
+                if e.kind == "resync" {
+                    if let Some(id) = e.account.clone() {
+                        if rt.in_flight.contains(&id) {
+                            rt.rerun.insert(id);
+                        } else {
+                            Self::schedule_resync(rt, &id);
+                        }
+                    }
+                }
+            }
+            let now = Instant::now();
+            let ids: Vec<String> = rt
+                .due
+                .iter()
+                .filter(|(id, t)| **t <= now && !rt.in_flight.contains(*id))
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &ids {
+                rt.due.remove(id);
+                rt.in_flight.insert(id.clone());
+                rt.last_attempt.insert(id.clone(), Instant::now());
+            }
+            ids
+        };
+
+        for id in fetch_now {
+            Self::finish_provision_fetch(self, &id);
+        }
+
+        let held_ids: Vec<String> = {
+            PROVISION
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|rt| rt.held.keys().cloned().collect())
+                .unwrap_or_default()
+        };
+        for id in held_ids {
+            if !self.account_has_live_call(&id) {
+                let json = PROVISION
+                    .lock()
+                    .unwrap()
+                    .as_mut()
+                    .and_then(|rt| rt.held.remove(&id));
+                if let Some(json) = json {
+                    self.apply_provision_json(&id, json);
+                }
+            }
+        }
+    }
+
+    fn schedule_resync(rt: &mut ProvisionRuntime, id: &str) {
+        let due = match rt.last_attempt.get(id) {
+            None => Instant::now(),
+            Some(t) if t.elapsed() >= Duration::from_secs(10) => Instant::now(),
+            Some(t) => *t + Duration::from_secs(10),
+        };
+        rt.due.insert(id.to_string(), due);
+    }
+
+    fn finish_provision_fetch(p: &Phone, id: &str) {
+        let (url, tls_verify) = {
+            let cfg = p.config.lock().unwrap();
+            let Some(acc) = cfg.accounts.iter().find(|a| a.id == id) else {
+                PROVISION
+                    .lock()
+                    .unwrap()
+                    .as_mut()
+                    .map(|rt| rt.in_flight.remove(id));
+                return;
+            };
+            let Some(url) = acc.provision_url.clone() else {
+                drop(cfg);
+                PROVISION
+                    .lock()
+                    .unwrap()
+                    .as_mut()
+                    .map(|rt| rt.in_flight.remove(id));
+                p.engine.emit(
+                    "info",
+                    Some(id.to_string()),
+                    "provisioning skipped: no provision URL",
+                );
+                return;
+            };
+            (url, acc.provision_tls_verify)
+        };
+
+        let fetch_result = fetch_provision(&url, tls_verify);
+
+        let need_rerun = {
+            let mut guard = PROVISION.lock().unwrap();
+            let Some(rt) = guard.as_mut() else {
+                return;
+            };
+            rt.in_flight.remove(id);
+            rt.rerun.remove(id)
+        };
+        if need_rerun {
+            let mut guard = PROVISION.lock().unwrap();
+            if let Some(rt) = guard.as_mut() {
+                Self::schedule_resync(rt, id);
+            }
+        }
+
+        match fetch_result {
+            Ok(json) => {
+                if p.account_has_live_call(id) {
+                    PROVISION
+                        .lock()
+                        .unwrap()
+                        .as_mut()
+                        .map(|rt| rt.held.insert(id.to_string(), json));
+                } else {
+                    p.apply_provision_json(id, json);
+                }
+            }
+            Err(e) => {
+                p.engine.emit(
+                    "error",
+                    Some(id.to_string()),
+                    format!("provisioning failed: {e}"),
+                );
+            }
+        }
+    }
+
+    fn apply_provision_json(&self, id: &str, json: Value) {
+        let stored = {
+            let cfg = self.config.lock().unwrap();
+            cfg.accounts.iter().find(|a| a.id == id).cloned()
+        };
+        let Some(stored) = stored else {
+            self.engine.emit(
+                "info",
+                Some(id.to_string()),
+                "provisioning skipped: account was deleted",
+            );
+            return;
+        };
+        match account_from_provision_json(&stored, json) {
+            Ok(next) => {
+                let _ = self.replace_account(id, next);
+            }
+            Err(e) => {
+                self.engine.emit(
+                    "error",
+                    Some(id.to_string()),
+                    format!("provisioning failed: {e}"),
+                );
+            }
+        }
     }
 
     fn restart_audio(&self, prefs: &AudioPrefs) {

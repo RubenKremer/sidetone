@@ -107,6 +107,14 @@ export class NativeController extends Emitter {
   async sniffPcap() { return new Uint8Array(await (await this.http.get("api/sniff/pcap")).arrayBuffer()); }
   async audioStatus() { return (await this.http.get("api/audio/status")).json(); }
   async loopback(on) { return (await this.http.post("api/audio/loopback", JSON.stringify({ on }), "application/json")).json(); }
+
+  async provision(url, tlsVerify) {
+    const r = await this.http.post("api/phone/provision", JSON.stringify({ url, tls_verify: tlsVerify !== false }), "application/json");
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    if (!j.ok) throw new Error(j.error || "Provisioning failed");
+    return j.account;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +122,26 @@ export class NativeController extends Emitter {
 const WEB_DEFAULT_SETTINGS = { dnd: false, dnd_code: 486, auto_answer: false, auto_answer_delay_ms: 1000, max_lines: 4, auto_hold: true, ring_timeout_s: 120 };
 
 export function webAccountDefaults() {
-  return { id: `w${Date.now().toString(36)}`, label: "", enabled: true, register: true, user: "", authUser: "", password: "", displayName: "", domain: "", ws: "", ice: "stun:stun.l.google.com:19302", expires: 300, rememberPassword: false };
+  return { id: `w${Date.now().toString(36)}`, label: "", enabled: true, register: true, user: "", authUser: "", password: "", displayName: "", domain: "", ws: "", ice: "stun:stun.l.google.com:19302", expires: 300, rememberPassword: false, provisionUrl: "" };
+}
+
+const PROVISION_MIN_MS = 10_000;
+
+function webProvisionSnapshot(a, passwords) {
+  return JSON.stringify({
+    label: a.label || "",
+    enabled: !!a.enabled,
+    register: !!a.register,
+    user: a.user || "",
+    authUser: a.authUser || "",
+    password: a.password || passwords[a.id] || "",
+    displayName: a.displayName || "",
+    domain: a.domain || "",
+    ws: a.ws || "",
+    ice: a.ice || "",
+    expires: Number(a.expires) || 300,
+    rememberPassword: !!a.rememberPassword,
+  });
 }
 
 export class WebController extends Emitter {
@@ -132,6 +159,21 @@ export class WebController extends Emitter {
     this.levels = { tx: 0, rx: 0 };
     this.histList = store.get("sidetone.web.history", []);
     this.passwords = {}; // session-only passwords
+    this.parseProvision = null;
+    this.resyncPending = false;
+    this.pendingProvision = null;
+    this.lastProvisionAttempt = {};
+    this.resyncTimer = null;
+    this.provisionInFlight = false;
+    this.provisionRerun = null;
+  }
+
+  setProvisionParser(fn) {
+    this.parseProvision = fn;
+  }
+
+  static setParser(fn) {
+    WebController._parseProvision = fn;
   }
 
   loadConfig() {
@@ -332,6 +374,7 @@ export class WebController extends Emitter {
         if (st.auto_answer && !busy) setTimeout(() => this.cmd({ cmd: "answer", line: l.line }), st.auto_answer_delay_ms || 0);
         this.publish();
       },
+      onResync: () => this.handleProvisionResync(),
       onNotify: (c, frag) => {
         const l = this.lineOf(c);
         if (!l) return;
@@ -366,8 +409,139 @@ export class WebController extends Emitter {
         this.histList = this.histList.slice(0, 300);
         store.set("sidetone.web.history", this.histList);
         this.publish();
+        this.afterCallsIdleProvision();
       },
     };
+  }
+
+  handleProvisionResync() {
+    const id = this.cfg.active;
+    const a = id && this.cfg.accounts.find((x) => x.id === id);
+    if (!a || !a.provisionUrl) {
+      this.event("info", "provisioning resync ignored: no provisioning URL");
+      return;
+    }
+    if (this.liveLines().length) {
+      if (!this.resyncPending) this.event("info", "provisioning will wait until the call ends");
+      this.resyncPending = true;
+      return;
+    }
+    this.resyncPending = true;
+    this.scheduleProvisionFetch(a);
+  }
+
+  scheduleProvisionFetch(a) {
+    if (!a || !a.provisionUrl) return;
+    clearTimeout(this.resyncTimer);
+    const id = a.id;
+    const started = this.lastProvisionAttempt[id] || 0;
+    const wait = started && Date.now() - started < PROVISION_MIN_MS ? PROVISION_MIN_MS - (Date.now() - started) : 0;
+    this.resyncTimer = setTimeout(() => this.runProvisionFetch(a), wait);
+  }
+
+  async runProvisionFetch(a) {
+    if (this.provisionInFlight) {
+      this.provisionRerun = a.id;
+      return;
+    }
+    const id = a.id;
+    const url = a.provisionUrl;
+    if (!url) {
+      this.resyncPending = false;
+      return;
+    }
+    this.provisionInFlight = true;
+    this.lastProvisionAttempt[id] = Date.now();
+    try {
+      const parsed = await this.provision(url, true);
+      const cur = this.cfg.accounts.find((x) => x.id === id);
+      if (!cur) return;
+      if (this.liveLines().length) {
+        this.pendingProvision = { id, parsed };
+        return;
+      }
+      this.applyProvisionIfChanged(cur, parsed);
+    } catch (e) {
+      this.event("error", e.message || String(e));
+    } finally {
+      this.provisionInFlight = false;
+      this.resyncPending = false;
+      const rerun = this.provisionRerun;
+      this.provisionRerun = null;
+      if (rerun) {
+        const again = this.cfg.accounts.find((x) => x.id === rerun);
+        if (again && again.provisionUrl) this.scheduleProvisionFetch(again);
+      }
+    }
+  }
+
+  afterCallsIdleProvision() {
+    if (this.liveLines().length) return;
+    if (this.pendingProvision) {
+      const { id, parsed } = this.pendingProvision;
+      this.pendingProvision = null;
+      const cur = this.cfg.accounts.find((x) => x.id === id);
+      if (cur) this.applyProvisionIfChanged(cur, parsed);
+      return;
+    }
+    if (this.resyncPending) {
+      const a = this.cfg.accounts.find((x) => x.id === this.cfg.active);
+      if (a && a.provisionUrl) this.scheduleProvisionFetch(a);
+    }
+  }
+
+  mergeWebProvisionFields(target, src) {
+    target.label = src.label;
+    target.enabled = src.enabled;
+    target.register = src.register;
+    target.user = src.user;
+    target.authUser = src.authUser || "";
+    target.password = src.password || "";
+    target.displayName = src.displayName;
+    target.domain = src.domain;
+    target.ws = src.ws;
+    target.ice = src.ice || "";
+    target.expires = src.expires;
+    target.rememberPassword = !!src.rememberPassword;
+  }
+
+  applyProvisionIfChanged(cur, parsed) {
+    const pw = { ...this.passwords };
+    if (parsed.password) pw[cur.id] = parsed.password;
+    const probe = { ...cur };
+    this.mergeWebProvisionFields(probe, parsed);
+    if (webProvisionSnapshot(cur, this.passwords) === webProvisionSnapshot(probe, pw)) return;
+    this.mergeWebProvisionFields(cur, parsed);
+    if (parsed.password) this.passwords[cur.id] = parsed.password;
+    this.saveConfig();
+    this.event("provisioned", "provisioning applied");
+    if (this.cfg.active === cur.id) this.activate(cur.id).catch(() => {});
+    else this.publish();
+  }
+
+  async provision(url, tlsVerify) {
+    if (location.protocol === "https:" && url.toLowerCase().startsWith("http://")) {
+      throw new Error("This page is HTTPS, so it cannot download an http:// provisioning URL. Use the desktop app for a LAN server.");
+    }
+    const parse = this.parseProvision || WebController._parseProvision;
+    if (!parse) {
+      throw new Error("Browser provisioning needs this page's WASM build (open the GitHub Pages site, or use the desktop app to provision).");
+    }
+    let res;
+    try {
+      res = await fetch(url);
+    } catch (e) {
+      throw new Error(`Could not download the provisioning URL (${e.message || e}). CORS is a likely cause if the server does not allow this origin.`);
+    }
+    if (!res.ok) throw new Error(`Provisioning URL returned HTTP ${res.status}`);
+    const xml = await res.text();
+    let parsed;
+    try {
+      parsed = await parse(xml, "browser");
+    } catch (e) {
+      throw new Error(e.message || String(e));
+    }
+    return parsed;
   }
 
   newLine(direction, remote, name, callId) {

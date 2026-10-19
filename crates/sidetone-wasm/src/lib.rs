@@ -156,6 +156,14 @@ pub fn samples() -> String {
     serde_json::Value::Array(v).to_string()
 }
 
+/// Verified provisioning XML → account JSON (`kind`: `"native"` or `"browser"`).
+#[wasm_bindgen]
+pub fn parse_provision(xml: &str, kind: &str) -> Result<String, JsError> {
+    sidetone_core::provision::parse(xml, kind)
+        .map(|v| v.to_string())
+        .map_err(|e| JsError::new(&e))
+}
+
 /// Builds a pcapng from a web phone SIP log (see `synth::SipLog`).
 #[wasm_bindgen]
 pub fn capture_from_sip_log(log_json: &str) -> Result<Vec<u8>, JsError> {

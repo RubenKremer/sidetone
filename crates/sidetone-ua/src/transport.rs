@@ -228,7 +228,7 @@ fn cert_summary(c: Option<&CertificateDer<'_>>) -> String {
     }
 }
 
-fn tls_config(verify: bool) -> rustls::ClientConfig {
+pub fn tls_config(verify: bool) -> rustls::ClientConfig {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()

@@ -47,6 +47,13 @@ async function wasmBackend() {
     samples: async () => JSON.parse(w.samples()),
     sample: async (n) => w.sample(n),
     captureFromLog: async (log) => w.capture_from_sip_log(JSON.stringify(log)),
+    parseProvision: async (xml, kind) => {
+      try {
+        return JSON.parse(w.parse_provision(xml, kind));
+      } catch (e) {
+        throw new Error(e.message || String(e));
+      }
+    },
   };
 }
 
@@ -852,6 +859,16 @@ function onEvents(evs) {
   for (const e of evs) {
     S.events.push(e);
     if (e.kind === "error") S.errors++;
+    if (e.kind === "provisioned" && S.page === "settings" && SET.cfg) {
+      if (SET.dirty) toast(t("Provisioning updated the saved account. Your unsaved edits are still here."));
+      else {
+        S.ctl.getConfig().then((c) => {
+          SET.cfg = c;
+          renderSetNav();
+          renderSetBody();
+        }).catch(() => {});
+      }
+    }
   }
   if (S.events.length > 1000) S.events.splice(0, S.events.length - 1000);
   renderEvents(evs);
@@ -1938,7 +1955,96 @@ function readField(f, id, obj) {
 
 const SET = { cfg: null, accId: null, accTab: 0, section: null, dirty: false };
 
+function provisionUrlDisplay(url) {
+  if (!url) return "";
+  try {
+    const u = new URL(url);
+    u.username = "";
+    u.password = "";
+    return u.toString();
+  } catch {
+    return String(url).replace(/^(?<sch>[\w+.-]+:\/\/)(?<auth>[^@/]+@)/u, "$1");
+  }
+}
+
+function applyNativeProvision(acc, p, url, tlsVerify) {
+  const keepName = acc.profile?.name ?? "";
+  const prevUa = acc.profile?.behavior?.user_agent;
+  acc.label = p.label;
+  acc.enabled = p.enabled;
+  acc.register = p.register;
+  if (p.retry_s != null) acc.retry_s = p.retry_s;
+  if (p.blf) acc.blf = p.blf;
+  if (!acc.profile) acc.profile = { name: keepName, account: {}, behavior: {} };
+  acc.profile.name = keepName;
+  Object.assign(acc.profile.account, p.profile.account);
+  const beh = p.profile?.behavior || {};
+  acc.profile.behavior = { ...(acc.profile.behavior || {}), ...beh };
+  if (Object.prototype.hasOwnProperty.call(beh, "user_agent") && beh.user_agent === null) {
+    acc.profile.behavior.user_agent = prevUa;
+  }
+  acc.provision_url = url;
+  acc.provision_tls_verify = tlsVerify !== false;
+}
+
+function applyWebProvision(acc, p, url) {
+  acc.label = p.label;
+  acc.enabled = p.enabled;
+  acc.register = p.register;
+  acc.user = p.user;
+  acc.authUser = p.authUser || "";
+  acc.password = p.password || "";
+  acc.displayName = p.displayName;
+  acc.domain = p.domain;
+  acc.ws = p.ws;
+  acc.ice = p.ice || "";
+  acc.expires = p.expires;
+  acc.rememberPassword = !!p.rememberPassword;
+  acc.provisionUrl = url;
+}
+
+function openProvisionDialog() {
+  const dlg = $("#prov-dialog");
+  const native = S.ctl.kind === "native";
+  const acc = SET.cfg?.accounts.find((a) => a.id === SET.accId);
+  $("#prov-title").textContent = t("Fetch provisioning");
+  $("#prov-url-label").textContent = t("Provisioning URL");
+  $("#prov-tls-label").textContent = t("Check the server's TLS certificate");
+  $("#prov-fetch").textContent = t("Fetch");
+  $("#prov-cancel").textContent = t("Cancel");
+  $("#prov-err").hidden = true;
+  $("#prov-err").textContent = "";
+  $("#prov-tls-wrap").hidden = S.ctl.kind === "web";
+  $("#prov-url").value = acc ? (native ? acc.provision_url || "" : acc.provisionUrl || "") : "";
+  $("#prov-tls").checked = acc?.provision_tls_verify !== false;
+  dlg.showModal();
+}
+
+async function runProvisionFetch() {
+  const url = $("#prov-url").value.trim();
+  if (!url) return;
+  const errEl = $("#prov-err");
+  errEl.hidden = true;
+  const native = S.ctl.kind === "native";
+  try {
+    const parsed = await S.ctl.provision(url, $("#prov-tls").checked);
+    const acc = SET.cfg.accounts.find((a) => a.id === SET.accId);
+    if (!acc) return;
+    if (native) applyNativeProvision(acc, parsed, url, $("#prov-tls").checked);
+    else applyWebProvision(acc, parsed, url);
+    if (!native && parsed.password) S.ctl.passwords[acc.id] = parsed.password;
+    SET.dirty = true;
+    $("#prov-dialog").close();
+    renderSetBody();
+    toast(t("Provisioning loaded. Save to keep it."));
+  } catch (e) {
+    errEl.textContent = e.message || String(e);
+    errEl.hidden = false;
+  }
+}
+
 async function settingsOpen() {
+  SET.dirty = false;
   try {
     SET.cfg = await S.ctl.getConfig();
   } catch (e) {
@@ -1966,15 +2072,25 @@ function newNativeAccount() {
   const n = SET.cfg.accounts.length + 1;
   let id = String(n);
   while (SET.cfg.accounts.some((a) => a.id === id)) id = String(+id + 1);
-  return { id, label: "", enabled: true, register: true, retry_s: 30, profile: { name: "", account: { user: "", auth_user: null, password: null, domain: "", display_name: null, outbound_proxy: null, expires: 300, q_value: null }, behavior: null } };
+  return { id, label: "", enabled: true, register: true, retry_s: 30, provision_url: null, provision_tls_verify: true, profile: { name: "", account: { user: "", auth_user: null, password: null, domain: "", display_name: null, outbound_proxy: null, expires: 300, q_value: null }, behavior: null } };
+}
+
+function markSetDirty() {
+  SET.dirty = true;
+  const d = $("#acc-dirty");
+  if (d) d.textContent = t("Unsaved changes");
 }
 
 async function renderSetBody() {
   const body = $("#set-body");
   const native = S.ctl.kind === "native";
   if (SET.section === "new" || (!SET.section && !SET.accId)) {
-    body.innerHTML = `<div class="set-empty"><h1>Add your first account</h1><p class="muted">${native ? "Sidetone registers over UDP from this computer, like a desk phone. You need the server address, the extension and its password." : "In the browser Sidetone talks SIP over WebSocket (RFC 7118) with WebRTC audio. Your PBX needs a WSS listener, for example Asterisk on port 8089 or a Genesys/Ribbon SBC with WebRTC enabled."}</p><button type="button" class="btn primary" id="acc-first">Add account</button></div>`;
+    body.innerHTML = `<div class="set-empty"><h1>${esc(t("Add your first account"))}</h1><p class="muted">${esc(native ? t("Sidetone registers over UDP from this computer, like a desk phone. You need the server address, the extension and its password.") : t("In the browser Sidetone talks SIP over WebSocket (RFC 7118) with WebRTC audio. Your PBX needs a WSS listener, for example Asterisk on port 8089 or a Genesys/Ribbon SBC with WebRTC enabled."))}</p><div class="row"><button type="button" class="btn primary" id="acc-first">${esc(t("Add account"))}</button><button type="button" class="btn" id="acc-first-prov">${esc(t("Provision"))}</button></div></div>`;
     $("#acc-first").addEventListener("click", addAccount);
+    $("#acc-first-prov").addEventListener("click", async () => {
+      await addAccount();
+      openProvisionDialog();
+    });
     return;
   }
   if (SET.section) return renderGlobal(SET.section);
@@ -1986,17 +2102,17 @@ async function renderSetBody() {
   // Fill behavior defaults so every field shows a value.
   if (native && !acc.profile.behavior) acc.profile.behavior = (await defaultBehavior()) || {};
   const tabs = native ? NATIVE_ACC_TABS : WEB_ACC_TABS;
-  const t = Math.min(SET.accTab, tabs.length - 1);
-  const [, fields] = tabs[t];
+  const tab = Math.min(SET.accTab, tabs.length - 1);
+  const [, fields] = tabs[tab];
   body.innerHTML = `
     <div class="set-head">
       <h1>${esc(acc.label || (native ? acc.profile.account.user : acc.user) || "New account")}</h1>
-      <div class="row"><button type="button" class="btn small" id="acc-dup">Duplicate</button><button type="button" class="btn small danger" id="acc-del">Delete</button></div>
+      <div class="row"><button type="button" class="btn small" id="acc-prov">${esc(t("Provision"))}</button><button type="button" class="btn small" id="acc-dup">${esc(t("Duplicate"))}</button><button type="button" class="btn small danger" id="acc-del">${esc(t("Delete"))}</button></div>
     </div>
-    <div class="seg" role="tablist">${tabs.map(([n], i) => `<button type="button" role="tab" data-acctab="${i}" aria-selected="${i === t}">${esc(n)}</button>`).join("")}</div>
+    <div class="seg" role="tablist">${tabs.map(([n], i) => `<button type="button" role="tab" data-acctab="${i}" aria-selected="${i === tab}">${esc(n)}</button>`).join("")}</div>
     <form class="set-form" id="acc-form" autocomplete="off">
-      <div class="fields">${fields.map((f, i) => fieldHtml(f, get(acc, f[0]), `af-${i}`)).join("")}</div>
-      ${native && tabs[t][0] === "Advanced SIP" ? `<h3>What an INVITE from this account looks like</h3><pre class="sipmsg preview" id="inv-preview"></pre>` : ""}
+      <div class="fields">${tab === 0 ? `<div class="fld"><span>${esc(t("Provisioning URL"))}</span><input readonly class="readonly" value="${esc(provisionUrlDisplay(native ? acc.provision_url : acc.provisionUrl))}"></div>` : ""}${fields.map((f, i) => fieldHtml(f, get(acc, f[0]), `af-${i}`)).join("")}</div>
+      ${native && tabs[tab][0] === "Advanced SIP" ? `<h3>What an INVITE from this account looks like</h3><pre class="sipmsg preview" id="inv-preview"></pre>` : ""}
       <div class="set-actions"><span class="hint" id="acc-dirty"></span><button type="submit" class="btn primary">Save account</button></div>
     </form>`;
   const form = $("#acc-form");
@@ -2009,8 +2125,9 @@ async function renderSetBody() {
     }
   };
   preview();
+  if (SET.dirty) markSetDirty();
   form.addEventListener("input", () => {
-    $("#acc-dirty").textContent = "Unsaved changes";
+    markSetDirty();
     preview();
   });
   form.addEventListener("click", (e) => {
@@ -2018,17 +2135,18 @@ async function renderSetBody() {
     if (up) {
       const li = up.closest("li");
       if (li.previousElementSibling) li.parentElement.insertBefore(li, li.previousElementSibling);
-      $("#acc-dirty").textContent = "Unsaved changes";
+      markSetDirty();
       preview();
     }
     const del = e.target.closest("[data-del]");
     if (del) {
       del.closest(".hdr-row").remove();
-      $("#acc-dirty").textContent = "Unsaved changes";
+      markSetDirty();
     }
     const add = e.target.closest("[data-addhdr]");
     if (add) {
       $("#" + add.dataset.addhdr).insertAdjacentHTML("beforeend", `<div class="hdr-row"><input placeholder="Name"><input placeholder="Value"><button type="button" class="linklike" data-del>Remove</button></div>`);
+      markSetDirty();
     }
   });
   $$("[data-acctab]").forEach((b) =>
@@ -2048,6 +2166,7 @@ async function renderSetBody() {
     SET.accId = SET.cfg.accounts.length ? SET.cfg.accounts[0].id : null;
     await saveAccounts();
   });
+  $("#acc-prov").addEventListener("click", () => openProvisionDialog());
   $("#acc-dup").addEventListener("click", () => {
     collect();
     const copy = JSON.parse(JSON.stringify(acc));
@@ -2092,6 +2211,7 @@ async function saveAccounts() {
     toast("Saved. Registering…");
     const d = $("#acc-dirty");
     if (d) d.textContent = "";
+    SET.dirty = false;
     SET.cfg = await S.ctl.getConfig();
     renderSetNav();
     renderSetBody();
@@ -2309,17 +2429,24 @@ function bindSettings() {
     if (!b) return;
     SET.accId = b.dataset.acc;
     SET.section = null;
+    SET.dirty = false;
     renderSetNav();
     renderSetBody();
   });
   $$(".set-nav [data-set]").forEach((b) =>
     b.addEventListener("click", () => {
       SET.section = b.dataset.set;
+      SET.dirty = false;
       renderSetNav();
       renderSetBody();
     })
   );
   $("#acc-add").addEventListener("click", addAccount);
+  $("#prov-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    runProvisionFetch();
+  });
+  $("#prov-cancel").addEventListener("click", () => $("#prov-dialog").close());
 }
 
 // ============================================================================
@@ -2366,6 +2493,9 @@ async function main() {
   // ?phone=web uses the browser phone (WebRTC) even when the native engine is available.
   const forceWeb = new URLSearchParams(location.search).get("phone") === "web";
   S.ctl = !forceWeb && S.be.kind === "http" && S.be.features.includes("phone") ? new NativeController(S.be) : new WebController();
+  if (S.ctl.kind === "web" && S.be.parseProvision) {
+    S.ctl.setProvisionParser((xml, kind) => S.be.parseProvision(xml, kind));
+  }
   document.body.classList.toggle("web-mode", S.ctl.kind === "web");
   $("#st-mode").textContent = S.ctl.kind === "web" ? "Browser phone (WebRTC)" : "Desktop engine (UDP)";
   bindChrome();
