@@ -878,3 +878,17 @@ svg.qchart { width: 100%; height: auto; display: block; overflow: visible; strok
 
 .c-meta { flex-wrap: wrap; row-gap: 3px; }
 .q-chip, .c-legs { white-space: nowrap; }
+
+/* Voicemail lamp under the account. */
+.vm-btn { display: flex; align-items: center; gap: 8px; width: 100%; margin: 6px 0 0; padding: 6px 10px; border: 1px solid var(--rule); border-radius: 8px; background: var(--panel, transparent); color: var(--muted); font: 13px var(--sans); cursor: pointer; text-align: left; }
+.vm-btn svg { width: 18px; height: 18px; }
+.vm-btn.on { color: var(--ink); border-color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); font-weight: 600; }
+.vm-btn:hover { border-color: var(--ink); }
+.fwd-note { margin-top: 6px; color: var(--warn); font-weight: 600; }
+.msg-row .row { display: flex; gap: 6px; margin-top: 4px; }
+.msg-row input { flex: 1; min-width: 0; }
+/* Ladder view options above the diagram. */
+.ladder-bar { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; padding: 4px 16px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--rule); }
+.ladder-bar label { display: inline-flex; gap: 6px; align-items: center; margin: 0; }
+.ladder-bar select { font: inherit; padding: 2px 4px; width: auto; }
+.ladder-bar .check { display: inline-flex; gap: 6px; align-items: center; }

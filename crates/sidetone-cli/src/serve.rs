@@ -262,6 +262,10 @@ fn handle(
                                 })
                                 .unwrap_or_default(),
                             rtp_at_end: q.get("rtp").map(|v| v == "end").unwrap_or(false),
+                            collapse_retransmissions: q.get("retx").is_some_and(|v| v == "fold"),
+                            time: sidetone_core::ladder::TimeMode::parse(
+                                q.get("time").map(String::as_str).unwrap_or(""),
+                            ),
                             ..Default::default()
                         },
                     )

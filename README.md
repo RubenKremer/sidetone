@@ -55,7 +55,7 @@
   <tr>
     <td width="25%" valign="top">
       <h3>A real softphone</h3>
-      Several accounts and lines, hold, mute, blind and attended transfer, DTMF three ways, DND and auto answer, microphone and speaker. SIP over UDP from the desktop, or over WebSocket with WebRTC from the browser.
+      Several accounts and lines, hold, mute, blind and attended transfer, DTMF three ways, DND and auto answer, call forwarding, a voicemail lamp, SIP MESSAGE, microphone and speaker. SIP over UDP from the desktop, or over WebSocket with WebRTC from the browser.
     </td>
     <td width="25%" valign="top">
       <h3>It explains the call</h3>
@@ -111,7 +111,7 @@ are in the dark theme (the Theme button, or your system setting).
       <br>
       <sub>Both directions of a bad call: loss, jitter, a 1.5 s gap and MOS below 3.</sub>
       <h3>Media you can measure</h3>
-      Each RTP stream is tied to its call through the SDP: codec, packets, loss, RFC 3550 jitter, the longest gap, ptime, RFC 4733 digits and an ITU-T G.107 E-model MOS estimate. Per-second charts show jitter, loss and MOS over the call with the SIP events marked; RTCP sender and receiver reports (RFC 3550), RTCP XR VoIP metrics (RFC 3611) and vq-rtcpxr PUBLISH reports (RFC 6035) add what the far end measured, including round trip time; G.711 streams also get level, silence and clipping. Calls of the same session on both sides of an SBC or B2BUA are linked by X-CID, Session-ID and similar headers. MOS is also worked out through a fixed 50 ms, a fixed 200 ms and an adaptive jitter buffer, where a packet that arrives too late counts as lost. HEP (Homer) packets in a capture are unwrapped, the phone can send a HEPv3 copy of every SIP message to a Homer collector, and SRTP calls can be saved with the media decrypted.
+      Each RTP stream is tied to its call through the SDP: codec, packets, loss, RFC 3550 jitter, the longest gap, ptime, RFC 4733 digits and an ITU-T G.107 E-model MOS estimate. Per-second charts show jitter, loss and MOS over the call with the SIP events marked; RTCP sender and receiver reports (RFC 3550), RTCP XR VoIP metrics (RFC 3611) and vq-rtcpxr PUBLISH reports (RFC 6035) add what the far end measured, including round trip time; G.711 streams also get level, silence and clipping. Calls of the same session on both sides of an SBC or B2BUA are linked by X-CID, Session-ID and similar headers. MOS is also worked out through a fixed 50 ms, a fixed 200 ms and an adaptive jitter buffer, where a packet that arrives too late counts as lost. HEP (Homer) packets in a capture are unwrapped, the phone can send a HEPv3 copy of every SIP message to a Homer collector, and SRTP calls can be saved with the media decrypted. The ladder can show time since the start, since the row above or as clock time, and fold retransmissions into the arrow they repeat.
     </td>
   </tr>
   <tr>
@@ -338,15 +338,15 @@ hints, echo, busy and unallocated numbers).
 
 Each version gets a release with installers for every platform: take the
 [latest release](https://github.com/igtoth/sidetone/releases/latest), or
-pick a file below (version 0.1.18).
+pick a file below (version 0.1.19).
 
 | Platform | Desktop app | Command line |
 |---|---|---|
-| Windows 10/11 (x64) | [Installer (.exe)](https://github.com/igtoth/sidetone/releases/download/v0.1.18/Sidetone_0.1.18_x64-setup.exe) &middot; [MSI](https://github.com/igtoth/sidetone/releases/download/v0.1.18/Sidetone_0.1.18_x64_en-US.msi) | [sidetone-v0.1.18-x86_64-pc-windows-msvc.zip](https://github.com/igtoth/sidetone/releases/download/v0.1.18/sidetone-v0.1.18-x86_64-pc-windows-msvc.zip) |
-| macOS 11+ (Apple silicon) | [Sidetone_0.1.18_aarch64.dmg](https://github.com/igtoth/sidetone/releases/download/v0.1.18/Sidetone_0.1.18_aarch64.dmg) | [sidetone-v0.1.18-aarch64-apple-darwin.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.18/sidetone-v0.1.18-aarch64-apple-darwin.tar.gz) |
-| macOS 11+ (Intel) | [Sidetone_0.1.18_x64.dmg](https://github.com/igtoth/sidetone/releases/download/v0.1.18/Sidetone_0.1.18_x64.dmg) | [sidetone-v0.1.18-x86_64-apple-darwin.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.18/sidetone-v0.1.18-x86_64-apple-darwin.tar.gz) |
-| Linux (x86_64) | [AppImage](https://github.com/igtoth/sidetone/releases/download/v0.1.18/Sidetone_0.1.18_amd64.AppImage) &middot; [.deb](https://github.com/igtoth/sidetone/releases/download/v0.1.18/Sidetone_0.1.18_amd64.deb) &middot; [.rpm](https://github.com/igtoth/sidetone/releases/download/v0.1.18/Sidetone-0.1.18-1.x86_64.rpm) | [sidetone-v0.1.18-x86_64-unknown-linux-gnu.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.18/sidetone-v0.1.18-x86_64-unknown-linux-gnu.tar.gz) |
-| Linux (arm64) | | [sidetone-v0.1.18-aarch64-unknown-linux-gnu.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.18/sidetone-v0.1.18-aarch64-unknown-linux-gnu.tar.gz) |
+| Windows 10/11 (x64) | [Installer (.exe)](https://github.com/igtoth/sidetone/releases/download/v0.1.19/Sidetone_0.1.19_x64-setup.exe) &middot; [MSI](https://github.com/igtoth/sidetone/releases/download/v0.1.19/Sidetone_0.1.19_x64_en-US.msi) | [sidetone-v0.1.19-x86_64-pc-windows-msvc.zip](https://github.com/igtoth/sidetone/releases/download/v0.1.19/sidetone-v0.1.19-x86_64-pc-windows-msvc.zip) |
+| macOS 11+ (Apple silicon) | [Sidetone_0.1.19_aarch64.dmg](https://github.com/igtoth/sidetone/releases/download/v0.1.19/Sidetone_0.1.19_aarch64.dmg) | [sidetone-v0.1.19-aarch64-apple-darwin.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.19/sidetone-v0.1.19-aarch64-apple-darwin.tar.gz) |
+| macOS 11+ (Intel) | [Sidetone_0.1.19_x64.dmg](https://github.com/igtoth/sidetone/releases/download/v0.1.19/Sidetone_0.1.19_x64.dmg) | [sidetone-v0.1.19-x86_64-apple-darwin.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.19/sidetone-v0.1.19-x86_64-apple-darwin.tar.gz) |
+| Linux (x86_64) | [AppImage](https://github.com/igtoth/sidetone/releases/download/v0.1.19/Sidetone_0.1.19_amd64.AppImage) &middot; [.deb](https://github.com/igtoth/sidetone/releases/download/v0.1.19/Sidetone_0.1.19_amd64.deb) &middot; [.rpm](https://github.com/igtoth/sidetone/releases/download/v0.1.19/Sidetone-0.1.19-1.x86_64.rpm) | [sidetone-v0.1.19-x86_64-unknown-linux-gnu.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.19/sidetone-v0.1.19-x86_64-unknown-linux-gnu.tar.gz) |
+| Linux (arm64) | | [sidetone-v0.1.19-aarch64-unknown-linux-gnu.tar.gz](https://github.com/igtoth/sidetone/releases/download/v0.1.19/sidetone-v0.1.19-aarch64-unknown-linux-gnu.tar.gz) |
 | Web | no download: [open it in the browser](https://igtoth.github.io/sidetone/) | |
 
 ### Install
@@ -361,16 +361,16 @@ not signed yet, so the first time right-click it and choose Open (or run
 `xattr -dr com.apple.quarantine /Applications/Sidetone.app`). macOS asks
 for microphone access on the first call.
 
-**Linux.** Debian and Ubuntu: `sudo apt install ./Sidetone_0.1.18_amd64.deb`.
-Fedora and openSUSE: `sudo dnf install ./Sidetone-0.1.18-1.x86_64.rpm`.
-Anywhere else: `chmod +x Sidetone_0.1.18_amd64.AppImage` and run it. The
+**Linux.** Debian and Ubuntu: `sudo apt install ./Sidetone_0.1.19_amd64.deb`.
+Fedora and openSUSE: `sudo dnf install ./Sidetone-0.1.19-1.x86_64.rpm`.
+Anywhere else: `chmod +x Sidetone_0.1.19_amd64.AppImage` and run it. The
 desktop app needs WebKitGTK 4.1 (present on current distributions).
 
 **Command line.** Unpack the archive and put `sidetone` on your `PATH`:
 
 ```sh
-tar xzf sidetone-v0.1.18-x86_64-unknown-linux-gnu.tar.gz
-sudo install sidetone-v0.1.18-x86_64-unknown-linux-gnu/sidetone /usr/local/bin/
+tar xzf sidetone-v0.1.19-x86_64-unknown-linux-gnu.tar.gz
+sudo install sidetone-v0.1.19-x86_64-unknown-linux-gnu/sidetone /usr/local/bin/
 sidetone serve        # the full app in your browser at http://127.0.0.1:8640
 ```
 

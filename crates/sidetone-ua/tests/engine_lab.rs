@@ -891,3 +891,119 @@ fn hep_copies_to_a_collector() {
     assert!(methods.iter().any(|m| m.starts_with("REGISTER")));
     assert!(methods.iter().any(|m| m.starts_with("SIP/2.0 200")));
 }
+
+#[test]
+#[ignore]
+fn voicemail_lamp() {
+    // The lab Asterisk polls mailbox 2001 every second; a message file
+    // dropped into its spool turns the lamp on.
+    let spool = std::env::var("SIDETONE_LAB_DIR").unwrap_or_else(|_| "/tmp/stlab".into());
+    let inbox = std::path::Path::new(&spool).join("spool/voicemail/default/2001/INBOX");
+    let _ = std::fs::remove_dir_all(&inbox);
+    let settings = PhoneSettings {
+        audio_source: "tone".into(),
+        ..Default::default()
+    };
+    let a = acc("a", "2001", "secret2001", DtmfMode::Rfc4733);
+    let e = Engine::start(settings, vec![a], None);
+    let mwi = |e: &Engine| e.state().accounts.first().and_then(|a| a.mwi.clone());
+    wait_for(&e, "voicemail state known", 15, |e| mwi(e).is_some());
+    assert!(!mwi(&e).unwrap().waiting);
+    if std::fs::create_dir_all(&inbox).is_err() {
+        println!(
+            "no access to {}, skipping the new message part",
+            inbox.display()
+        );
+        return;
+    }
+    std::fs::write(
+        inbox.join("msg0000.txt"),
+        "[message]\norigmailbox=2001\ncontext=test\nmacrocontext=\nexten=2001\ncallerid=\"Lab\" <3001>\norigdate=Mon Jan 1 00:00:00 AM UTC 2026\norigtime=1767225600\ncategory=\nflag=\nduration=3\n",
+    )
+    .unwrap();
+    std::fs::write(inbox.join("msg0000.wav"), [0u8; 44]).unwrap();
+    wait_for(&e, "voicemail lamp on", 15, |e| {
+        mwi(e).is_some_and(|m| m.waiting && m.new == 1)
+    });
+    println!("mwi: {:?}", mwi(&e));
+    let _ = std::fs::remove_dir_all(&inbox);
+    wait_for(&e, "voicemail lamp off", 15, |e| {
+        mwi(e).is_some_and(|m| !m.waiting)
+    });
+}
+
+#[test]
+#[ignore]
+fn call_forwarding() {
+    // 3001 forwards everything to the echo test; a call to it (700) ends up there.
+    let fwd = Engine::start(
+        PhoneSettings {
+            audio_source: "tone".into(),
+            forward_always: "600".into(),
+            ..Default::default()
+        },
+        vec![acc("b", "3001", "secret3001", DtmfMode::Rfc4733)],
+        None,
+    );
+    let caller = Engine::start(
+        PhoneSettings {
+            audio_source: "tone".into(),
+            auto_hold: false,
+            ..Default::default()
+        },
+        vec![acc("a", "2001", "secret2001", DtmfMode::Rfc4733)],
+        None,
+    );
+    for e in [&fwd, &caller] {
+        wait_for(e, "registered", 10, |e| {
+            e.state().accounts.iter().all(|a| a.state == "registered")
+        });
+    }
+    let l = caller.call(CallRequest {
+        account: Some("a".into()),
+        target: "700".into(),
+        ..Default::default()
+    });
+    wait_for(&caller, "forwarded call connected to the echo", 15, |e| {
+        e.state()
+            .calls
+            .iter()
+            .any(|c| c.line == l && c.state == "connected" && c.rtp_received > 20)
+    });
+    assert!(fwd
+        .events_since(0)
+        .iter()
+        .any(|ev| ev.text.contains("forwarded to 600")));
+    caller.cmd(Cmd::Hangup(l));
+}
+
+#[test]
+#[ignore]
+fn sip_message_between_phones() {
+    let settings = PhoneSettings {
+        audio_source: "tone".into(),
+        ..Default::default()
+    };
+    let a = acc("a", "2001", "secret2001", DtmfMode::Rfc4733);
+    let b = acc("b", "3001", "secret3001", DtmfMode::Rfc4733);
+    let e = Engine::start(settings, vec![a, b], None);
+    wait_for(&e, "registered", 10, |e| {
+        let st = e.state();
+        st.accounts.len() == 2 && st.accounts.iter().all(|a| a.state == "registered")
+    });
+    e.cmd(Cmd::Message(
+        Some("a".into()),
+        "3001".into(),
+        "hello from 2001".into(),
+    ));
+    wait_for(&e, "MESSAGE delivered and received", 10, |e| {
+        let ev = e.events_since(0);
+        ev.iter()
+            .any(|x| x.kind == "message" && x.text.contains("delivered"))
+            && ev.iter().any(|x| {
+                x.kind == "message"
+                    && x.account.as_deref() == Some("b")
+                    && x.text.contains("hello from 2001")
+            })
+    });
+}

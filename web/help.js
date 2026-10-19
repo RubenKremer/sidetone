@@ -29,6 +29,9 @@ const H = {
         "Account, BLF: one extension per line. Each appears under the keypad as Free, Ringing or Busy (SUBSCRIBE to the dialog event); click one to call it.",
         "Presence: when the server offers it, each lamp also shows Away, Do not disturb or Offline and the note (SUBSCRIBE to presence, PIDF). The selector under the account publishes your own presence with PUBLISH; Asterisk does not accept PUBLISH from phones and answers 489.",
         "Conference: with two calls up, select one and press Conference to join the other. Sidetone mixes the audio locally; holding or hanging up either call ends the conference.",
+        "Voicemail: when the server reports messages (SUBSCRIBE message-summary or unsolicited NOTIFY), a lamp under the account shows how many are new; pressing it dials the voicemail number set in the account.",
+        "Forwarding: Settings, Call handling forwards every call, calls while busy or in DND, or calls not answered in time, with 302 Moved Temporarily. A ringing call can also be forwarded by hand: type the number in the dial field and press Forward.",
+        "Messages: the options under the dial field send a SIP MESSAGE (RFC 3428) to the number typed; received messages and the delivery result show in Phone events.",
       ]],
       ["Troubleshooting a call", [
         "SIP trace shows every message live. Click one to read it in full, filter by number or Call-ID, and save the session as pcapng for Wireshark.",
@@ -98,6 +101,9 @@ const H = {
         "Conta, BLF: um ramal por linha. Cada um aparece abaixo do teclado como Livre, Tocando ou Ocupado (SUBSCRIBE ao evento dialog); clique para ligar.",
         "Presença: quando o servidor oferece, cada lâmpada também mostra Ausente, Não perturbe ou Offline e a nota (SUBSCRIBE a presence, PIDF). O seletor abaixo da conta publica a sua presença com PUBLISH; o Asterisk não aceita PUBLISH de telefones e responde 489.",
         "Conferência: com duas chamadas ativas, selecione uma e clique Conferência para juntar a outra. O Sidetone mixa o áudio localmente; colocar em espera ou desligar qualquer uma encerra a conferência.",
+        "Correio de voz: quando o servidor informa mensagens (SUBSCRIBE message-summary ou NOTIFY não solicitado), uma lâmpada abaixo da conta mostra quantas são novas; clicar disca o número de correio de voz definido na conta.",
+        "Desvio: Configurações, Tratamento de chamadas desvia todas as chamadas, as que chegam com ocupado ou em Não perturbe, ou as não atendidas a tempo, com 302 Moved Temporarily. Uma chamada tocando também pode ser desviada na hora: digite o número no campo de discagem e aperte Desviar.",
+        "Mensagens: as opções abaixo do campo de discagem enviam um SIP MESSAGE (RFC 3428) para o número digitado; mensagens recebidas e o resultado da entrega aparecem em Eventos do telefone.",
       ]],
       ["Investigando uma chamada", [
         "O Trace SIP mostra cada mensagem ao vivo. Clique para ler inteira, filtre por número ou Call-ID e salve a sessão em pcapng para o Wireshark.",
@@ -167,6 +173,9 @@ const H = {
         "Cuenta, BLF: una extensión por línea. Cada una aparece bajo el teclado como Libre, Sonando u Ocupado (SUBSCRIBE al evento dialog); haz clic para llamar.",
         "Presencia: cuando el servidor la ofrece, cada lámpara muestra también Ausente, No molestar o Desconectado y la nota (SUBSCRIBE a presence, PIDF). El selector bajo la cuenta publica tu presencia con PUBLISH; Asterisk no acepta PUBLISH de teléfonos y responde 489.",
         "Conferencia: con dos llamadas activas, selecciona una y pulsa Conferencia para unir la otra. Sidetone mezcla el audio localmente; poner en espera o colgar cualquiera termina la conferencia.",
+        "Buzón de voz: cuando el servidor informa mensajes (SUBSCRIBE message-summary o NOTIFY no solicitado), una lámpara bajo la cuenta muestra cuántos son nuevos; al pulsarla se marca el número de buzón definido en la cuenta.",
+        "Desvío: Ajustes, Gestión de llamadas desvía todas las llamadas, las que llegan ocupado o en No molestar, o las no contestadas a tiempo, con 302 Moved Temporarily. Una llamada que suena también se puede desviar a mano: escribe el número en el campo de marcación y pulsa Desviar.",
+        "Mensajes: las opciones bajo el campo de marcación envían un SIP MESSAGE (RFC 3428) al número escrito; los mensajes recibidos y el resultado de la entrega aparecen en Eventos del teléfono.",
       ]],
       ["Diagnosticar una llamada", [
         "La traza SIP muestra cada mensaje en vivo. Haz clic para leerlo completo, filtra por número o Call-ID y guarda la sesión como pcapng para Wireshark.",
@@ -236,6 +245,9 @@ const H = {
         "Konto, BLF: eine Nebenstelle pro Zeile. Jede erscheint unter der Wähltastatur als Frei, Klingelt oder Besetzt (SUBSCRIBE auf das Dialog-Event); Klick ruft sie an.",
         "Presence: wenn der Server sie anbietet, zeigt jede Lampe auch Abwesend, Nicht stören oder Offline und die Notiz (SUBSCRIBE auf presence, PIDF). Die Auswahl unter dem Konto veröffentlicht die eigene Presence per PUBLISH; Asterisk nimmt PUBLISH von Telefonen nicht an und antwortet 489.",
         "Konferenz: bei zwei aktiven Anrufen einen auswählen und Konferenz drücken, um den anderen dazuzuholen. Sidetone mischt das Audio lokal; Halten oder Auflegen eines Anrufs beendet die Konferenz.",
+        "Mailbox: wenn der Server Nachrichten meldet (SUBSCRIBE message-summary oder unaufgefordertes NOTIFY), zeigt eine Lampe unter dem Konto, wie viele neu sind; ein Klick wählt die im Konto hinterlegte Mailbox-Nummer.",
+        "Umleitung: Einstellungen, Anrufbehandlung leitet alle Anrufe, Anrufe bei besetzt oder Nicht stören oder unbeantwortete Anrufe mit 302 Moved Temporarily um. Ein klingelnder Anruf lässt sich auch von Hand umleiten: Nummer ins Wählfeld eingeben und Umleiten drücken.",
+        "Nachrichten: die Optionen unter dem Wählfeld senden eine SIP MESSAGE (RFC 3428) an die eingegebene Nummer; empfangene Nachrichten und das Zustellergebnis erscheinen in Telefonereignisse.",
       ]],
       ["Einen Anruf untersuchen", [
         "Der SIP-Trace zeigt jede Nachricht live. Anklicken zum Lesen, nach Nummer oder Call-ID filtern und die Sitzung als pcapng für Wireshark speichern.",

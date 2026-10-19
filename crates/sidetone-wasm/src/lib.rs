@@ -6,7 +6,7 @@ use sidetone_core::ai::{
     build_prompt, build_request, parse_response, system_prompt, AiConfig, Provider,
 };
 use sidetone_core::export::{export_pcapng, ExportOptions};
-use sidetone_core::ladder::{render_svg, LadderOptions};
+use sidetone_core::ladder::{render_svg, LadderOptions, TimeMode};
 use sidetone_core::redact::RedactOptions;
 use sidetone_core::{analyze_bytes, Report};
 use std::cell::RefCell;
@@ -111,6 +111,40 @@ pub fn ladder_svg_opts(
                     .filter(|c: &usize| *c < r.calls.len())
                     .collect(),
                 rtp_at_end,
+                ..Default::default()
+            },
+        )
+    })
+}
+
+/// Ladder SVG with every view option as bit flags: 1 RTP after the SIP,
+/// 2 fold retransmissions, 4 time since the row above, 8 clock time.
+#[wasm_bindgen]
+pub fn ladder_svg_flags(
+    bytes: &[u8],
+    call: i32,
+    calls: &str,
+    flags: u32,
+) -> Result<String, JsError> {
+    with_report(bytes, |r| {
+        render_svg(
+            r,
+            &LadderOptions {
+                call: call_opt(r, call),
+                calls: calls
+                    .split(',')
+                    .filter_map(|x| x.trim().parse().ok())
+                    .filter(|c: &usize| *c < r.calls.len())
+                    .collect(),
+                rtp_at_end: flags & 1 != 0,
+                collapse_retransmissions: flags & 2 != 0,
+                time: if flags & 8 != 0 {
+                    TimeMode::Absolute
+                } else if flags & 4 != 0 {
+                    TimeMode::Delta
+                } else {
+                    TimeMode::Relative
+                },
                 ..Default::default()
             },
         )

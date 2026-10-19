@@ -43,6 +43,11 @@ pub struct AccountCfg {
     pub retry_s: u32,
     /// Extensions or URIs watched with SUBSCRIBE Event: dialog (busy lamp field).
     pub blf: Vec<String>,
+    /// Subscribe to message-summary (RFC 3842) for the voicemail lamp.
+    pub mwi: bool,
+    /// Number dialed to reach voicemail (e.g. *97); empty = the mailbox
+    /// address the server announces, if any.
+    pub voicemail: String,
     pub profile: Profile,
 }
 
@@ -55,6 +60,8 @@ impl Default for AccountCfg {
             register: true,
             retry_s: 30,
             blf: Vec::new(),
+            mwi: true,
+            voicemail: String::new(),
             profile: Profile::default(),
         }
     }
@@ -88,6 +95,13 @@ pub struct PhoneSettings {
     pub record_calls: bool,
     /// Global codec list in preference order, for accounts without their own.
     pub codecs: Vec<String>,
+    /// Forward every incoming call here (302 Moved Temporarily); empty = off.
+    pub forward_always: String,
+    /// Forward when busy (DND or every line in use).
+    pub forward_busy: String,
+    /// Forward calls not answered within `forward_no_answer_s`.
+    pub forward_no_answer: String,
+    pub forward_no_answer_s: u64,
     /// Homer/HEP collector ("host:port", UDP) that gets a copy of every SIP
     /// message; empty for none.
     pub hep_collector: String,
@@ -113,6 +127,10 @@ impl Default for PhoneSettings {
             capture_rtp: true,
             record_calls: false,
             codecs: crate::media::default_codecs(),
+            forward_always: String::new(),
+            forward_busy: String::new(),
+            forward_no_answer: String::new(),
+            forward_no_answer_s: 20,
             hep_collector: String::new(),
             hep_agent_id: 2001,
         }
@@ -137,6 +155,8 @@ pub struct AccountView {
     pub domain: String,
     pub enabled: bool,
     pub register: bool,
+    /// Number dialed for voicemail (account setting).
+    pub voicemail: String,
     /// off, registering, registered, failed, unreachable, error, unregistering
     pub state: String,
     pub code: Option<u16>,
@@ -155,6 +175,46 @@ pub struct AccountView {
     pub presence_note: Option<String>,
     /// Why the last PUBLISH failed, if it did.
     pub presence_error: Option<String>,
+    /// Voicemail from message-summary NOTIFY (RFC 3842).
+    pub mwi: Option<MwiView>,
+}
+
+#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+pub struct MwiView {
+    pub waiting: bool,
+    pub new: u32,
+    pub old: u32,
+    /// Message-Account: the mailbox address, when the server gives one.
+    pub account: Option<String>,
+}
+
+/// Parses an application/simple-message-summary body.
+pub fn parse_mwi(body: &str) -> Option<MwiView> {
+    let mut v = MwiView::default();
+    let mut seen = false;
+    for line in body.lines() {
+        let Some((k, val)) = line.split_once(':') else {
+            continue;
+        };
+        let (k, val) = (k.trim().to_ascii_lowercase(), val.trim());
+        match k.as_str() {
+            "messages-waiting" => {
+                seen = true;
+                v.waiting = val.eq_ignore_ascii_case("yes");
+            }
+            "message-account" => v.account = Some(val.to_string()),
+            "voice-message" => {
+                // "2/8 (0/2)": new/old (urgent new/urgent old).
+                let counts = val.split_whitespace().next().unwrap_or("");
+                if let Some((n, o)) = counts.split_once('/') {
+                    v.new = n.trim().parse().unwrap_or(0);
+                    v.old = o.trim().parse().unwrap_or(0);
+                }
+            }
+            _ => {}
+        }
+    }
+    seen.then_some(v)
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -318,6 +378,10 @@ pub enum Cmd {
     /// Publish own presence for an account: status and note.
     SetPresence(String, String, String),
     Options(Option<String>, String, Sender<Option<(u16, u64, String)>>),
+    /// SIP MESSAGE (RFC 3428): account, target, text.
+    Message(Option<String>, String, String),
+    /// Redirect a ringing incoming call (302) to a number or URI.
+    Forward(u32, String),
     ClearCapture,
     Shutdown,
 }
@@ -562,6 +626,7 @@ struct Acc {
     /// Direct client: no registrar, socket bound to every interface.
     direct: bool,
     publication: Option<Publication>,
+    mwi: Option<MwiView>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -692,6 +757,7 @@ enum Purpose {
     Prack,
     Update,
     Options(u64),
+    Message(String),
     Subscribe(String),
     Publish(usize),
 }
@@ -718,6 +784,9 @@ struct Sub {
     detail: Option<String>,
     next: Option<Instant>,
 }
+
+/// Event package of message waiting (RFC 3842).
+const MWI_EVENT: &str = "message-summary";
 
 /// Busy-lamp state from a dialog-info+xml body.
 fn blf_state(body: &str) -> &'static str {
@@ -1186,6 +1255,7 @@ impl Core {
                 domain: a.cfg.profile.account.domain.clone(),
                 enabled: a.cfg.enabled,
                 register: a.cfg.register,
+                voicemail: a.cfg.voicemail.clone(),
                 state: a.state.into(),
                 code: a.code,
                 reason: a.reason.clone(),
@@ -1223,6 +1293,7 @@ impl Core {
                     .map(|p| p.note.clone())
                     .filter(|n| !n.is_empty()),
                 presence_error: a.publication.as_ref().and_then(|p| p.error.clone()),
+                mwi: a.mwi.clone(),
             })
             .collect();
         let calls: Vec<CallView> = self
@@ -1455,6 +1526,7 @@ impl Core {
             last_keepalive: Instant::now(),
             direct: false,
             publication: None,
+            mwi: None,
         }
     }
 
@@ -1933,6 +2005,15 @@ impl Core {
                     }
                 }
                 LState::Incoming => {
+                    let fwd = self.settings.forward_no_answer.trim().to_string();
+                    if !fwd.is_empty()
+                        && l.auto_answer_at.is_none()
+                        && l.created.elapsed()
+                            > Duration::from_secs(self.settings.forward_no_answer_s.max(1))
+                    {
+                        self.forward(id, &fwd, "no answer");
+                        continue;
+                    }
                     if let Some(t) = l.auto_answer_at {
                         if now >= t {
                             self.answer(id);
@@ -2168,6 +2249,12 @@ impl Core {
                 self.event("diag", None, Some(tx.acc), "OPTIONS: no response");
             }
             Purpose::Info(id) => self.event("dtmf", Some(id), None, "INFO timed out"),
+            Purpose::Message(t) => self.event(
+                "message",
+                None,
+                Some(tx.acc),
+                format!("MESSAGE to {t}: no response"),
+            ),
             Purpose::Subscribe(cid) => {
                 if let Some(x) = self.subs.iter_mut().find(|x| x.call_id == cid) {
                     if x.event == "dialog" {
@@ -2278,6 +2365,8 @@ impl Core {
                 }
             }
             Cmd::Options(acc, target, reply) => self.send_options(acc, target, reply),
+            Cmd::Message(acc, target, text) => self.send_message(acc, target, text),
+            Cmd::Forward(id, target) => self.forward(id, &target, "by hand"),
             Cmd::ClearCapture => {
                 self.tap.clear();
                 self.shared.lock().unwrap().trace.clear();
@@ -2344,6 +2433,46 @@ impl Core {
             .unwrap()
             .insert(k, (Instant::now(), reply));
         self.start_tx(ai, "OPTIONS", &branch, text, dest, Purpose::Options(k));
+    }
+
+    fn send_message(&mut self, acc: Option<String>, target: String, text: String) {
+        let Some(ai) = self.acc_index(acc.as_deref()) else {
+            self.event("error", None, None, "MESSAGE: no account");
+            return;
+        };
+        let p = self.accs[ai].cfg.profile.clone();
+        let ruri = sipmsg::target_uri(&p, &target);
+        let dest = match self.dest_for(ai, &ruri) {
+            Ok(d) => d,
+            Err(e) => {
+                self.event(
+                    "message",
+                    None,
+                    Some(ai),
+                    format!("MESSAGE to {target}: {e}"),
+                );
+                return;
+            }
+        };
+        self.direct_local(ai, dest);
+        let branch = new_branch();
+        let a = &self.accs[ai];
+        let req = build_request(
+            &p.behavior,
+            a.local,
+            "MESSAGE",
+            &ruri,
+            &branch,
+            &sipmsg::from_header(&p, &rand_hex(10)),
+            &format!("<{ruri}>"),
+            &format!("{}@{}", rand_hex(16), a.local.ip()),
+            1,
+            "MESSAGE",
+            &[],
+            &[],
+            Some(("text/plain;charset=UTF-8", &text)),
+        );
+        self.start_tx(ai, "MESSAGE", &branch, req, dest, Purpose::Message(target));
     }
 
     /// Direct accounts advertise the interface the OS uses towards `dest`.
@@ -3106,6 +3235,46 @@ impl Core {
         );
     }
 
+    /// Redirects a ringing incoming call with 302 Moved Temporarily.
+    fn forward(&mut self, id: u32, target: &str, why: &str) {
+        let Some(l) = self.lines.get(&id) else { return };
+        if l.state != LState::Incoming {
+            return;
+        }
+        let (Some(req), Some(from)) = (l.invite_req.clone(), l.invite_from) else {
+            return;
+        };
+        let ai = l.acc;
+        let tag = l.local_tag.clone();
+        let uri = sipmsg::target_uri(&l.profile, target);
+        let extra = vec![("Contact".to_string(), format!("<{uri}>"))];
+        let text = self.respond(
+            ai,
+            &req,
+            from,
+            302,
+            "Moved Temporarily",
+            Some(&tag),
+            &extra,
+            None,
+        );
+        if let Some(l) = self.lines.get_mut(&id) {
+            l.last_resp = Some(text);
+        }
+        self.event(
+            "incoming",
+            Some(id),
+            Some(ai),
+            format!("forwarded to {target} ({why})"),
+        );
+        self.end_line(
+            id,
+            Some(302),
+            Some(format!("forwarded to {uri} ({why})")),
+            "local",
+        );
+    }
+
     fn end_line(&mut self, id: u32, code: Option<u16>, reason: Option<String>, by: &str) {
         let Some(l) = self.lines.get_mut(&id) else {
             return;
@@ -3496,12 +3665,24 @@ impl Core {
             .map(|x| x.trim().to_string())
             .filter(|x| !x.is_empty())
             .collect();
-        self.subs
-            .retain(|x| x.acc_id != id || want.contains(&x.label));
-        for (t, event) in want
+        let mwi = a.cfg.mwi && a.cfg.register;
+        self.subs.retain(|x| {
+            x.acc_id != id
+                || if x.event == MWI_EVENT {
+                    mwi
+                } else {
+                    want.contains(&x.label)
+                }
+        });
+        let own = a.cfg.profile.account.user.clone();
+        let mut pairs: Vec<(String, &'static str)> = want
             .iter()
             .flat_map(|t| [(t.clone(), "dialog"), (t.clone(), "presence")])
-        {
+            .collect();
+        if mwi && !own.is_empty() {
+            pairs.push((own, MWI_EVENT));
+        }
+        for (t, event) in pairs {
             if self
                 .subs
                 .iter()
@@ -3549,7 +3730,11 @@ impl Core {
             x.call_id = format!(
                 "{}@{}",
                 rand_hex(16),
-                if x.event == "dialog" { "blf" } else { "pres" }
+                match x.event {
+                    "dialog" => "blf",
+                    MWI_EVENT => "mwi",
+                    _ => "pres",
+                }
             );
             x.local_tag = rand_hex(10);
             x.remote_tag.clear();
@@ -3573,10 +3758,10 @@ impl Core {
             ("Event".to_string(), x.event.to_string()),
             (
                 "Accept".to_string(),
-                if x.event == "dialog" {
-                    "application/dialog-info+xml"
-                } else {
-                    "application/pidf+xml"
+                match x.event {
+                    "dialog" => "application/dialog-info+xml",
+                    MWI_EVENT => "application/simple-message-summary",
+                    _ => "application/pidf+xml",
                 }
                 .to_string(),
             ),
@@ -3638,8 +3823,9 @@ impl Core {
                 .max(30);
             x.next = Some(Instant::now() + Duration::from_secs(exp * 9 / 10));
             x.detail = None;
-        } else if x.event == "presence" {
+        } else if x.event == "presence" || x.event == MWI_EVENT {
             // Many PBXs offer only the dialog package; presence just stays off.
+            // Voicemail may still arrive unsolicited (Asterisk mailbox= on the peer).
             x.call_id.clear();
             x.presence = None;
             if matches!(code, 403 | 404 | 405 | 489 | 501) {
@@ -3675,6 +3861,8 @@ impl Core {
         if !m.body.trim().is_empty() {
             if x.event == "dialog" {
                 x.state = blf_state(&m.body);
+            } else if x.event == MWI_EVENT {
+                // Kept on the account (handled where the NOTIFY arrives).
             } else {
                 let (p, n) = pidf_state(&m.body);
                 x.presence = Some(p);
@@ -4155,6 +4343,14 @@ impl Core {
                 }
             }
             Purpose::Subscribe(cid) => self.subscribe_result(&cid, &m),
+            Purpose::Message(t) => {
+                let text = if (200..300).contains(&code) {
+                    format!("message to {t} delivered ({code} {})", reason_of(&m))
+                } else {
+                    format!("MESSAGE to {t} refused: {code} {}", reason_of(&m))
+                };
+                self.event("message", None, Some(ai), text);
+            }
             Purpose::Publish(ai) => self.publish_result(ai, &m),
             Purpose::Notify | Purpose::Prack | Purpose::Update => {}
         }
@@ -4834,8 +5030,24 @@ impl Core {
             "NOTIFY" => {
                 self.respond(ai, &m, from, 200, "OK", None, &[], None);
                 let event = m.header("Event").unwrap_or("").to_ascii_lowercase();
-                if event.starts_with("dialog") || event.starts_with("presence") {
+                if event.starts_with("dialog")
+                    || event.starts_with("presence")
+                    || event.starts_with(MWI_EVENT)
+                {
                     self.blf_notify(&m);
+                }
+                if event.starts_with(MWI_EVENT) {
+                    if let Some(v) = parse_mwi(&m.body) {
+                        if self.accs[ai].mwi.as_ref() != Some(&v) {
+                            let text = if v.waiting {
+                                format!("voicemail: {} new, {} old", v.new, v.old)
+                            } else {
+                                "voicemail: no new messages".to_string()
+                            };
+                            self.accs[ai].mwi = Some(v);
+                            self.event("voicemail", None, Some(ai), text);
+                        }
+                    }
                 }
                 if let (Some(id), true) = (line_id, event.starts_with("refer")) {
                     let frag = m.body.lines().next().unwrap_or("").trim().to_string();
@@ -5043,6 +5255,22 @@ impl Core {
                     self.reject(id, 481);
                 }
             }
+            return;
+        }
+        let fwd = self.settings.forward_always.trim().to_string();
+        if !fwd.is_empty() {
+            self.forward(id, &fwd, "always");
+            return;
+        }
+        let fwd_busy = self.settings.forward_busy.trim().to_string();
+        let busy =
+            self.settings.dnd || self.active_lines() > self.settings.max_lines.max(1) as usize;
+        if busy && !fwd_busy.is_empty() {
+            self.forward(
+                id,
+                &fwd_busy,
+                if self.settings.dnd { "DND" } else { "busy" },
+            );
             return;
         }
         if self.settings.dnd {
@@ -5339,5 +5567,24 @@ mod presence_tests {
             pidf_state(&pidf_body("sip:a@b", "offline", "")).0,
             "offline"
         );
+    }
+}
+
+#[cfg(test)]
+mod mwi_tests {
+    use super::parse_mwi;
+
+    #[test]
+    fn message_summary_bodies() {
+        let v = parse_mwi(
+            "Messages-Waiting: yes\r\nMessage-Account: sip:*97@pbx\r\nVoice-Message: 2/8 (0/2)\r\n",
+        )
+        .unwrap();
+        assert!(v.waiting);
+        assert_eq!((v.new, v.old), (2, 8));
+        assert_eq!(v.account.as_deref(), Some("sip:*97@pbx"));
+        let v = parse_mwi("Messages-Waiting: no\r\n").unwrap();
+        assert!(!v.waiting && v.new == 0);
+        assert!(parse_mwi("").is_none());
     }
 }

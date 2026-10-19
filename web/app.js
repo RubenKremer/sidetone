@@ -27,6 +27,10 @@ const store = {
 const token = new URLSearchParams(location.search).get("token");
 /// Ladder option: RTP streams after the SIP instead of in time order.
 const rtpAtEnd = () => store.get("sidetone.ladder.rtp_end", false);
+const ladTime = () => store.get("sidetone.ladder.time", "rel");
+const ladRetx = () => store.get("sidetone.ladder.fold_retx", false);
+// Bit flags for the WASM ladder: 1 RTP at end, 2 fold retransmissions, 4 delta time, 8 clock time.
+const ladFlags = () => (rtpAtEnd() ? 1 : 0) | (ladRetx() ? 2 : 0) | (ladTime() === "delta" ? 4 : ladTime() === "abs" ? 8 : 0);
 
 // ---------- analysis backends ----------
 
@@ -37,8 +41,8 @@ async function wasmBackend() {
     kind: "wasm",
     features: [],
     analyze: async (b) => JSON.parse(w.analyze(b)),
-    ladder: async (b, call) => (w.ladder_svg_opts ? w.ladder_svg_opts(b, call ?? -1, "", rtpAtEnd()) : w.ladder_svg(b, call ?? -1)),
-    ladderCalls: async (b, calls) => (w.ladder_svg_opts ? w.ladder_svg_opts(b, -1, calls.join(","), rtpAtEnd()) : w.ladder_svg_calls(b, calls.join(","))),
+    ladder: async (b, call) => (w.ladder_svg_flags ? w.ladder_svg_flags(b, call ?? -1, "", ladFlags()) : w.ladder_svg_opts ? w.ladder_svg_opts(b, call ?? -1, "", rtpAtEnd()) : w.ladder_svg(b, call ?? -1)),
+    ladderCalls: async (b, calls) => (w.ladder_svg_flags ? w.ladder_svg_flags(b, -1, calls.join(","), ladFlags()) : w.ladder_svg_opts ? w.ladder_svg_opts(b, -1, calls.join(","), rtpAtEnd()) : w.ladder_svg_calls(b, calls.join(","))),
     rtpAudio: async (b, id) => {
       try {
         return { wav: w.rtp_audio(b, id) };
@@ -86,8 +90,8 @@ async function httpBackend() {
     get,
     post,
     analyze: async (b) => (await post("api/analyze", b)).json(),
-    ladder: async (b, call) => (await post(`api/ladder?${q({ call, rtp: rtpAtEnd() ? "end" : null })}`, b)).text(),
-    ladderCalls: async (b, calls) => (await post(`api/ladder?${q({ calls: calls.join(","), rtp: rtpAtEnd() ? "end" : null })}`, b)).text(),
+    ladder: async (b, call) => (await post(`api/ladder?${q({ call, rtp: rtpAtEnd() ? "end" : null, retx: ladRetx() ? "fold" : null, time: ladTime() })}`, b)).text(),
+    ladderCalls: async (b, calls) => (await post(`api/ladder?${q({ calls: calls.join(","), rtp: rtpAtEnd() ? "end" : null, retx: ladRetx() ? "fold" : null, time: ladTime() })}`, b)).text(),
     rtpAudio: async (b, id) => ({ wav: new Uint8Array(await (await post(`api/rtp_audio?${q({ stream: id })}`, b)).arrayBuffer()) }),
     exportPcap: async (b, o) => new Uint8Array(await (await post(`api/export?${q({ call: o.call, redact: o.redact, sip_only: o.sip_only, no_annotate: o.annotate === false })}`, b)).arrayBuffer()),
     prompt: async (b, call, redact, lang, question) => (await post(`api/prompt?${q({ call, redact, lang, question })}`, b)).json(),
@@ -314,6 +318,22 @@ function renderBlf() {
       return `<button type="button" class="blf-item blf-${esc(b.state)}${b.presence ? ` pres-${esc(b.presence)}` : ""}" data-dial="${esc(b.target)}" title="${esc(title)}"><span class="dot"></span><span class="blf-t">${esc(b.target)}</span><span class="blf-s">${esc(sub)}</span></button>`;
     })
     .join("");
+  // Call forwarding in force.
+  const fs = S.st ? S.st.settings : {};
+  const fwd = [
+    fs.forward_always && `${t("All calls forwarded to")} ${fs.forward_always}`,
+    !fs.forward_always && fs.forward_busy && `${t("Busy: forwarded to")} ${fs.forward_busy}`,
+    !fs.forward_always && fs.forward_no_answer && `${t("No answer")} (${fs.forward_no_answer_s} s): ${fs.forward_no_answer}`,
+  ].filter(Boolean);
+  $("#fwd-note").hidden = !fwd.length;
+  $("#fwd-note").textContent = fwd.join(" · ");
+  // Voicemail lamp (message-summary NOTIFY).
+  const vm = a && a.mwi;
+  $("#vm-btn").hidden = !vm;
+  if (vm) {
+    $("#vm-btn").classList.toggle("on", !!vm.waiting);
+    $("#vm-text").textContent = vm.waiting ? `${t("Voicemail")}: ${vm.new} ${t("new")}${vm.old ? `, ${vm.old} ${t("old")}` : ""}` : `${t("Voicemail")}: ${t("no new messages")}`;
+  }
   const native = S.ctl.kind === "native";
   $("#pres-row").hidden = !native || !a || a.register === false;
   if (native && a) {
@@ -361,7 +381,7 @@ function renderLines() {
       ].filter(Boolean).map(esc).join(" · ");
       const actions =
         l.state === "incoming"
-          ? `<div class="ln-act"><button type="button" class="btn small ok" data-act="answer">Answer</button><button type="button" class="btn small" data-act="reject">Reject</button></div>`
+          ? `<div class="ln-act"><button type="button" class="btn small ok" data-act="answer">Answer</button><button type="button" class="btn small" data-act="reject">Reject</button>${S.ctl.kind === "native" ? `<button type="button" class="btn small" data-act="forward" title="${esc(t("Redirect the call (302) to the number typed in the dial field"))}">${esc(t("Forward"))}</button>` : ""}</div>`
           : l.state === "connected" && l.held
           ? `<div class="ln-act"><button type="button" class="btn small" data-act="resume">Resume</button><button type="button" class="btn small" data-act="hangup">Hang up</button></div>`
           : "";
@@ -856,6 +876,37 @@ function bindPhone() {
     }
   });
   $("#my-pres-note").addEventListener("change", publishPresence);
+  const sendMsg = async () => {
+    const target = $("#dial").value.trim();
+    const text = $("#msg-text").value;
+    if (!target || !text.trim()) {
+      toast(t("Type the number above and the text"), 3000);
+      return;
+    }
+    const a = currentAccount();
+    if (await cmd({ cmd: "message", account: a ? a.id : "", target, text })) {
+      $("#msg-text").value = "";
+      toast(t("Message sent; the result shows in Phone events"));
+    }
+  };
+  $("#msg-send").addEventListener("click", sendMsg);
+  $("#msg-text").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      sendMsg();
+    }
+  });
+  $("#vm-btn").addEventListener("click", () => {
+    const a = currentAccount();
+    if (!a) return;
+    const target = (a.voicemail || "").trim() || (a.mwi && a.mwi.account) || "";
+    if (!target) {
+      toast(t("Set the voicemail number in the account (Settings, account, Voicemail)"), 4000);
+      return;
+    }
+    $("#dial").value = target;
+    dial(target);
+  });
   $("#blf").addEventListener("click", (e) => {
     const b = e.target.closest("[data-dial]");
     if (b) {
@@ -873,6 +924,11 @@ function bindPhone() {
       const a = act.dataset.act;
       if (a === "answer") cmd({ cmd: "answer", line: id });
       if (a === "reject") cmd({ cmd: "reject", line: id, code: 486 });
+      if (a === "forward") {
+        const target = $("#dial").value.trim();
+        if (!target) toast(t("Type the destination in the number field, then press Forward"), 4000);
+        else cmd({ cmd: "forward", line: id, target });
+      }
       if (a === "resume") cmd({ cmd: "hold", line: id, on: false });
       if (a === "hangup") cmd({ cmd: "hangup", line: id });
     }
@@ -1124,7 +1180,7 @@ function renderRecordings() {
   el.querySelectorAll("[data-rec]").forEach((b) => b.addEventListener("click", () => downloadRecording(+b.dataset.rec, S.recordings.find((r) => r.line === +b.dataset.rec).remote)));
 }
 
-const EV_KIND = { reg: "Registration", call: "Call", incoming: "Incoming", media: "Media", dtmf: "DTMF", transfer: "Transfer", error: "Problem", account: "Account", diag: "Diagnostics", message: "Message", info: "Info" };
+const EV_KIND = { reg: "Registration", call: "Call", incoming: "Incoming", media: "Media", dtmf: "DTMF", transfer: "Transfer", error: "Problem", account: "Account", diag: "Diagnostics", message: "Message", info: "Info", voicemail: "Voicemail" };
 
 function onEvents(evs) {
   for (const e of evs) {
@@ -2586,6 +2642,19 @@ function bindAnalysis() {
   attachSuggest($("#an-filter"), () => (S.report ? S.report.messages : []));
   attachSuggest($("#tr-filter"), () => S.trace);
   let anT = null;
+  $("#lad-time").value = ladTime();
+  $("#lad-retx").checked = ladRetx();
+  const redrawLadder = () => {
+    if (S.report) selectCall(S.call);
+  };
+  $("#lad-time").addEventListener("change", (e) => {
+    store.set("sidetone.ladder.time", e.target.value);
+    redrawLadder();
+  });
+  $("#lad-retx").addEventListener("change", (e) => {
+    store.set("sidetone.ladder.fold_retx", e.target.checked);
+    redrawLadder();
+  });
   $("#an-filter").addEventListener("input", () => {
     clearTimeout(anT);
     anT = setTimeout(() => {
@@ -3031,6 +3100,10 @@ const NATIVE_ACC_TABS = [
     ["profile.behavior.skip_ack", "Do not send ACK for 2xx (reproduces the 32 s drop)", "bool", "testing only"],
   ]],
   ["Headers", [["profile.behavior.extra_headers", "Headers added to every request", "headers"]]],
+  ["Voicemail", [
+    ["mwi", "Show the voicemail lamp (SUBSCRIBE message-summary, RFC 3842)", "bool"],
+    ["voicemail", "Voicemail number", "text", "dialed by the voicemail button, e.g. *97; empty = the mailbox address the server announces"],
+  ]],
   ["BLF", [["blf", "Extensions to watch (busy lamp field)", "lines", "one per line: an extension, user@host or SIP URI. Sidetone subscribes to the dialog event package (RFC 4235) for the lamp and to presence (RFC 3856, PIDF) when the server offers it, once the account is registered; the PBX needs hints for them."]]],
 ];
 
@@ -3124,6 +3197,10 @@ const CALL_SETTINGS = [
   ["auto_hold", "Put the other calls on hold when you answer or resume one", "bool"],
   ["busy_code", "When all lines are busy, reject with", "select", "", [["486", "486 Busy Here"], ["480", "480 Temporarily Unavailable"], ["503", "503 Service Unavailable"]], "native"],
   ["ring_timeout_s", "Cancel unanswered outgoing calls after (s)", "number", "", null, "native"],
+  ["forward_always", "Forward all calls to", "text", "number or SIP URI, answered with 302 Moved Temporarily; empty = off", null, "native"],
+  ["forward_busy", "Forward when busy or in DND to", "text", "", null, "native"],
+  ["forward_no_answer", "Forward unanswered calls to", "text", "", null, "native"],
+  ["forward_no_answer_s", "after (s)", "number", "", null, "native"],
 ];
 
 function fieldHtml(f, value, id) {

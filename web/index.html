@@ -88,6 +88,8 @@
       <input id="my-pres-note" placeholder="Note" aria-label="Presence note" spellcheck="false">
     </div>
     <div class="hint pres-err" id="pres-err" hidden></div>
+    <div class="hint fwd-note" id="fwd-note" hidden></div>
+    <button type="button" class="vm-btn" id="vm-btn" hidden title="Call voicemail"><svg viewBox="0 0 24 24"><circle cx="6.5" cy="12" r="3.5"/><circle cx="17.5" cy="12" r="3.5"/><path d="M6.5 15.5h11"/></svg><span id="vm-text"></span></button>
 
     <div class="dial">
       <input id="dial" list="dial-history" placeholder="Number or SIP URI" autocomplete="off" spellcheck="false" aria-label="Destination">
@@ -100,6 +102,8 @@
       <div data-native><span class="opt-h">Codecs for the next call</span><div id="opt-codecs-box"></div></div>
       <label>Profile overrides (JSON) <span class="hint" data-native>any account knob, e.g. codecs or dtmf_mode</span>
         <textarea id="opt-overrides" rows="2" spellcheck="false" placeholder='{"codecs": ["PCMA"], "dtmf_mode": "info"}'></textarea></label>
+      <div class="msg-row" data-native><span class="opt-h">SIP MESSAGE to the number above</span>
+        <div class="row"><input id="msg-text" placeholder="Text" spellcheck="true" aria-label="Message text"><button type="button" class="btn small" id="msg-send">Send</button></div></div>
       <p class="hint">Dial string shortcuts: <code>600?Subject=test</code> adds headers, <code>600,,1234#</code> sends DTMF after answer (each comma waits 1 s).</p>
     </div>
     <div class="callbar">
@@ -281,6 +285,10 @@
           </aside>
           <section class="ladder-wrap" aria-label="Ladder diagram">
             <div class="call-head" id="call-head"></div>
+            <div class="ladder-bar">
+              <label>Time <select id="lad-time"><option value="rel">Since the first message</option><option value="delta">Since the row above</option><option value="abs">Clock (UTC)</option></select></label>
+              <label class="check"><input type="checkbox" id="lad-retx"> Fold retransmissions</label>
+            </div>
             <div class="ladder" id="ladder"></div>
           </section>
           <section class="detail" aria-label="Details">

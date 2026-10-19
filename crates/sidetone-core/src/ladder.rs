@@ -15,6 +15,50 @@ pub struct LadderOptions {
     pub include_rtp: bool,
     /// RTP streams in a block after the SIP instead of at the moment they start.
     pub rtp_at_end: bool,
+    /// Hide retransmissions; the original arrow shows how many there were.
+    pub collapse_retransmissions: bool,
+    /// How the time column reads.
+    pub time: TimeMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimeMode {
+    /// Seconds since the first message drawn.
+    #[default]
+    Relative,
+    /// Seconds since the row above.
+    Delta,
+    /// Time of day (UTC) of the capture.
+    Absolute,
+}
+
+impl TimeMode {
+    pub fn parse(s: &str) -> TimeMode {
+        match s {
+            "delta" => TimeMode::Delta,
+            "abs" | "absolute" => TimeMode::Absolute,
+            _ => TimeMode::Relative,
+        }
+    }
+}
+
+/// The time column for a row at `ts`, `t0` being the first row and `prev` the one above.
+fn time_label(mode: TimeMode, ts: i64, t0: i64, prev: i64) -> String {
+    match mode {
+        TimeMode::Relative => format!("+{:.3}s", (ts - t0) as f64 / 1e9),
+        TimeMode::Delta => format!("Δ{:.3}s", (ts - prev).max(0) as f64 / 1e9),
+        TimeMode::Absolute => {
+            let ms = ts.div_euclid(1_000_000);
+            let day = ms.rem_euclid(86_400_000);
+            format!(
+                "{:02}:{:02}:{:02}.{:03}",
+                day / 3_600_000,
+                day / 60_000 % 60,
+                day / 1000 % 60,
+                day % 1000
+            )
+        }
+    }
 }
 
 impl Default for LadderOptions {
@@ -25,6 +69,8 @@ impl Default for LadderOptions {
             group_by_ip: None,
             include_rtp: true,
             rtp_at_end: false,
+            collapse_retransmissions: false,
+            time: TimeMode::Relative,
         }
     }
 }
@@ -151,6 +197,28 @@ pub fn render_svg(r: &Report, opt: &LadderOptions) -> String {
 }
 
 fn render_with(r: &Report, msgs: Vec<usize>, streams: Vec<usize>, opt: &LadderOptions) -> String {
+    // Retransmissions folded into the arrow they repeat: same direction and
+    // label as the closest earlier original.
+    let mut retx_count: std::collections::HashMap<usize, usize> = Default::default();
+    let msgs: Vec<usize> = if opt.collapse_retransmissions {
+        let mut kept: Vec<usize> = Vec::new();
+        for &i in &msgs {
+            let m = &r.messages[i];
+            if m.retransmission {
+                if let Some(&o) = kept.iter().rev().find(|&&o| {
+                    let x = &r.messages[o];
+                    x.src == m.src && x.dst == m.dst && x.label == m.label
+                }) {
+                    *retx_count.entry(o).or_default() += 1;
+                    continue;
+                }
+            }
+            kept.push(i);
+        }
+        kept
+    } else {
+        msgs
+    };
     let by_ip = decide_by_ip(r, &msgs, opt.group_by_ip);
     let cols = columns(r, &msgs, &streams, by_ip);
     let col_w = 210.0;
@@ -272,8 +340,21 @@ fn render_with(r: &Report, msgs: Vec<usize>, streams: Vec<usize>, opt: &LadderOp
         .first()
         .map(|&i| r.messages[i].ts_ns)
         .unwrap_or(r.summary.start_ns);
+    let mut prev_ts = t0;
     for (row, item) in rows.iter().enumerate() {
         let y = top + row_h * row as f64 + 14.0;
+        let row_ts = match item {
+            Row::Msg(mi) => r.messages[*mi].ts_ns,
+            Row::Stream(si) => r.streams[*si].start_ns,
+            Row::RtpHeader => prev_ts,
+        };
+        let tl = time_label(opt.time, row_ts, t0, prev_ts);
+        let fs = if opt.time == TimeMode::Absolute {
+            10
+        } else {
+            11
+        };
+        prev_ts = row_ts;
         let mi = match item {
             Row::Msg(mi) => *mi,
             Row::RtpHeader => {
@@ -285,7 +366,7 @@ fn render_with(r: &Report, msgs: Vec<usize>, streams: Vec<usize>, opt: &LadderOp
                 continue;
             }
             Row::Stream(si) => {
-                stream_row(&mut s, r, *si, y, row_h, width, t0, &x_of);
+                stream_row(&mut s, r, *si, y, row_h, width, &tl, &x_of);
                 continue;
             }
         };
@@ -308,10 +389,9 @@ fn render_with(r: &Report, msgs: Vec<usize>, streams: Vec<usize>, opt: &LadderOp
             r#"<rect class="hit" x="0" y="{:.1}" width="{width:.0}" height="{row_h:.0}"/>"#,
             y - 18.0
         );
-        let rel = (m.ts_ns - t0) as f64 / 1e9;
         let _ = write!(
             s,
-            r#"<text class="t" x="8" y="{:.1}" font-size="11">+{rel:.3}s</text>"#,
+            r#"<text class="t" x="6" y="{:.1}" font-size="{fs}">{tl}</text>"#,
             y + 4.0
         );
         if let Some((sv, title)) = sev.get(&mi) {
@@ -322,15 +402,19 @@ fn render_with(r: &Report, msgs: Vec<usize>, streams: Vec<usize>, opt: &LadderOp
             };
             let _ = write!(
                 s,
-                r#"<circle class="{c}" cx="84" cy="{:.1}" r="5"><title>{}</title></circle>"#,
+                r#"<circle class="{c}" cx="90" cy="{:.1}" r="5"><title>{}</title></circle>"#,
                 y,
                 esc(title)
             );
         }
         let label = format!(
-            "{}{}",
+            "{}{}{}",
             truncate(&m.label, 30),
-            if m.retransmission { " ↻" } else { "" }
+            if m.retransmission { " ↻" } else { "" },
+            match retx_count.get(&mi) {
+                Some(n) => format!(" ↻×{n}"),
+                None => String::new(),
+            }
         );
         if (x1 - x2).abs() < 1.0 {
             // Self message: small loop.
@@ -368,7 +452,7 @@ fn stream_row(
     y: f64,
     row_h: f64,
     width: f64,
-    t0: i64,
+    tl: &str,
     x_of: &dyn Fn(&str) -> f64,
 ) {
     let st = &r.streams[si];
@@ -379,10 +463,9 @@ fn stream_row(
         "{} {} pkts loss {:.1}% jit {:.0}ms{mos}",
         st.codec, st.packets, st.loss_pct, st.jitter_ms
     );
-    let rel = (st.start_ns - t0) as f64 / 1e9;
     let _ = write!(
         s,
-        r#"<g class="stream" data-stream="{si}"><title>RTP {} → {} SSRC {}</title><rect class="hit" x="0" y="{:.1}" width="{width:.0}" height="{row_h:.0}"/><text class="t" x="8" y="{:.1}" font-size="11">+{rel:.3}s</text>"#,
+        r#"<g class="stream" data-stream="{si}"><title>RTP {} → {} SSRC {}</title><rect class="hit" x="0" y="{:.1}" width="{width:.0}" height="{row_h:.0}"/><text class="t" x="6" y="{:.1}" font-size="10.5">{tl}</text>"#,
         esc(&st.src),
         esc(&st.dst),
         esc(&st.ssrc),
@@ -470,4 +553,38 @@ pub fn render_text(r: &Report, call: Option<usize>) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collapse_retransmissions_and_time_modes() {
+        let bytes = crate::synth::generate("register-timeout").unwrap();
+        let r = crate::analyze_bytes(&bytes).unwrap();
+        let arrows = |svg: &str| svg.matches(r#"<g class="msg"#).count();
+        let full = render_svg(&r, &LadderOptions::default());
+        let folded = render_svg(
+            &r,
+            &LadderOptions {
+                collapse_retransmissions: true,
+                time: TimeMode::Delta,
+                ..Default::default()
+            },
+        );
+        assert!(
+            arrows(&folded) < arrows(&full),
+            "{} vs {}",
+            arrows(&folded),
+            arrows(&full)
+        );
+        assert!(folded.contains("↻×"));
+        assert!(folded.contains("Δ0.000s"));
+        assert!(full.contains("+0.000s"));
+        assert_eq!(
+            time_label(TimeMode::Absolute, 3_723_456_000_000, 0, 0),
+            "01:02:03.456"
+        );
+    }
 }

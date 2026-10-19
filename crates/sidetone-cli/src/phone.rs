@@ -501,6 +501,14 @@ impl Phone {
                 }
                 self.set_config(&json!({"settings": c.settings}))?;
             }
+            "message" => {
+                if s("target").trim().is_empty() || s("text").is_empty() {
+                    return Err(anyhow!("missing target or text"));
+                }
+                let acc = Some(s("account")).filter(|a| !a.is_empty());
+                e.cmd(Cmd::Message(acc, s("target"), s("text")))
+            }
+            "forward" => e.cmd(Cmd::Forward(line()?, s("target"))),
             "clear_capture" => e.cmd(Cmd::ClearCapture),
             other => return Err(anyhow!("unknown command {other:?}")),
         }
