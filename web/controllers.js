@@ -127,6 +127,13 @@ export function webAccountDefaults() {
   return { id: `w${Date.now().toString(36)}`, label: "", enabled: true, register: true, user: "", authUser: "", password: "", displayName: "", domain: "", ws: "", ice: "stun:stun.l.google.com:19302", expires: 300, rememberPassword: false };
 }
 
+/// Why the far end refused a call feature, in plain words (as the native engine says it).
+function refusal(what, method, code) {
+  const why = { 405: `the PBX does not support ${method}`, 501: `the PBX does not support ${method}`, 403: "the PBX does not allow it for this account", 488: "the PBX refused the new media description (SDP)", 491: "both sides changed the call at the same moment (glare); try again", 420: "it needs a SIP extension the PBX does not have", 481: "the PBX no longer knows this call" }[code];
+  if (code == null) return `${what} failed: the PBX did not answer`;
+  return why ? `${what} failed: ${why} (${code})` : `${what} failed: ${code}`;
+}
+
 export class WebController extends Emitter {
   constructor() {
     super();
@@ -451,10 +458,17 @@ export class WebController extends Emitter {
           if (!o.on) await this.holdOthers(l.line);
           if (o.on && l.conference) await this.cmd({ cmd: "conference", line: l.line, to_line: l.conference, on: false });
           const st = await p.hold(c, !!o.on);
+          const what = o.on ? "Hold" : "Resume";
           if (st >= 200 && st < 300) {
             l.held = !!o.on;
+            l.action = `${what} accepted by the PBX (${st})`;
+            l.action_ok = true;
             this.event("call", o.on ? "hold confirmed" : "resume confirmed", l.line);
-          } else this.event("error", `re-INVITE answered ${st ?? "nothing"}`, l.line);
+          } else {
+            l.action = refusal(what, "re-INVITE", st);
+            l.action_ok = false;
+            this.event("error", l.action, l.line);
+          }
         }
         break;
       case "mute":
@@ -473,7 +487,9 @@ export class WebController extends Emitter {
         if (p && c) {
           l.transfer = `blind transfer to ${o.target}: REFER sent`;
           const st = await p.refer(c, o.target);
-          l.transfer = st >= 200 && st < 300 ? `REFER accepted (${st}), waiting for NOTIFY` : `transfer failed: REFER answered ${st ?? "nothing"}`;
+          l.transfer = st >= 200 && st < 300 ? `REFER accepted (${st}), waiting for NOTIFY` : refusal("Transfer", "REFER", st);
+          l.action = st >= 200 && st < 300 ? `Transfer accepted by the PBX (${st}), waiting for the result` : l.transfer;
+          l.action_ok = st >= 200 && st < 300;
           this.event("transfer", l.transfer, l.line);
         }
         break;

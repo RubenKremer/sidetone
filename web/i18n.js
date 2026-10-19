@@ -120,6 +120,24 @@ const T = {
   "Explain this call": ["Explicar esta chamada", "Explicar esta llamada", "Diesen Anruf erklären"],
   "in": ["em", "en", "in"],
   "to": ["para", "a", "auf"],
+  "Transport": ["Transporte", "Transporte", "Transport"],
+  "Last action": ["Última ação", "Última acción", "Letzte Aktion"],
+  "Explanations": ["Explicações", "Explicaciones", "Erklärungen"],
+  "Explanations: on": ["Explicações: ligadas", "Explicaciones: activadas", "Erklärungen: an"],
+  "Explanations: off": ["Explicações: desligadas", "Explicaciones: desactivadas", "Erklärungen: aus"],
+  "Show or hide the explanations (Explanation tab, SDP line by line, header help)": ["Mostrar ou esconder as explicações (aba Explicação, SDP linha a linha, ajuda dos cabeçalhos)", "Mostrar u ocultar las explicaciones (pestaña Explicación, SDP línea a línea, ayuda de cabeceras)", "Erklärungen ein- oder ausblenden (Reiter Erklärung, SDP Zeile für Zeile, Header-Hilfe)"],
+  "Filter error": ["Erro no filtro", "Error en el filtro", "Filterfehler"],
+  "messages match": ["mensagens batem", "mensajes coinciden", "Nachrichten passen"],
+  "Filter: text, or ip.addr==10.0.0.5 && sip.status>=400": ["Filtro: texto, ou ip.addr==10.0.0.5 && sip.status>=400", "Filtro: texto, o ip.addr==10.0.0.5 && sip.status>=400", "Filter: Text oder ip.addr==10.0.0.5 && sip.status>=400"],
+  "Filter: ip.addr==10.0.0.5, sip.method==INVITE, sip.status>=400, text": ["Filtro: ip.addr==10.0.0.5, sip.method==INVITE, sip.status>=400, texto", "Filtro: ip.addr==10.0.0.5, sip.method==INVITE, sip.status>=400, texto", "Filter: ip.addr==10.0.0.5, sip.method==INVITE, sip.status>=400, Text"],
+  "Listen and see the waveform": ["Ouvir e ver a forma de onda", "Escuchar y ver la forma de onda", "Anhören und Wellenform sehen"],
+  "Decoding": ["Decodificando", "Decodificando", "Dekodiere"],
+  "Play": ["Tocar", "Reproducir", "Abspielen"],
+  "Pause": ["Pausar", "Pausa", "Pause"],
+  "Save WAV": ["Salvar WAV", "Guardar WAV", "WAV speichern"],
+  "This codec cannot be played": ["Este codec não pode ser tocado", "Este códec no se puede reproducir", "Dieser Codec kann nicht abgespielt werden"],
+  "This browser cannot decode Opus (no WebCodecs); the desktop app can.": ["Este navegador não decodifica Opus (sem WebCodecs); o app desktop decodifica.", "Este navegador no decodifica Opus (sin WebCodecs); la app de escritorio sí.", "Dieser Browser kann Opus nicht dekodieren (kein WebCodecs); die Desktop-App kann es."],
+  "Click the waveform to jump there. Silence in the middle is a gap: lost packets, hold or silence suppression.": ["Clique na forma de onda para pular até ali. Silêncio no meio é uma lacuna: pacotes perdidos, espera ou supressão de silêncio.", "Haz clic en la forma de onda para saltar ahí. El silencio en medio es un hueco: paquetes perdidos, espera o supresión de silencio.", "In die Wellenform klicken, um dorthin zu springen. Stille in der Mitte ist eine Lücke: verlorene Pakete, Halten oder Stillenunterdrückung."],
   "Presence not published": ["Presença não publicada", "Presencia no publicada", "Presence nicht veröffentlicht"],
   "Available": ["Disponível", "Disponible", "Verfügbar"],
   "Away": ["Ausente", "Ausente", "Abwesend"],
@@ -526,7 +544,32 @@ const T = {
 };
 
 // Sentences with variable parts: [regex, [pt, es, de]] using $1, $2...
+// Call feature outcomes from the engine: "<what> failed: <why> (<code> <reason>)".
+const FEATURE = { Hold: ["Espera", "Espera", "Halten"], Resume: ["Retomar", "Reanudar", "Fortsetzen"], Transfer: ["Transferência", "Transferencia", "Weiterleitung"], "DTMF by SIP INFO": ["DTMF por SIP INFO", "DTMF por SIP INFO", "DTMF per SIP INFO"] };
+const WHY = [
+  [/^the PBX does not support (.+)$/, ["o PABX não suporta $1", "la centralita no admite $1", "die TK-Anlage unterstützt $1 nicht"]],
+  [/^the PBX does not allow it for this account$/, ["o PABX não permite para esta conta", "la centralita no lo permite para esta cuenta", "die TK-Anlage erlaubt es für dieses Konto nicht"]],
+  [/^the PBX refused the new media description \(SDP\)$/, ["o PABX recusou a nova descrição de mídia (SDP)", "la centralita rechazó la nueva descripción de medios (SDP)", "die TK-Anlage lehnte die neue Medienbeschreibung (SDP) ab"]],
+  [/^both sides changed the call at the same moment \(glare\); try again$/, ["os dois lados mudaram a chamada ao mesmo tempo (glare); tente de novo", "ambos lados cambiaron la llamada a la vez (glare); inténtalo de nuevo", "beide Seiten änderten den Anruf gleichzeitig (Glare); erneut versuchen"]],
+  [/^it needs a SIP extension the PBX does not have$/, ["precisa de uma extensão SIP que o PABX não tem", "necesita una extensión SIP que la centralita no tiene", "es braucht eine SIP-Erweiterung, die die TK-Anlage nicht hat"]],
+  [/^the PBX no longer knows this call$/, ["o PABX não conhece mais esta chamada", "la centralita ya no conoce esta llamada", "die TK-Anlage kennt diesen Anruf nicht mehr"]],
+  [/^the PBX did not answer(?: the (.+))?$/, ["o PABX não respondeu", "la centralita no respondió", "die TK-Anlage antwortete nicht"]],
+  [/^the target does not exist$/, ["o destino não existe", "el destino no existe", "das Ziel existiert nicht"]],
+  [/^the target is busy$/, ["o destino está ocupado", "el destino está ocupado", "das Ziel ist besetzt"]],
+  [/^the target is not available$/, ["o destino não está disponível", "el destino no está disponible", "das Ziel ist nicht erreichbar"]],
+  [/^the target declined$/, ["o destino recusou", "el destino rechazó", "das Ziel lehnte ab"]],
+  [/^the PBX failed while handling it$/, ["o PABX falhou ao tratar", "la centralita falló al tratarlo", "die TK-Anlage scheiterte daran"]],
+];
+const why = (w, i) => {
+  for (const [re, out] of WHY) if (re.test(w)) return w.replace(re, out[i]);
+  return w;
+};
+
 const P = [
+  [/^(Hold|Resume|Transfer|DTMF by SIP INFO) failed: (.+?)( \(\d+.*\))?$/, (m, i) => `${FEATURE[m[1]][i]} ${["falhou", "falló", "fehlgeschlagen"][i]}: ${why(m[2], i)}${m[3] || ""}`],
+  [/^(Hold|Resume) accepted by the PBX \((\d+)\)$/, (m, i) => `${FEATURE[m[1]][i]} ${["aceita pelo PABX", "aceptada por la centralita", "von der TK-Anlage angenommen"][i]} (${m[2]})`],
+  [/^Transfer accepted by the PBX \((\d+)\), waiting for the result$/, ["Transferência aceita pelo PABX ($1), aguardando o resultado", "Transferencia aceptada por la centralita ($1), esperando el resultado", "Weiterleitung von der TK-Anlage angenommen ($1), Ergebnis ausstehend"]],
+  [/^Transfer completed$/, ["Transferência concluída", "Transferencia completada", "Weiterleitung abgeschlossen"]],
   [/^Registered as (.+) at (.+), renews in (.+)$/, ["Registrado como $1 em $2, renova em $3", "Registrado como $1 en $2, se renueva en $3", "Registriert als $1 bei $2, erneuert in $3"]],
   [/^Registration failed: (.*)$/, ["Falha no registro: $1", "Registro fallido: $1", "Registrierung fehlgeschlagen: $1"]],
   [/^(.+) is not answering\. Check address, port and firewall\.$/, ["$1 não responde. Verifique endereço, porta e firewall.", "$1 no responde. Revisa dirección, puerto y firewall.", "$1 antwortet nicht. Adresse, Port und Firewall prüfen."]],
@@ -587,6 +630,7 @@ export function t(s) {
   for (const [re, out] of P) {
     const m = trimmed.match(re);
     if (!m) continue;
+    if (typeof out === "function") return key.replace(trimmed, out(m, i));
     if (out === null) {
       // "<prefix>: <known word>" and "<kind> L<n>": translate the known part.
       const a = T[m[2]] || T[m[1]];

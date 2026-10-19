@@ -35,6 +35,10 @@ const H = {
         "Analyze (on the phone, in the history or in the trace) opens the capture in Analysis: ladder diagram, findings in plain words, RTP loss, jitter and MOS.",
         "Ask AI sends the findings and the relevant messages to the AI provider you choose, masked by default. Show what will be sent prints the exact prompt first.",
         "Export gives an annotated pcapng (findings as Wireshark comments) or a redacted one that masks numbers, names, credentials and public IPs for vendor tickets.",
+        "Filters work like Wireshark display filters, in the SIP trace and in Analysis: ip.addr == 10.0.0.5, sip.method == INVITE, sip.status >= 400, sip.from contains \"2001\", sdp.codec == PCMA, combined with && || ! and parentheses. A plain word searches the whole message.",
+        "Click an RTP arrow in the ladder, or the play button in Media, to listen to that stream and see its waveform (G.711 and Opus). Silence in the middle is a gap: loss, hold or silence suppression. Save WAV keeps the audio.",
+        "The Explanations button hides the Explanation tab, the SDP line by line and the header help for those who only want the raw data.",
+        "Calls now shows each call live (number, duration, codec, transport, RTP counters), each account's registration, and the result of the last action: when hold, transfer or DTMF fails, it says whether the PBX does not support it, refused it or did not answer.",
       ]],
       ["Diagnostics", [
         "Server reachability sends OPTIONS: any answer, even 404 or 405, proves the server is reachable. Silence points at the address, port, firewall or network interface.",
@@ -95,6 +99,10 @@ const H = {
         "Analisar (no telefone, no histórico ou no trace) abre a captura em Análise: diagrama ladder, achados explicados, perda, jitter e MOS do RTP.",
         "Perguntar à IA envia os achados e as mensagens relevantes ao provedor de IA que você escolher, mascarados por padrão. Mostrar o que será enviado exibe o prompt exato antes.",
         "Exportar gera um pcapng anotado (achados como comentários do Wireshark) ou um anonimizado que mascara números, nomes, credenciais e IPs públicos para chamados com fornecedores.",
+        "Os filtros funcionam como os display filters do Wireshark, no trace SIP e na Análise: ip.addr == 10.0.0.5, sip.method == INVITE, sip.status >= 400, sip.from contains \"2001\", sdp.codec == PCMA, combinados com && || ! e parênteses. Uma palavra solta busca na mensagem inteira.",
+        "Clique numa seta RTP do ladder, ou no botão play em Mídia, para ouvir aquele stream e ver a forma de onda (G.711 e Opus). Silêncio no meio é uma lacuna: perda, espera ou supressão de silêncio. Salvar WAV guarda o áudio.",
+        "O botão Explicações esconde a aba Explicação, o SDP linha a linha e a ajuda dos cabeçalhos para quem só quer os dados crus.",
+        "Chamadas agora mostra cada chamada ao vivo (número, duração, codec, transporte, contadores RTP), o registro de cada conta e o resultado da última ação: quando espera, transferência ou DTMF falha, diz se o PBX não suporta, recusou ou não respondeu.",
       ]],
       ["Diagnóstico", [
         "Alcance do servidor envia OPTIONS: qualquer resposta, até 404 ou 405, prova que o servidor está alcançável. Silêncio aponta para endereço, porta, firewall ou interface de rede.",
@@ -155,6 +163,10 @@ const H = {
         "Analizar (en el teléfono, el historial o la traza) abre la captura en Análisis: diagrama de escalera, hallazgos explicados, pérdida, jitter y MOS del RTP.",
         "Preguntar a la IA envía los hallazgos y los mensajes relevantes al proveedor que elijas, ocultos por defecto. Mostrar lo que se enviará enseña antes el prompt exacto.",
         "Exportar genera un pcapng anotado (hallazgos como comentarios de Wireshark) o uno anonimizado que oculta números, nombres, credenciales e IP públicas para tickets con proveedores.",
+        "Los filtros funcionan como los display filters de Wireshark, en la traza SIP y en Análisis: ip.addr == 10.0.0.5, sip.method == INVITE, sip.status >= 400, sip.from contains \"2001\", sdp.codec == PCMA, combinados con && || ! y paréntesis. Una palabra suelta busca en todo el mensaje.",
+        "Haz clic en una flecha RTP del ladder, o en el botón play en Medios, para escuchar ese stream y ver su forma de onda (G.711 y Opus). El silencio en medio es un hueco: pérdida, espera o supresión de silencio. Guardar WAV conserva el audio.",
+        "El botón Explicaciones oculta la pestaña Explicación, el SDP línea por línea y la ayuda de cabeceras para quien solo quiere los datos.",
+        "Llamadas ahora muestra cada llamada en vivo (número, duración, códec, transporte, contadores RTP), el registro de cada cuenta y el resultado de la última acción: si la espera, la transferencia o el DTMF fallan, dice si la PBX no lo soporta, lo rechazó o no respondió.",
       ]],
       ["Diagnóstico", [
         "Alcance del servidor envía OPTIONS: cualquier respuesta, incluso 404 o 405, prueba que el servidor es alcanzable. El silencio apunta a dirección, puerto, firewall o interfaz de red.",
@@ -215,6 +227,10 @@ const H = {
         "Analysieren (am Telefon, im Verlauf oder im Trace) öffnet den Mitschnitt in der Analyse: Leiterdiagramm, verständliche Befunde, RTP-Verlust, Jitter und MOS.",
         "KI fragen sendet Befunde und relevante Nachrichten an den gewählten KI-Anbieter, standardmäßig maskiert. Zeigen, was gesendet wird, zeigt vorher den genauen Prompt.",
         "Export liefert ein kommentiertes pcapng (Befunde als Wireshark-Kommentare) oder ein anonymisiertes, das Nummern, Namen, Zugangsdaten und öffentliche IPs für Herstellertickets maskiert.",
+        "Filter funktionieren wie Wireshark-Anzeigefilter, im SIP-Trace und in der Analyse: ip.addr == 10.0.0.5, sip.method == INVITE, sip.status >= 400, sip.from contains \"2001\", sdp.codec == PCMA, kombiniert mit && || ! und Klammern. Ein einzelnes Wort durchsucht die ganze Nachricht.",
+        "Auf einen RTP-Pfeil im Ladder oder den Play-Knopf unter Medien klicken, um den Stream anzuhören und seine Wellenform zu sehen (G.711 und Opus). Stille in der Mitte ist eine Lücke: Verlust, Halten oder Stillenunterdrückung. WAV speichern behält das Audio.",
+        "Der Knopf Erklärungen blendet den Erklärungs-Tab, das SDP Zeile für Zeile und die Header-Hilfe aus, für alle, die nur die Rohdaten wollen.",
+        "Anrufe zeigt jeden Anruf live (Nummer, Dauer, Codec, Transport, RTP-Zähler), die Registrierung jedes Kontos und das Ergebnis der letzten Aktion: Schlägt Halten, Weiterleiten oder DTMF fehl, steht dort, ob die TK-Anlage es nicht unterstützt, abgelehnt oder nicht geantwortet hat.",
       ]],
       ["Diagnose", [
         "Erreichbarkeit sendet OPTIONS: jede Antwort, auch 404 oder 405, beweist die Erreichbarkeit. Stille deutet auf Adresse, Port, Firewall oder Netzwerkschnittstelle.",

@@ -188,6 +188,10 @@ pub struct CallView {
     pub ended_by: Option<String>,
     pub dtmf_rx: String,
     pub transfer: Option<String>,
+    /// Outcome of the last call feature used (hold, transfer, DTMF by INFO...),
+    /// with the reason in plain words when the PBX refused it.
+    pub action: Option<String>,
+    pub action_ok: Option<bool>,
     /// Media encrypted with SRTP.
     pub srtp: bool,
     /// How the media is protected, e.g. "SDES AES_CM_128_HMAC_SHA1_80" or
@@ -621,6 +625,8 @@ struct Line {
     dtls_client: Option<bool>,
     /// The DTLS outcome was already reported.
     dtls_reported: bool,
+    /// Last feature outcome: text and success.
+    action: Option<(String, bool)>,
 }
 
 #[derive(Debug, Clone)]
@@ -925,6 +931,30 @@ fn with_srtp(sdp: String, crypto: &str, savp: bool) -> String {
     format!("{sdp}a=crypto:{crypto}\r\n")
 }
 
+/// Why the far end refused a call feature, in plain words.
+fn refusal(what: &str, method: &str, code: u16, reason: &str) -> String {
+    let why = match code {
+        405 | 501 => format!("the PBX does not support {method}"),
+        403 => "the PBX does not allow it for this account".into(),
+        488 | 606 => "the PBX refused the new media description (SDP)".into(),
+        491 => "both sides changed the call at the same moment (glare); try again".into(),
+        420 => "it needs a SIP extension the PBX does not have".into(),
+        481 => "the PBX no longer knows this call".into(),
+        408 => "the PBX did not answer".into(),
+        404 => "the target does not exist".into(),
+        486 | 600 => "the target is busy".into(),
+        480 => "the target is not available".into(),
+        603 => "the target declined".into(),
+        500..=599 => "the PBX failed while handling it".into(),
+        _ => String::new(),
+    };
+    if why.is_empty() {
+        format!("{what} failed: {code} {reason}")
+    } else {
+        format!("{what} failed: {why} ({code} {reason})")
+    }
+}
+
 /// DTLS-SRTP media line: UDP/TLS/RTP/SAVP, our certificate fingerprint and
 /// the DTLS role (RFC 5763).
 fn with_dtls(sdp: String, setup: &str) -> String {
@@ -1216,6 +1246,8 @@ impl Core {
             ended_by: l.ended_by.clone(),
             dtmf_rx: l.dtmf_rx.clone(),
             transfer: l.transfer.clone(),
+            action: l.action.as_ref().map(|a| a.0.clone()),
+            action_ok: l.action.as_ref().map(|a| a.1),
             srtp: l.srtp_on,
             security: if l.dtls_client.is_some() {
                 l.rtp
@@ -2045,11 +2077,21 @@ impl Core {
                 if let Some(l) = self.lines.get_mut(&id) {
                     l.reinvite_pending = false;
                 }
+                if let Some(l) = self.lines.get_mut(&id) {
+                    l.action = Some((
+                        "Hold or resume failed: the PBX did not answer the re-INVITE".into(),
+                        false,
+                    ));
+                }
                 self.event("error", Some(id), None, "re-INVITE timed out");
             }
             Purpose::Refer(id) => {
                 if let Some(l) = self.lines.get_mut(&id) {
                     l.transfer = Some("transfer failed: no response to REFER".into());
+                    l.action = Some((
+                        "Transfer failed: the PBX did not answer the REFER".into(),
+                        false,
+                    ));
                 }
                 self.event("transfer", Some(id), None, "REFER timed out");
             }
@@ -2540,6 +2582,7 @@ impl Core {
             dtls_offer: false,
             dtls_client: None,
             dtls_reported: false,
+            action: None,
         }
     }
 
@@ -3947,6 +3990,15 @@ impl Core {
                         }
                     }
                     let text = format!("{} confirmed", if hold { "hold" } else { "resume" });
+                    if let Some(l) = self.lines.get_mut(&id) {
+                        l.action = Some((
+                            format!(
+                                "{} accepted by the PBX ({code})",
+                                if hold { "Hold" } else { "Resume" }
+                            ),
+                            true,
+                        ));
+                    }
                     self.event("call", Some(id), Some(ai), text);
                 } else {
                     // Revert the local state.
@@ -3957,12 +4009,12 @@ impl Core {
                         }
                     }
                     let rs = reason_of(&m);
-                    self.event(
-                        "error",
-                        Some(id),
-                        Some(ai),
-                        format!("re-INVITE rejected: {code} {rs}"),
-                    );
+                    let what = if hold { "Hold" } else { "Resume" };
+                    let text = refusal(what, "re-INVITE", code, &rs);
+                    if let Some(l) = self.lines.get_mut(&id) {
+                        l.action = Some((text.clone(), false));
+                    }
+                    self.event("error", Some(id), Some(ai), text);
                     if code == 481 || code == 408 {
                         self.end_line(id, Some(code), Some("dialog lost".into()), "remote");
                     }
@@ -3975,6 +4027,9 @@ impl Core {
             Purpose::Info(id) => {
                 if code >= 300 {
                     let rs = reason_of(&m);
+                    if let Some(l) = self.lines.get_mut(&id) {
+                        l.action = Some((refusal("DTMF by SIP INFO", "INFO", code, &rs), false));
+                    }
                     self.event(
                         "dtmf",
                         Some(id),
@@ -3985,13 +4040,22 @@ impl Core {
             }
             Purpose::Refer(id) => {
                 let rs = reason_of(&m);
-                let text = if (200..300).contains(&code) {
+                let ok = (200..300).contains(&code);
+                let text = if ok {
                     format!("REFER accepted ({code}), waiting for NOTIFY")
                 } else {
-                    format!("transfer failed: REFER answered {code} {rs}")
+                    refusal("Transfer", "REFER", code, &rs)
                 };
                 if let Some(l) = self.lines.get_mut(&id) {
                     l.transfer = Some(text.clone());
+                    l.action = Some((
+                        if ok {
+                            format!("Transfer accepted by the PBX ({code}), waiting for the result")
+                        } else {
+                            text.clone()
+                        },
+                        ok,
+                    ));
                 }
                 self.event("transfer", Some(id), Some(ai), text);
             }
@@ -4710,6 +4774,21 @@ impl Core {
                         } else {
                             text.clone()
                         });
+                        if code >= 200 {
+                            let reason = frag
+                                .split_whitespace()
+                                .skip(2)
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            l.action = Some(if code < 300 {
+                                ("Transfer completed".into(), true)
+                            } else {
+                                (
+                                    refusal("Transfer", "the transfer target", code, &reason),
+                                    false,
+                                )
+                            });
+                        }
                     }
                     self.event("transfer", Some(id), Some(ai), text);
                     if (200..300).contains(&code) {

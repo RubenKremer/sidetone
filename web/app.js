@@ -7,6 +7,7 @@ import { NativeController, WebController, webAccountDefaults } from "./controlle
 import { initI18n, currentLang, setLang, LANGS, t } from "./i18n.js";
 import { renderHelp } from "./help.js";
 import { renderExplain, sdpTable, headerHelp, statusHelp } from "./explain.js";
+import { compileFilter, FIELD_NAMES } from "./filter.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -34,6 +35,15 @@ async function wasmBackend() {
     analyze: async (b) => JSON.parse(w.analyze(b)),
     ladder: async (b, call) => w.ladder_svg(b, call ?? -1),
     ladderCalls: async (b, calls) => w.ladder_svg_calls(b, calls.join(",")),
+    rtpAudio: async (b, id) => {
+      try {
+        return { wav: w.rtp_audio(b, id) };
+      } catch (e) {
+        let j = null;
+        try { j = JSON.parse(e.message); } catch { throw e; }
+        return { frames: j };
+      }
+    },
     exportPcap: async (b, opts) => w.export_capture(b, JSON.stringify(opts)),
     prompt: async (b, call, redact, lang, q) => JSON.parse(w.ai_prompt(b, call ?? -1, redact, lang, q || "")),
     ai: async (cfg, system, prompt) => {
@@ -74,6 +84,7 @@ async function httpBackend() {
     analyze: async (b) => (await post("api/analyze", b)).json(),
     ladder: async (b, call) => (await post(`api/ladder?${q({ call })}`, b)).text(),
     ladderCalls: async (b, calls) => (await post(`api/ladder?${q({ calls: calls.join(",") })}`, b)).text(),
+    rtpAudio: async (b, id) => ({ wav: new Uint8Array(await (await post(`api/rtp_audio?${q({ stream: id })}`, b)).arrayBuffer()) }),
     exportPcap: async (b, o) => new Uint8Array(await (await post(`api/export?${q({ call: o.call, redact: o.redact, sip_only: o.sip_only, no_annotate: o.annotate === false })}`, b)).arrayBuffer()),
     prompt: async (b, call, redact, lang, question) => (await post(`api/prompt?${q({ call, redact, lang, question })}`, b)).json(),
     ai: async (cfg, _system, prompt) => (await (await post("api/ai", JSON.stringify({ config: cfg, prompt }), "application/json")).json()).text,
@@ -450,6 +461,7 @@ function onState(st) {
     }
   }
   pickSelection();
+  announceActions();
   renderAccounts();
   renderBlf();
   renderLines();
@@ -849,19 +861,38 @@ function kv(rows) {
     .join("")}</dl>`;
 }
 
+/// Tells the user right away when the PBX refuses a feature they used.
+const seenActions = new Map();
+function announceActions() {
+  for (const l of lines()) {
+    if (!l.action || seenActions.get(l.line) === l.action) continue;
+    seenActions.set(l.line, l.action);
+    if (l.action_ok === false) toast(`L${l.line}: ${t(l.action)}`, 6000);
+  }
+}
+
 /// Live table of the calls on the phone: number, state, duration, codec.
 function renderActive() {
   const box = $("#active-body");
   if (!box) return;
   const ls = lines();
   $("#active-count").textContent = ls.filter((l) => l.state !== "ended").length || "";
+  // Every account: registered or not, over which transport, where.
+  const accRows = (S.st ? S.st.accounts : []).map((a) => {
+    const cls = regClass(a);
+    const tp = S.ctl.kind === "web" ? "WSS" : a.transport || "UDP";
+    const where = a.server || a.domain || "";
+    return `<div class="reg-row"><span class="dot ${cls}"></span><b>${esc(accLabel(a))}</b> <span class="mono">sip:${esc(a.user)}@${esc(a.domain || "")}${tp !== "UDP" && tp !== "WSS" ? `;transport=${tp.toLowerCase()}` : ""}</span> <span class="${cls === "bad" ? "bad" : "muted"}">${esc(t(accountStateText(a)))}</span> <span class="tag">${esc(tp)}</span>${where ? ` <span class="muted mono">${esc(where)}</span>` : ""}</div>`;
+  }).join("");
+  $("#active-regs").innerHTML = accRows;
   if (!ls.length) {
     box.innerHTML = `<p class="empty-note">${esc(t("No calls right now."))}</p>`;
     return;
   }
   const now = Date.now();
   const accs = S.st ? S.st.accounts : [];
-  box.innerHTML = `<table class="hist active"><thead><tr><th>${esc(t("Line"))}</th><th></th><th>${esc(t("Number"))}</th><th>${esc(t("State"))}</th><th>${esc(t("Duration"))}</th><th>${esc(t("Codec"))}</th><th>${esc(t("Media"))}</th><th>RTP ↑ / ↓</th><th>${esc(t("Account"))}</th></tr></thead><tbody>${ls
+  const tr = (acc) => (S.ctl.kind === "web" ? "WSS" : acc ? acc.transport || "UDP" : "");
+  box.innerHTML = `<table class="hist active"><thead><tr><th>${esc(t("Line"))}</th><th></th><th>${esc(t("Number"))}</th><th>${esc(t("State"))}</th><th>${esc(t("Duration"))}</th><th>${esc(t("Codec"))}</th><th>${esc(t("Transport"))}</th><th>${esc(t("Media"))}</th><th>RTP ↑ / ↓</th><th>${esc(t("Account"))}</th><th>${esc(t("Last action"))}</th></tr></thead><tbody>${ls
     .map((l) => {
       const d = l.answered_ms ? (l.ended_ms || now) - l.answered_ms : null;
       const acc = accs.find((a) => a.id === l.account);
@@ -874,9 +905,11 @@ function renderActive() {
         <td><span class="badge st-${l.state}">${esc(t(STATE_TEXT[l.state] || l.state))}</span>${flags ? ` <span class="muted">${esc(flags)}</span>` : ""}</td>
         <td class="num">${d == null ? "" : dur(d)}</td>
         <td class="num">${esc(l.codec || "")}</td>
+        <td class="num">${esc(tr(acc))}</td>
         <td>${esc(media)}</td>
         <td class="num">${l.rtp_sent || 0} / ${l.rtp_received || 0}</td>
-        <td>${esc(acc ? accLabel(acc) : l.account || "")}</td></tr>`;
+        <td>${esc(acc ? accLabel(acc) : l.account || "")}</td>
+        <td class="${l.action_ok === false ? "bad" : l.action_ok ? "ok" : ""}">${esc(l.action ? t(l.action) : "")}</td></tr>`;
     })
     .join("")}</tbody></table>`;
 }
@@ -1093,13 +1126,24 @@ function traceCallSet() {
   return set;
 }
 
+/// Compiled display filter of an input, with the error shown on the input.
+function inputFilter(el) {
+  const src = el.value;
+  if (el._src === src) return el._fn;
+  const c = compileFilter(src);
+  el._src = src;
+  el._fn = c.error ? null : c.fn;
+  el.classList.toggle("bad-filter", !!c.error);
+  el.title = c.error ? `${t("Filter error")}: ${c.error}` : t("Like Wireshark: ip.addr, ip.src, port, transport, sip.method, sip.status, sip.from, sip.to, sip.call_id, sip.ua, sdp.ip, sdp.codec; ==, !=, >, contains, ~ (regex); and, or, not, ( ). A word or \"text\" searches the whole message.");
+  return el._fn;
+}
+
 function traceVisible(t) {
   if (S.trCalls && !S.trCalls.has(t.call_id)) return false;
   if ($("#tr-hide-reg").checked && t.method === "REGISTER") return false;
   if ($("#tr-hide-opt").checked && ["OPTIONS", "NOTIFY", "SUBSCRIBE", "PUBLISH"].includes(t.method)) return false;
-  const f = $("#tr-filter").value.trim().toLowerCase();
-  if (!f) return true;
-  return `${t.first_line} ${t.call_id} ${t.src} ${t.dst} ${t.cseq}`.toLowerCase().includes(f) || t.raw.toLowerCase().includes(f);
+  const fn = inputFilter($("#tr-filter"));
+  return fn ? fn(t) : true;
 }
 
 function traceRow(t) {
@@ -1228,11 +1272,21 @@ function inView(call) {
   return S.call == null || call === S.call;
 }
 
+/// Messages matching the Analysis filter (null when there is no filter).
+function anMatches() {
+  const fn = inputFilter($("#an-filter"));
+  if (!fn || !S.report) return null;
+  return new Set(S.report.messages.filter((m) => fn(m)).map((m) => m.index));
+}
+
 function renderCalls() {
   const r = S.report;
+  const hits = anMatches();
+  $("#an-filter-info").textContent = hits ? `${hits.size} ${t("messages match")}` : "";
   $("#calls-count").textContent = S.picked.size > 1 ? `${S.picked.size} / ${r.calls.length}` : r.calls.length;
   $("#calls-clear").hidden = !S.picked.size;
   $("#calls").innerHTML = r.calls
+    .filter((c) => !hits || c.messages.some((i) => hits.has(i)))
     .map((c) => {
       const st = c.state;
       const label = st === "non_invite" ? (c.final_status ? `${c.final_status}` : "no answer") : `${AN_STATE[st]}${c.final_status ? " " + c.final_status : ""}`;
@@ -1268,11 +1322,18 @@ async function selectCall(i) {
       </dl>`
     : `<h2>All messages</h2>`;
   $("#ladder").innerHTML = multi && S.be.ladderCalls ? await S.be.ladderCalls(S.bytes, picked) : await S.be.ladder(S.bytes, i);
+  markLadderMatches();
   renderFindings();
   renderMedia();
   renderLog();
   renderExplainTab();
   $("#tab-message").innerHTML = `<p class="empty-note">Click an arrow in the ladder to see the full message.</p>`;
+}
+
+/// Highlights the ladder arrows that match the Analysis filter.
+function markLadderMatches() {
+  const hits = anMatches();
+  $$("#ladder .msg").forEach((g) => g.classList.toggle("match", !!hits && hits.has(+g.dataset.msg)));
 }
 
 function renderExplainTab() {
@@ -1315,10 +1376,10 @@ function highlightSip(raw) {
   const body = sep >= 0 ? raw.slice(sep).replace(/^\r?\n\r?\n/, "") : "";
   const ls = head.split(/\r?\n/);
   const code = +((ls[0].match(/^SIP\/2\.0 (\d{3})/) || [])[1] || 0);
-  const out = [`<span class="sl"${code ? ` title="${esc(statusHelp(code))}"` : ""}>${esc(ls[0])}</span>`];
+  const out = [`<span class="sl"${code && explainOn() ? ` title="${esc(statusHelp(code))}"` : ""}>${esc(ls[0])}</span>`];
   for (const l of ls.slice(1)) {
     const i = l.indexOf(":");
-    const help = i > 0 ? headerHelp(l.slice(0, i)) : "";
+    const help = i > 0 && explainOn() ? headerHelp(l.slice(0, i)) : "";
     out.push(i > 0 ? `<span class="hn${help ? " has-help" : ""}"${help ? ` title="${esc(help)}"` : ""}>${esc(l.slice(0, i))}</span>${esc(l.slice(i))}` : esc(l));
   }
   return out.join("\n") + (body ? `\n\n<span class="sdp">${esc(body)}</span>` : "");
@@ -1383,6 +1444,8 @@ function messageSummary(m) {
   return `<section class="msg-sum">${kv(rows)}</section>`;
 }
 
+const explainOn = () => store.get("sidetone.explain", true);
+
 /// The SDP body of a message, if it has one.
 function sdpOf(m) {
   const i = m.raw.search(/\r?\n\r?\n/);
@@ -1420,6 +1483,8 @@ function webrtcBlock() {
 }
 
 function renderMedia() {
+  stopPlayer();
+  PL.buf = null;
   const r = S.report;
   const streams = r.streams.filter((s) => inView(s.call));
   $("#n-media").textContent = streams.length || (S.webrtc ? "1" : "");
@@ -1433,10 +1498,10 @@ function renderMedia() {
   }
   const cls = (v, w, b) => (v >= b ? "bad" : v >= w ? "warn" : "");
   $("#tab-media").innerHTML = `<table class="media"><thead><tr>
-      <th>Stream</th><th>Codec</th><th>Packets</th><th>Lost</th><th>Loss</th><th>Jitter</th><th>Max jitter</th><th>Max gap</th><th>ptime</th><th>MOS est.</th><th>DTMF</th></tr></thead><tbody>
+      <th></th><th>Stream</th><th>Codec</th><th>Packets</th><th>Lost</th><th>Loss</th><th>Jitter</th><th>Max jitter</th><th>Max gap</th><th>ptime</th><th>MOS est.</th><th>DTMF</th></tr></thead><tbody>
     ${streams
       .map(
-        (s) => `<tr data-stream="${s.id}"><td>${esc(s.src)} → ${esc(s.dst)}<br><span class="muted">SSRC ${esc(s.ssrc)}</span></td>
+        (s) => `<tr data-stream="${s.id}"><td><button type="button" class="icon-btn play-btn" data-play="${s.id}" title="${esc(t("Listen and see the waveform"))}">▶</button></td><td>${esc(s.src)} → ${esc(s.dst)}<br><span class="muted">SSRC ${esc(s.ssrc)}</span></td>
         <td>${esc(s.codec)}</td><td>${s.packets}</td><td>${Math.max(0, s.lost)}</td>
         <td class="${cls(s.loss_pct, 1, 5)}">${s.loss_pct.toFixed(2)}%</td>
         <td class="${cls(s.jitter_ms, 30, 60)}">${s.jitter_ms.toFixed(1)} ms</td>
@@ -1447,7 +1512,178 @@ function renderMedia() {
         <td>${esc(s.dtmf_events.join(""))}</td></tr>`
       )
       .join("")}</tbody></table>
+    <div class="rtp-player" id="rtp-player" hidden></div>
     <p class="muted">MOS is an E-model (ITU-T G.107) estimate from loss and jitter at this capture point; network delay is approximated.</p>${webrtcBlock()}`;
+}
+
+// ---- RTP player: listen to a stream and see its waveform
+
+const PL = { ctx: null, src: null, buf: null, id: null, start: 0, offset: 0, raf: 0 };
+
+/// Opus frames decoded in the page with WebCodecs (browser version).
+async function decodeOpusFrames(j) {
+  if (!("AudioDecoder" in window)) throw new Error(t("This browser cannot decode Opus (no WebCodecs); the desktop app can."));
+  const rate = 48000;
+  const chunks = [];
+  const dec = new AudioDecoder({
+    output: (d) => {
+      const n = d.numberOfFrames;
+      const f = new Float32Array(n);
+      d.copyTo(f, { planeIndex: 0, format: "f32-planar" });
+      chunks.push([Number(d.timestamp), f]);
+      d.close();
+    },
+    error: () => {},
+  });
+  dec.configure({ codec: "opus", sampleRate: rate, numberOfChannels: 1 });
+  for (const [ts, b64] of j.frames) {
+    const data = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    dec.decode(new EncodedAudioChunk({ type: "key", timestamp: Math.round((ts / 48000) * 1e6), data }));
+  }
+  await dec.flush();
+  const end = chunks.length ? Math.round((chunks[chunks.length - 1][0] / 1e6) * rate) + chunks[chunks.length - 1][1].length : 0;
+  const out = new Float32Array(end);
+  for (const [us, f] of chunks) out.set(f, Math.round((us / 1e6) * rate));
+  return { rate, data: out };
+}
+
+async function openPlayer(id) {
+  const box = $("#rtp-player");
+  if (!box) return;
+  stopPlayer();
+  const st = S.report.streams[id];
+  box.hidden = false;
+  box.innerHTML = `<p class="muted">${esc(t("Decoding"))} ${esc(st.codec)}…</p>`;
+  try {
+    PL.ctx ||= new (window.AudioContext || window.webkitAudioContext)();
+    const r = await S.be.rtpAudio(S.bytes, id);
+    let buf;
+    let wav = r.wav;
+    if (wav) {
+      buf = await PL.ctx.decodeAudioData(wav.buffer.slice(wav.byteOffset, wav.byteOffset + wav.byteLength));
+    } else if (r.frames && /opus/i.test(r.frames.codec)) {
+      const d = await decodeOpusFrames(r.frames);
+      buf = PL.ctx.createBuffer(1, Math.max(1, d.data.length), d.rate);
+      buf.copyToChannel(d.data, 0);
+    } else {
+      throw new Error((r.frames && r.frames.note) || t("This codec cannot be played"));
+    }
+    PL.buf = buf;
+    PL.id = id;
+    PL.offset = 0;
+    PL.wav = wav;
+    box.innerHTML = `<div class="pl-head"><b>${esc(st.src)} → ${esc(st.dst)}</b> <span class="muted">${esc(st.codec)}, ${buf.duration.toFixed(1)} s, SSRC ${esc(st.ssrc)}</span></div>
+      <canvas id="pl-wave" height="110"></canvas>
+      <div class="row pl-ctl"><button type="button" class="btn small primary" id="pl-play">▶ ${esc(t("Play"))}</button><span class="mono" id="pl-time">0:00.0 / ${buf.duration.toFixed(1)} s</span><span class="grow"></span>${wav ? `<button type="button" class="btn small" id="pl-save">${esc(t("Save WAV"))}</button>` : ""}</div>
+      <p class="hint">${esc(t("Click the waveform to jump there. Silence in the middle is a gap: lost packets, hold or silence suppression."))}</p>`;
+    drawWave();
+    $("#pl-play").addEventListener("click", () => (PL.src ? pausePlayer() : playPlayer()));
+    $("#pl-wave").addEventListener("click", (e) => {
+      const c = e.currentTarget;
+      PL.offset = ((e.clientX - c.getBoundingClientRect().left) / c.clientWidth) * PL.buf.duration;
+      if (PL.src) {
+        stopPlayer(true);
+        playPlayer();
+      } else drawWave();
+    });
+    const sv = $("#pl-save");
+    if (sv) sv.addEventListener("click", () => download(PL.wav, `${(S.name || "capture").replace(/\.[^.]+$/, "")}-stream${id}.wav`, "audio/wav"));
+  } catch (e) {
+    box.innerHTML = `<p class="bad">${esc(e.message || String(e))}</p>`;
+  }
+}
+
+function drawWave() {
+  const c = $("#pl-wave");
+  if (!c || !PL.buf) return;
+  const w = (c.width = c.clientWidth * devicePixelRatio);
+  const h = (c.height = 110 * devicePixelRatio);
+  const g = c.getContext("2d");
+  const css = getComputedStyle(document.body);
+  const d = PL.buf.getChannelData(0);
+  const step = Math.max(1, Math.floor(d.length / w));
+  // Scale to the loudest sample so quiet streams are still readable.
+  if (PL.peak == null || PL.peakOf !== PL.buf) {
+    let pk = 0;
+    for (let i = 0; i < d.length; i++) pk = Math.max(pk, Math.abs(d[i]));
+    PL.peak = pk;
+    PL.peakOf = PL.buf;
+  }
+  const gain = PL.peak > 0.001 ? 0.95 / PL.peak : 1;
+  g.clearRect(0, 0, w, h);
+  g.fillStyle = css.getPropertyValue("--sunk") || "#eee";
+  g.fillRect(0, 0, w, h);
+  g.fillStyle = css.getPropertyValue("--req").trim() || "#2563eb";
+  for (let x = 0; x < w; x++) {
+    let lo = 1, hi = -1;
+    for (let i = x * step, e = Math.min(d.length, i + step); i < e; i++) {
+      const v = d[i];
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+    if (hi < lo) continue;
+    const y1 = ((1 - hi * gain) / 2) * h, y2 = ((1 - lo * gain) / 2) * h;
+    g.fillRect(x, y1, 1, Math.max(1, y2 - y1));
+  }
+  const pos = curTime() / PL.buf.duration;
+  g.fillStyle = css.getPropertyValue("--bad").trim() || "#dc2626";
+  g.fillRect(Math.round(pos * w), 0, 2 * devicePixelRatio, h);
+}
+
+const curTime = () => (PL.src ? Math.min(PL.buf.duration, PL.offset + PL.ctx.currentTime - PL.start) : PL.offset);
+
+function playPlayer() {
+  if (!PL.buf) return;
+  if (PL.ctx.state === "suspended") PL.ctx.resume();
+  if (PL.offset >= PL.buf.duration) PL.offset = 0;
+  const src = PL.ctx.createBufferSource();
+  src.buffer = PL.buf;
+  src.connect(PL.ctx.destination);
+  src.onended = () => {
+    if (PL.src !== src) return;
+    PL.offset = curTime();
+    PL.src = null;
+    if (PL.offset >= PL.buf.duration - 0.05) PL.offset = 0;
+    tickPlayer();
+    const b = $("#pl-play");
+    if (b) b.textContent = `▶ ${t("Play")}`;
+  };
+  PL.start = PL.ctx.currentTime;
+  src.start(0, PL.offset);
+  PL.src = src;
+  $("#pl-play").textContent = `❚❚ ${t("Pause")}`;
+  const loop = () => {
+    tickPlayer();
+    if (PL.src) PL.raf = requestAnimationFrame(loop);
+  };
+  loop();
+}
+
+function tickPlayer() {
+  const el = $("#pl-time");
+  if (el && PL.buf) {
+    const tm = curTime();
+    el.textContent = `${Math.floor(tm / 60)}:${(tm % 60).toFixed(1).padStart(4, "0")} / ${PL.buf.duration.toFixed(1)} s`;
+  }
+  drawWave();
+}
+
+function pausePlayer() {
+  PL.offset = curTime();
+  stopPlayer(true);
+  const b = $("#pl-play");
+  if (b) b.textContent = `▶ ${t("Play")}`;
+  tickPlayer();
+}
+
+function stopPlayer(keepOffset = false) {
+  cancelAnimationFrame(PL.raf);
+  if (PL.src) {
+    const s = PL.src;
+    PL.src = null;
+    try { s.stop(); } catch { /* already stopped */ }
+  }
+  if (!keepOffset) PL.offset = 0;
 }
 
 function renderLog() {
@@ -1872,6 +2108,22 @@ function bindAnalysis() {
     renderCalls();
     selectCall(S.picked.size === 1 ? [...S.picked][0] : S.picked.size ? null : S.call ?? i);
   });
+  $("#filter-fields").innerHTML = FIELD_NAMES.map((f) => `<option value="${f}">`).join("");
+  let anT = null;
+  $("#an-filter").addEventListener("input", () => {
+    clearTimeout(anT);
+    anT = setTimeout(() => {
+      if (!S.report) return;
+      renderCalls();
+      markLadderMatches();
+      // Keep a dialog on screen that matches.
+      const hits = anMatches();
+      if (hits && S.call != null && !S.report.calls[S.call].messages.some((i) => hits.has(i))) {
+        const first = S.report.calls.find((c) => c.messages.some((i) => hits.has(i)));
+        if (first) selectCall(first.index);
+      }
+    }, 200);
+  });
   $("#calls-clear").addEventListener("click", () => {
     const keep = S.call ?? pickedCalls()[0] ?? null;
     S.picked.clear();
@@ -1881,7 +2133,15 @@ function bindAnalysis() {
   $("#ladder").addEventListener("click", (e) => {
     const g = e.target.closest(".msg");
     if (g) selectMessage(+g.dataset.msg);
-    if (e.target.closest(".stream")) showTab("media");
+    const sg = e.target.closest(".stream");
+    if (sg) {
+      showTab("media");
+      if (sg.dataset.stream != null) openPlayer(+sg.dataset.stream);
+    }
+  });
+  $("#tab-media").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-play]");
+    if (b) openPlayer(+b.dataset.play);
   });
   const openFinding = (li) => {
     const f = S.report.findings[+li.dataset.finding];
@@ -2879,6 +3139,20 @@ function bindChrome() {
     mode = modes[(modes.indexOf(mode) + 1) % modes.length];
     store.set("sidetone.theme", mode);
     applyTheme(mode);
+  });
+  // Explanations everywhere, or just the evidence for people who know it by heart.
+  const applyExplain = (on) => {
+    document.body.classList.toggle("no-explain", !on);
+    $("#explain-toggle").setAttribute("aria-pressed", String(on));
+    $("#explain-toggle").textContent = t(on ? "Explanations: on" : "Explanations: off");
+    if (!on && $('.tabs [data-tab="explain"]').getAttribute("aria-selected") === "true") showTab("findings");
+  };
+  applyExplain(explainOn());
+  $("#explain-toggle").addEventListener("click", () => {
+    const on = !explainOn();
+    store.set("sidetone.explain", on);
+    applyExplain(on);
+    if (S.report && S.msg != null) selectMessage(S.msg, false);
   });
   // Troubleshooting (everything) or Phone only (calls, history, settings, help).
   const applyMode = (m) => {

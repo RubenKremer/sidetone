@@ -3,6 +3,7 @@
 
 pub mod ai;
 pub mod analysis;
+pub mod audio;
 pub mod export;
 pub mod ladder;
 pub mod net;

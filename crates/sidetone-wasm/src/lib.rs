@@ -91,6 +91,28 @@ pub fn ladder_svg_calls(bytes: &[u8], calls: &str) -> Result<String, JsError> {
     })
 }
 
+/// One RTP stream as a WAV when it is G.711; otherwise an error whose
+/// message is JSON {"codec", "frames": [[ts_offset, base64], ...]} for
+/// decoding in the page (Opus through WebCodecs).
+#[wasm_bindgen]
+pub fn rtp_audio(bytes: &[u8], stream: u32) -> Result<Vec<u8>, JsError> {
+    use base64::Engine as _;
+    let a =
+        sidetone_core::audio::stream_audio(bytes, stream as usize).map_err(|e| JsError::new(&e))?;
+    if !a.pcm.is_empty() {
+        return Ok(sidetone_core::audio::wav_mono(&a.pcm, a.rate));
+    }
+    let frames: Vec<serde_json::Value> = a
+        .frames
+        .iter()
+        .map(|(t, f)| json!([t, base64::engine::general_purpose::STANDARD.encode(f)]))
+        .collect();
+    Err(JsError::new(
+        &json!({"codec": a.codec, "clock": a.clock_rate, "frames": frames, "note": a.note})
+            .to_string(),
+    ))
+}
+
 /// Annotated pcapng. `opts_json`: {"annotate":true,"redact":bool,"call":n|null,"sip_only":bool}
 #[wasm_bindgen]
 pub fn export_capture(bytes: &[u8], opts_json: &str) -> Result<Vec<u8>, JsError> {

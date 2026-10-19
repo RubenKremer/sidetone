@@ -125,7 +125,19 @@ impl Synth {
                 p.extend_from_slice(&seq.to_be_bytes());
                 p.extend_from_slice(&ts.to_be_bytes());
                 p.extend_from_slice(&ssrc.to_be_bytes());
-                p.extend(std::iter::repeat(if pt == 8 { 0xd5 } else { 0xff }).take(160));
+                // A voice-like signal (voiced syllables with pauses) so playback
+                // and the waveform show something; pitch differs per stream.
+                let f0 = 110.0 + (ssrc % 7) as f64 * 15.0;
+                for k in 0..160u32 {
+                    let n = ts.wrapping_add(k) as f64 / 8000.0;
+                    let syl = (n * 3.3 * std::f64::consts::PI).sin().max(0.0);
+                    let gate = if (n * 0.7).fract() < 0.75 { 1.0 } else { 0.0 };
+                    let env = syl * syl * gate;
+                    let w = 2.0 * std::f64::consts::PI * f0 * (1.0 + 0.05 * (n * 1.7).sin()) * n;
+                    let v = env * (0.5 * w.sin() + 0.25 * (2.0 * w).sin() + 0.12 * (3.0 * w).sin());
+                    let x = (v * 9000.0) as i16;
+                    p.push(if pt == 8 { lin2alaw(x) } else { lin2ulaw(x) });
+                }
                 let t_ns =
                     BASE_NS + (self.t0_ms + start_ms + i as i64 * 20) * 1_000_000 + jit * 1_000_000;
                 self.pkts
@@ -1159,5 +1171,54 @@ mod dtls_tests {
             "{:#?}",
             r.findings
         );
+    }
+}
+
+fn lin2ulaw(x: i16) -> u8 {
+    let mut s = x as i32;
+    let sign = if s < 0 {
+        s = -s;
+        0x80
+    } else {
+        0
+    };
+    s = (s + 0x84).min(32635 + 0x84);
+    let exp = (31 - (s as u32).leading_zeros()).saturating_sub(7).min(7);
+    let mant = (s >> (exp + 3)) & 0x0f;
+    !(sign | (exp << 4) as i32 | mant) as u8
+}
+
+fn lin2alaw(x: i16) -> u8 {
+    let mut s = x as i32;
+    let sign = if s >= 0 {
+        0x80
+    } else {
+        s = -s - 1;
+        0
+    };
+    s = s.min(32767);
+    let v = if s < 256 {
+        s >> 4
+    } else {
+        let exp = (31 - (s as u32).leading_zeros()) - 7;
+        ((exp as i32) << 4) | ((s >> (exp + 3)) & 0x0f)
+    };
+    ((sign | v) ^ 0x55) as u8
+}
+
+#[cfg(test)]
+mod g711_tests {
+    use super::{lin2alaw, lin2ulaw};
+    use crate::audio::{alaw, ulaw};
+
+    #[test]
+    fn g711_round_trip() {
+        for x in [-30000i16, -5000, -300, -20, 0, 20, 300, 5000, 30000] {
+            let u = ulaw(lin2ulaw(x)) as i32;
+            let a = alaw(lin2alaw(x)) as i32;
+            let tol = (x as i32).abs() / 16 + 40;
+            assert!((u - x as i32).abs() <= tol, "ulaw {x} -> {u}");
+            assert!((a - x as i32).abs() <= tol, "alaw {x} -> {a}");
+        }
     }
 }

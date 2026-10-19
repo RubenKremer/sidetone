@@ -24,6 +24,7 @@ const CONTROLLERS_JS: &str = include_str!("../../../web/controllers.js");
 const I18N_JS: &str = include_str!("../../../web/i18n.js");
 const HELP_JS: &str = include_str!("../../../web/help.js");
 const EXPLAIN_JS: &str = include_str!("../../../web/explain.js");
+const FILTER_JS: &str = include_str!("../../../web/filter.js");
 
 fn header(k: &str, v: &str) -> Header {
     Header::from_bytes(k.as_bytes(), v.as_bytes()).expect("valid header")
@@ -216,6 +217,18 @@ fn handle(
             Ok(r) => ok_bytes(r.to_json().into_bytes(), "application/json"),
             Err(e) => err(422, e),
         },
+        (Method::Post, "/api/rtp_audio") => {
+            let id = q
+                .get("stream")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
+            match rtp_wav(&body, id) {
+                Ok((wav, info)) => Response::from_data(wav)
+                    .with_header(header("Content-Type", "audio/wav"))
+                    .with_header(header("X-Sidetone-Audio", &info)),
+                Err(e) => err(422, e),
+            }
+        }
         (Method::Post, "/api/ladder") => match analyze(&body) {
             Ok(r) => {
                 let c = call_param(&r, &q);
@@ -392,6 +405,7 @@ fn handle(
                 "i18n.js" => ok_bytes(I18N_JS.as_bytes().to_vec(), "text/javascript"),
                 "help.js" => ok_bytes(HELP_JS.as_bytes().to_vec(), "text/javascript"),
                 "explain.js" => ok_bytes(EXPLAIN_JS.as_bytes().to_vec(), "text/javascript"),
+                "filter.js" => ok_bytes(FILTER_JS.as_bytes().to_vec(), "text/javascript"),
                 _ => err(404, "not found"),
             }
         }
@@ -565,6 +579,37 @@ fn phone_api(m: &Method, path: &str, q: &HashMap<String, String>, body: &[u8]) -
         }
         _ => err(404, "unknown phone endpoint"),
     }
+}
+
+/// One RTP stream of a capture as a WAV: G.711 decoded by the core, Opus by
+/// libopus. The second value is a short JSON with codec, packets and gaps.
+fn rtp_wav(bytes: &[u8], id: usize) -> std::result::Result<(Vec<u8>, String), String> {
+    use sidetone_core::audio::{stream_audio, wav_mono};
+    let a = stream_audio(bytes, id)?;
+    let info = |a: &sidetone_core::audio::StreamAudio| serde_json::to_string(a).unwrap_or_default();
+    if !a.pcm.is_empty() {
+        return Ok((wav_mono(&a.pcm, a.rate), info(&a)));
+    }
+    if a.codec.to_ascii_uppercase().contains("OPUS") && !a.frames.is_empty() {
+        let rate = 16000u32;
+        let mut dec = opus::Decoder::new(rate, opus::Channels::Mono).map_err(|e| e.to_string())?;
+        let mut pcm: Vec<i16> = Vec::new();
+        let mut buf = vec![0i16; 5760];
+        for (pos, f) in &a.frames {
+            // RTP clock is 48 kHz; place each frame where its timestamp says.
+            let at = (*pos as u64 * rate as u64 / 48000) as usize;
+            if pcm.len() < at {
+                pcm.resize(at, 0);
+            }
+            if let Ok(n) = dec.decode(f, &mut buf, false) {
+                pcm.extend_from_slice(&buf[..n]);
+            }
+        }
+        return Ok((wav_mono(&pcm, rate), info(&a)));
+    }
+    Err(a
+        .note
+        .unwrap_or_else(|| format!("{} cannot be played", a.codec)))
 }
 
 /// Passive capture on a network interface (libpcap / Npcap loaded at run time).
