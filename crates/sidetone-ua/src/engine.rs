@@ -88,6 +88,11 @@ pub struct PhoneSettings {
     pub record_calls: bool,
     /// Global codec list in preference order, for accounts without their own.
     pub codecs: Vec<String>,
+    /// Homer/HEP collector ("host:port", UDP) that gets a copy of every SIP
+    /// message; empty for none.
+    pub hep_collector: String,
+    /// Capture agent ID sent in HEP.
+    pub hep_agent_id: u32,
 }
 
 impl Default for PhoneSettings {
@@ -108,6 +113,8 @@ impl Default for PhoneSettings {
             capture_rtp: true,
             record_calls: false,
             codecs: crate::media::default_codecs(),
+            hep_collector: String::new(),
+            hep_agent_id: 2001,
         }
     }
 }
@@ -242,6 +249,8 @@ pub struct PhoneState {
     pub calls: Vec<CallView>,
     pub settings: PhoneSettings,
     pub capture_packets: usize,
+    /// The capture holds SRTP that Sidetone decrypted (a decrypted export exists).
+    pub capture_srtp: bool,
     pub audio_device: bool,
 }
 
@@ -367,6 +376,7 @@ impl Engine {
         }));
         let tap = Tap::new();
         tap.set_enabled(settings.capture);
+        let _ = tap.set_hep(&settings.hep_collector, settings.hep_agent_id);
         let next_line = Arc::new(AtomicU32::new(1));
         let mut core = Core {
             next_line: next_line.clone(),
@@ -484,6 +494,11 @@ impl Engine {
     /// Everything captured so far as pcapng.
     pub fn capture(&self) -> Vec<u8> {
         self.tap.to_pcapng()
+    }
+
+    /// The capture with SRTP media replaced by the decrypted RTP.
+    pub fn capture_decrypted(&self) -> Vec<u8> {
+        self.tap.to_pcapng_decrypted()
     }
 
     /// Stereo WAV (left sent, right received) of a recorded line.
@@ -1229,6 +1244,7 @@ impl Core {
             calls,
             settings: self.settings.clone(),
             capture_packets: self.tap.len(),
+            capture_srtp: self.tap.has_srtp(),
             audio_device: self.audio.is_some(),
         };
     }
@@ -2181,6 +2197,17 @@ impl Core {
             Cmd::SetSettings(s) => {
                 crate::sipmsg::set_global_codecs(s.codecs.clone());
                 self.tap.set_enabled(s.capture);
+                if s.hep_collector != self.settings.hep_collector
+                    || s.hep_agent_id != self.settings.hep_agent_id
+                {
+                    match self.tap.set_hep(&s.hep_collector, s.hep_agent_id) {
+                        Ok(Some(to)) => {
+                            self.event("info", None, None, format!("HEP copies of SIP go to {to}"))
+                        }
+                        Ok(None) => {}
+                        Err(e) => self.event("error", None, None, format!("HEP collector: {e}")),
+                    }
+                }
                 self.settings = s;
                 self.route_audio();
                 self.dirty = true;

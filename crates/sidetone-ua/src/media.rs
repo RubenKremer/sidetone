@@ -1243,9 +1243,9 @@ impl RtpSession {
                     let Ok((n, from)) = recv_sock.recv_from(&mut buf) else {
                         continue;
                     };
-                    tap.record(from, local, &buf[..n]);
                     if let Some(d) = &dtls {
                         if crate::dtls::DtlsSrtp::is_dtls(&buf[..n]) {
+                            tap.record(from, local, &buf[..n]);
                             let mut out = Vec::new();
                             let ev = d.lock().unwrap().handle(&buf[..n], &mut out);
                             outbox.lock().unwrap().extend(out);
@@ -1253,18 +1253,32 @@ impl RtpSession {
                             continue;
                         }
                     }
+                    // SRTP is recorded as it arrived and, once decrypted, in
+                    // the clear too, for a decrypted export.
+                    let mut wire: Option<Vec<u8>> = None;
                     let n = match srtp_rx.lock().unwrap().as_mut() {
-                        Some(c) => match c.unprotect(&mut buf[..n]) {
-                            Some(m) => m,
-                            None => {
-                                stats.lock().unwrap().srtp_failed += 1;
-                                continue;
+                        Some(c) => {
+                            wire = Some(buf[..n].to_vec());
+                            match c.unprotect(&mut buf[..n]) {
+                                Some(m) => m,
+                                None => {
+                                    tap.record(from, local, wire.as_deref().unwrap_or_default());
+                                    stats.lock().unwrap().srtp_failed += 1;
+                                    continue;
+                                }
                             }
-                        },
+                        }
                         // DTLS-SRTP without keys yet: nothing can be read.
-                        None if dtls.is_some() => continue,
+                        None if dtls.is_some() => {
+                            tap.record(from, local, &buf[..n]);
+                            continue;
+                        }
                         None => n,
                     };
+                    match &wire {
+                        Some(w) => tap.record_srtp(from, local, w, &buf[..n]),
+                        None => tap.record(from, local, &buf[..n]),
+                    }
                     if sidetone_core::rtp::is_rtcp(&buf[..n]) {
                         // RTCP multiplexed on the RTP port (rtcp-mux).
                         let mut st = stats.lock().unwrap();
@@ -1560,11 +1574,16 @@ impl RtpSession {
                     }
                     first = false;
                 }
+                let mut plain: Option<Vec<u8>> = None;
                 if let Some(c) = srtp_tx.lock().unwrap().as_mut() {
+                    plain = Some(pkt.clone());
                     c.protect(&mut pkt);
                 }
                 if send_sock.send_to(&pkt, dest).is_ok() {
-                    tap.record(local, dest, &pkt);
+                    match &plain {
+                        Some(p) => tap.record_srtp(local, dest, &pkt, p),
+                        None => tap.record(local, dest, &pkt),
+                    }
                     let mut st = stats.lock().unwrap();
                     st.sent_packets += 1;
                     st.sent_octets += pkt.len().saturating_sub(12) as u64;

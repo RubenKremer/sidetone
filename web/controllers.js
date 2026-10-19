@@ -100,7 +100,8 @@ export class NativeController extends Emitter {
     }
   }
   async deleteHistory(ids) { await this.http.post("api/phone/history/delete", JSON.stringify({ call_ids: ids }), "application/json"); }
-  async capture() { return new Uint8Array(await (await this.http.get("api/phone/capture")).arrayBuffer()); }
+  // SRTP is decrypted for analysis and playback unless the wire form is asked for.
+  async capture(be, { wire = false } = {}) { return new Uint8Array(await (await this.http.get(`api/phone/capture${wire ? "" : "?decrypted=1"}`)).arrayBuffer()); }
   async clearCapture() { return this.cmd({ cmd: "clear_capture" }); }
   async recording(line) { return new Uint8Array(await (await this.http.get(`api/phone/recording?line=${line}`)).arrayBuffer()); }
   async dns(host) { return (await this.http.get(`api/diag/dns?host=${encodeURIComponent(host)}`)).json(); }

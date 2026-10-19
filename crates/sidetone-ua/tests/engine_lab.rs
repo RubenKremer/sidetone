@@ -336,6 +336,20 @@ fn transports_srtp_blf_conference() {
     });
     let c = e.state().calls.into_iter().find(|c| c.line == ls).unwrap();
     assert_eq!(c.srtp_failed, 0, "no SRTP authentication failures");
+    // The decrypted export carries the tone in clear RTP; the wire one does not.
+    assert!(e.state().capture_srtp);
+    let share = |bytes: &[u8]| {
+        let r = sidetone_core::analyze_bytes(bytes).unwrap();
+        r.streams
+            .iter()
+            .filter(|s| s.codec.starts_with("PCM"))
+            .filter_map(|s| sidetone_core::audio::stream_audio(bytes, s.id).ok())
+            .map(|a| pcm_tone_share(&a.pcm, a.rate as f64, 440.0))
+            .fold(0.0, f64::max)
+    };
+    let (dec, wire) = (share(&e.capture_decrypted()), share(&e.capture()));
+    println!("440 Hz share: decrypted {dec:.2}, on the wire {wire:.2}");
+    assert!(dec > 0.5 && wire < 0.3, "decrypted {dec}, wire {wire}");
     e.cmd(Cmd::Hangup(ls));
 
     // BLF on 3001 follows idle, ringing and busy while a calls b (over TCP).
@@ -648,6 +662,23 @@ fn dtls_srtp() {
 
 /// Share of the right channel (received audio) of a stereo recording that is
 /// a tone at `hz`, by the Goertzel algorithm (1.0 = pure tone).
+fn pcm_tone_share(pcm: &[i16], rate: f64, hz: f64) -> f64 {
+    let x: Vec<f64> = pcm.iter().map(|v| *v as f64).collect();
+    if x.is_empty() {
+        return 0.0;
+    }
+    let w = 2.0 * std::f64::consts::PI * hz / rate;
+    let (mut s1, mut s2) = (0.0f64, 0.0f64);
+    for v in &x {
+        let s0 = v + 2.0 * w.cos() * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    let p = s1 * s1 + s2 * s2 - 2.0 * w.cos() * s1 * s2;
+    let e: f64 = x.iter().map(|v| v * v).sum();
+    (2.0 * p / (e * x.len() as f64).max(1.0)).min(1.0)
+}
+
 fn tone_share(wav: &[u8], hz: f64) -> f64 {
     let rate = u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]) as f64;
     let data = &wav[44..];
@@ -823,4 +854,40 @@ fn rtcp_reports_with_asterisk() {
         "RTCP attached to a stream"
     );
     e.cmd(Cmd::HangupAll);
+}
+
+#[test]
+#[ignore]
+fn hep_copies_to_a_collector() {
+    let rx = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    rx.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let settings = PhoneSettings {
+        audio_source: "tone".into(),
+        hep_collector: rx.local_addr().unwrap().to_string(),
+        hep_agent_id: 77,
+        ..Default::default()
+    };
+    let a = acc("a", "2001", "secret2001", DtmfMode::Rfc4733);
+    let e = Engine::start(settings, vec![a], None);
+    wait_for(&e, "registered", 10, |e| {
+        e.state().accounts.iter().all(|a| a.state == "registered")
+    });
+    // The HEP copies, unwrapped, make a capture the analysis reads like any other.
+    let mut methods = Vec::new();
+    let mut buf = [0u8; 65536];
+    while let Ok(n) = rx.recv(&mut buf) {
+        let d = sidetone_core::net::decode_hep(&buf[..n]).expect("HEPv3");
+        let line = String::from_utf8_lossy(d.payload)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        methods.push(line);
+        if methods.iter().any(|m| m.starts_with("SIP/2.0 200")) {
+            break;
+        }
+    }
+    println!("HEP: {methods:?}");
+    assert!(methods.iter().any(|m| m.starts_with("REGISTER")));
+    assert!(methods.iter().any(|m| m.starts_with("SIP/2.0 200")));
 }

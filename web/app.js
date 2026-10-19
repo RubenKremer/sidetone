@@ -436,6 +436,8 @@ function renderStatus() {
   const live = liveLines().length;
   $("#st-lines").textContent = live ? `${live} call${live > 1 ? "s" : ""}` : "Idle";
   $("#st-cap").textContent = st ? `${st.capture_packets.toLocaleString()} packets captured` : "";
+  const dec = $("#tr-save-dec");
+  if (dec) dec.hidden = !(st && st.capture_srtp);
   $("#trace-count").textContent = S.trace.length ? S.trace.length.toLocaleString() : "";
   const e = $("#st-err");
   e.hidden = !S.errors;
@@ -1498,8 +1500,16 @@ function bindTrace() {
   });
   $("#tr-save").addEventListener("click", async () => {
     try {
-      const b = await S.ctl.capture(S.be);
+      const b = await S.ctl.capture(S.be, { wire: true });
       await download(b, `sidetone-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "")}.pcapng`, "application/vnd.tcpdump.pcap");
+    } catch (e) {
+      toast(e.message || String(e), 4000);
+    }
+  });
+  $("#tr-save-dec").addEventListener("click", async () => {
+    try {
+      const b = await S.ctl.capture(S.be);
+      await download(b, `sidetone-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "")}-decrypted.pcapng`, "application/vnd.tcpdump.pcap");
     } catch (e) {
       toast(e.message || String(e), 4000);
     }
@@ -1811,6 +1821,7 @@ function renderMedia() {
       .join("")}</tbody></table>
     <div class="rtp-player" id="rtp-player" hidden></div>
     ${streams.filter((s) => s.series && s.series.length > 1).map(qualityChart).join("")}
+    ${jitterBufferTable(streams)}
     ${rtcpTables(streams)}
     <p class="muted">MOS is an E-model (ITU-T G.107) estimate from loss and jitter at this capture point; network delay is approximated.</p>${webrtcBlock()}`;
 }
@@ -1826,6 +1837,24 @@ function rtcpCell(s) {
   if (s.rtt_ms != null) parts.push(`RTT ${s.rtt_ms.toFixed(0)} ms`);
   if (s.xr_mos != null) parts.push(`MOS ${s.xr_mos.toFixed(1)} (XR)`);
   return parts.length ? esc(parts.join(" · ")) : `<span class="muted">${s.rtcp && s.rtcp.length ? "SR" : "-"}</span>`;
+}
+
+// MOS through simulated jitter buffers: a late packet is as lost as a missing one.
+function jitterBufferTable(streams) {
+  const withJ = streams.filter((s) => s.jitter_buffers && s.jitter_buffers.length);
+  if (!withJ.length) return "";
+  const names = ["fixed 50 ms", "fixed 200 ms", "adaptive"];
+  const cell = (j) => {
+    if (!j) return "<td></td>";
+    const m = j.mos == null ? "n/a" : j.mos.toFixed(2);
+    const c = j.mos == null ? "" : j.mos < 3.1 ? "bad" : j.mos < 3.6 ? "warn" : "";
+    return `<td class="${c}"><b>${m}</b><br><span class="muted">${j.discarded} ${esc(t("late"))} · ${esc(t("loss"))} ${j.loss_pct.toFixed(1)}% · ${j.delay_ms.toFixed(0)} ms</span></td>`;
+  };
+  return `<details class="rtcp-reports jb-table"><summary>${esc(t("MOS through a jitter buffer"))}</summary>
+    <p class="muted">${esc(t("Packets that arrive after their playout time are dropped by the receiver's jitter buffer and count as lost; a bigger buffer drops fewer but adds delay."))}</p>
+    <table class="media"><thead><tr><th>Stream</th>${names.map((n) => `<th>${esc(t(n === "adaptive" ? "Adaptive (up to 500 ms)" : n === "fixed 50 ms" ? "Fixed 50 ms" : "Fixed 200 ms"))}</th>`).join("")}</tr></thead><tbody>${withJ
+      .map((s) => `<tr data-stream="${s.id}"><td>${esc(s.src)} → ${esc(s.dst)}<br><span class="muted">${esc(s.codec)}</span></td>${names.map((n) => cell(s.jitter_buffers.find((j) => j.name === n))).join("")}</tr>`)
+      .join("")}</tbody></table></details>`;
 }
 
 function rtcpTables(streams) {
@@ -3511,6 +3540,8 @@ async function renderGlobal(section) {
       ["capture", "Capture every SIP packet in memory for analysis and pcapng export", "bool"],
       ["capture_rtp", "Include RTP (needed for jitter, loss and MOS)", "bool"],
       ["record_calls", "Record the audio of every call (WAV)", "bool", "you can also press Record during a call"],
+      ["hep_collector", "HEP collector (Homer)", "text", "host:port, UDP; every SIP message is also sent there as HEPv3. Empty = off"],
+      ["hep_agent_id", "HEP capture agent ID", "number"],
     ];
     body.innerHTML = `<div class="set-head"><h1>Capture and recording</h1></div>
       <form class="set-form" id="g-form"><div class="fields">${fields.map((f, i) => fieldHtml(f, get(st, f[0]), `gf-${i}`)).join("")}</div>

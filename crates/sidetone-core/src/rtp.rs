@@ -116,6 +116,9 @@ pub struct RtpStream {
     pub rtt_ms: Option<f64>,
     /// Lowest MOS-LQ the receiver reported in RTCP XR.
     pub xr_mos: Option<f64>,
+    /// MOS as heard through simulated jitter buffers (fixed 50 ms, fixed
+    /// 200 ms, adaptive up to 500 ms): late packets count as lost.
+    pub jitter_buffers: Vec<JitterBufferMos>,
     /// Frame numbers of the first and last packet.
     pub first_frame: usize,
     pub last_frame: usize,
@@ -123,6 +126,79 @@ pub struct RtpStream {
     pub src_addr: Option<SocketAddr>,
     #[serde(skip)]
     pub dst_addr: Option<SocketAddr>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct JitterBufferMos {
+    /// "fixed 50 ms", "fixed 200 ms" or "adaptive".
+    pub name: String,
+    /// Mean buffer delay, ms.
+    pub delay_ms: f64,
+    /// Packets that arrived after their playout time.
+    pub discarded: u64,
+    /// Network loss plus discarded packets, percent of expected.
+    pub loss_pct: f64,
+    pub mos: Option<f64>,
+    pub r_factor: Option<f64>,
+}
+
+/// Plays `audio` (arrival ns, extended RTP timestamp) through a jitter
+/// buffer. Fixed buffers keep `start_ms`; the adaptive one grows by the
+/// lateness of a late packet (up to `max_ms`) and shrinks by 10 ms after
+/// 50 packets in a row with that much slack. Returns (mean delay ms, late).
+fn play_out(
+    audio: &[(i64, i64)],
+    clock: u32,
+    start_ms: f64,
+    max_ms: f64,
+    adaptive: bool,
+) -> (f64, u64) {
+    let Some(&(a0, t0)) = audio.first() else {
+        return (start_ms, 0);
+    };
+    let per_unit = 1e9 / clock as f64;
+    let mut buf = start_ms;
+    // Playout of timestamp t is base + (t - t0) * per_unit; base moves on
+    // resynchronization (a timestamp jump, or arrival far past the plan).
+    let (mut base, mut ts0) = (a0 as f64 + buf * 1e6, t0);
+    let (mut late, mut slack_run, mut delay_sum) = (0u64, 0u32, 0f64);
+    let mut prev_t = t0;
+    for &(a, t) in audio {
+        if (t - prev_t).abs() as f64 > clock as f64 * 2.0 {
+            base = a as f64 + buf * 1e6;
+            ts0 = t;
+        }
+        prev_t = t;
+        let due = base + (t - ts0) as f64 * per_unit;
+        let a = a as f64;
+        if a > due + 1e9 {
+            // Far behind the plan (a pause or clock drift): start over.
+            base = a + buf * 1e6;
+            ts0 = t;
+        } else if a > due {
+            late += 1;
+            if adaptive && buf < max_ms {
+                let grow = ((a - due) / 1e6 + 10.0).min(max_ms - buf);
+                buf += grow;
+                base += grow * 1e6;
+            }
+        } else if adaptive {
+            let slack = (due - a) / 1e6;
+            if slack > 20.0 && buf > start_ms {
+                slack_run += 1;
+                if slack_run >= 50 {
+                    let cut = 10.0f64.min(buf - start_ms);
+                    buf -= cut;
+                    base -= cut * 1e6;
+                    slack_run = 0;
+                }
+            } else {
+                slack_run = 0;
+            }
+        }
+        delay_sum += buf;
+    }
+    (delay_sum / audio.len() as f64, late)
 }
 
 /// Computes stream statistics from packets of one (src, dst, ssrc) flow.
@@ -188,6 +264,9 @@ pub fn compute_stream(
     let mut win: Vec<(u64, i64, i64, f64)> = Vec::new();
     let (mut silent, mut voiced, mut clip_sum, mut level_sum, mut level_n) =
         (0u64, 0u64, 0f64, 0f64, 0u64);
+    // Audio packets for the jitter buffer: (arrival, extended timestamp).
+    let mut audio: Vec<(i64, i64)> = Vec::new();
+    let mut ts_ext: Option<(u32, i64)> = None;
 
     for o in obs {
         received += 1;
@@ -265,6 +344,12 @@ pub fn compute_stream(
         if o.hdr.pt != main_pt {
             continue;
         }
+        let ext_ts = match ts_ext {
+            None => o.hdr.ts as i64,
+            Some((prev, e)) => e + o.hdr.ts.wrapping_sub(prev) as i32 as i64,
+        };
+        ts_ext = Some((o.hdr.ts, ext_ts));
+        audio.push((o.arrival_ns, ext_ts));
         let arrival_units = o.arrival_ns as f64 * clock as f64 / 1e9;
         let transit = arrival_units - o.hdr.ts as f64;
         if let Some(pt) = prev_transit {
@@ -311,6 +396,35 @@ pub fn compute_stream(
         emodel(&codec, loss_pct, jitter_ms)
     } else {
         (None, None)
+    };
+    audio.sort_by_key(|x| x.0);
+    let jitter_buffers = if unique >= 10 {
+        [
+            ("fixed 50 ms", 50.0, false),
+            ("fixed 200 ms", 200.0, false),
+            ("adaptive", 50.0, true),
+        ]
+        .iter()
+        .map(|(name, ms, adaptive)| {
+            let (delay, late) = play_out(&audio, clock, *ms, 500.0, *adaptive);
+            let lp = if expected > 0 {
+                ((lost.max(0) as u64 + late) as f64 * 100.0 / expected as f64).min(100.0)
+            } else {
+                0.0
+            };
+            let (r, m) = emodel_delay(&codec, lp, delay);
+            JitterBufferMos {
+                name: name.to_string(),
+                delay_ms: round2(delay),
+                discarded: late,
+                loss_pct: round2(lp),
+                mos: m,
+                r_factor: r,
+            }
+        })
+        .collect()
+    } else {
+        Vec::new()
     };
     // Windows: jitter carries over when a second had no audio packets.
     let mut series = Vec::with_capacity(win.len());
@@ -385,6 +499,7 @@ pub fn compute_stream(
         remote_jitter_ms: None,
         rtt_ms: None,
         xr_mos: None,
+        jitter_buffers,
         first_frame: obs.first().map(|o| o.frame).unwrap_or(0),
         last_frame: obs.last().map(|o| o.frame).unwrap_or(0),
         src_addr: Some(src),
@@ -400,6 +515,11 @@ fn round2(v: f64) -> f64 {
 /// capture point, so mouth-to-ear delay is approximated from packetization,
 /// a jitter buffer sized at twice the jitter, and a nominal 20 ms transit.
 pub fn emodel(codec: &str, loss_pct: f64, jitter_ms: f64) -> (Option<f64>, Option<f64>) {
+    emodel_delay(codec, loss_pct, 2.0 * jitter_ms)
+}
+
+/// E-model with an explicit jitter buffer delay in ms.
+pub fn emodel_delay(codec: &str, loss_pct: f64, buffer_ms: f64) -> (Option<f64>, Option<f64>) {
     let c = codec.to_ascii_uppercase();
     let (ie, bpl) = if c.starts_with("PCM") || c == "G711" {
         (0.0, 25.1)
@@ -416,7 +536,7 @@ pub fn emodel(codec: &str, loss_pct: f64, jitter_ms: f64) -> (Option<f64>, Optio
     } else {
         (0.0, 20.0)
     };
-    let ta = 20.0 + 20.0 + 2.0 * jitter_ms + 20.0;
+    let ta = 20.0 + 20.0 + buffer_ms + 20.0;
     let id = 0.024 * ta + if ta > 177.3 { 0.11 * (ta - 177.3) } else { 0.0 };
     let ppl = loss_pct.max(0.0);
     let ie_eff = ie + (95.0 - ie) * ppl / (ppl + bpl);
@@ -452,6 +572,40 @@ mod tests {
             payload_len: 160,
             head: [0; 4],
         }
+    }
+
+    #[test]
+    fn jitter_buffers_discard_late_packets() {
+        // Every 10th packet arrives 120 ms late, the rest on time.
+        let v: Vec<RtpObs> = (0..500u32)
+            .map(|i| {
+                let extra = if i % 10 == 5 { 120 } else { 0 };
+                pkt(i as u16, i * 160, i as i64 * 20 + extra)
+            })
+            .collect();
+        let s = compute_stream(
+            0,
+            "1.1.1.1:1".parse().unwrap(),
+            "2.2.2.2:2".parse().unwrap(),
+            &v,
+            &|_| 8000,
+            &|_| "PCMU".into(),
+            None,
+        );
+        let jb = |n: &str| {
+            s.jitter_buffers
+                .iter()
+                .find(|j| j.name == n)
+                .unwrap()
+                .clone()
+        };
+        let (f50, f200, ad) = (jb("fixed 50 ms"), jb("fixed 200 ms"), jb("adaptive"));
+        assert_eq!(f50.discarded, 50);
+        assert_eq!(f200.discarded, 0);
+        assert!(ad.discarded <= 2, "{ad:?}");
+        assert!(ad.delay_ms > 100.0, "{ad:?}");
+        assert!(f50.mos.unwrap() < f200.mos.unwrap());
+        assert!(f200.mos.unwrap() > 3.8, "{f200:?}");
     }
 
     #[test]

@@ -514,7 +514,12 @@ fn phone_api(m: &Method, path: &str, q: &HashMap<String, String>, body: &[u8]) -
             json_resp(json!({"ok": true}))
         }
         (Method::Get, "/api/phone/capture") => {
-            let b = phone::get().engine.capture();
+            let e = &phone::get().engine;
+            let b = if q.get("decrypted").is_some_and(|v| v == "1") {
+                e.capture_decrypted()
+            } else {
+                e.capture()
+            };
             ok_bytes(b, "application/octet-stream")
         }
         (Method::Get, "/api/phone/recording") => {

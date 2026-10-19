@@ -96,6 +96,19 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Receive HEPv3 from Kamailio, OpenSIPS, FreeSWITCH, Asterisk or heplify
+    /// (acting as a Homer collector) and save it as pcapng for analysis.
+    Hep {
+        /// Address to listen on (UDP).
+        #[arg(long, default_value = "0.0.0.0:9060")]
+        listen: String,
+        /// Where to write the capture.
+        #[arg(short, long, default_value = "hep.pcapng")]
+        out: PathBuf,
+        /// Stop after this many seconds (default: until Ctrl-C).
+        #[arg(long)]
+        seconds: Option<u64>,
+    },
     /// Write the built-in synthetic sample captures to a directory.
     Samples { dir: PathBuf },
     /// Print a default UA profile (JSON) to start from.
@@ -476,6 +489,11 @@ fn main() -> Result<()> {
                 );
             }
         },
+        Cmd::Hep {
+            listen,
+            out,
+            seconds,
+        } => hep_collect(&listen, &out, seconds)?,
         Cmd::Samples { dir } => {
             std::fs::create_dir_all(&dir)?;
             for (name, desc) in sidetone_core::synth::SCENARIOS {
@@ -615,5 +633,84 @@ fn main() -> Result<()> {
             no_token,
         } => serve::run(&listen, web, !no_token)?,
     }
+    Ok(())
+}
+
+/// Receives HEP datagrams and writes them, still wrapped, into a pcapng:
+/// the analysis unwraps HEP, so the file opens in Sidetone and in Wireshark.
+fn hep_collect(listen: &str, out: &std::path::Path, seconds: Option<u64>) -> Result<()> {
+    use sidetone_core::pcap::{write_pcapng, OutPacket, PcapngOptions, LINKTYPE_RAW};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let sock = std::net::UdpSocket::bind(listen).map_err(|e| anyhow!("{listen}: {e}"))?;
+    let local = sock.local_addr()?;
+    sock.set_read_timeout(Some(std::time::Duration::from_millis(250)))?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let s2 = stop.clone();
+    let _ = ctrlc::set_handler(move || s2.store(true, Ordering::SeqCst));
+    eprintln!(
+        "Listening for HEP on {local} (UDP). Ctrl-C to stop and save {}.",
+        out.display()
+    );
+    let until = seconds.map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
+    let mut pkts: Vec<(i64, Vec<u8>)> = Vec::new();
+    let mut buf = vec![0u8; 65536];
+    while !stop.load(Ordering::SeqCst) && until.is_none_or(|u| std::time::Instant::now() < u) {
+        let Ok((n, from)) = sock.recv_from(&mut buf) else {
+            continue;
+        };
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        if let Some(d) = sidetone_core::net::decode_hep(&buf[..n]) {
+            let first = d
+                .payload
+                .split(|b| *b == b'\r' || *b == b'\n')
+                .next()
+                .unwrap_or_default();
+            println!(
+                "{} -> {}  {}",
+                d.src,
+                d.dst,
+                String::from_utf8_lossy(&first[..first.len().min(100)])
+            );
+        } else {
+            eprintln!("{from}: not HEPv3 ({n} bytes), kept anyway");
+        }
+        pkts.push((
+            ts,
+            sidetone_core::net::build_udp_packet(from, local, &buf[..n]),
+        ));
+    }
+    let list: Vec<OutPacket> = pkts
+        .iter()
+        .map(|(t, d)| OutPacket {
+            ts_ns: *t,
+            linktype: LINKTYPE_RAW,
+            data: d,
+            orig_len: d.len() as u32,
+            comment: None,
+        })
+        .collect();
+    std::fs::write(
+        out,
+        write_pcapng(
+            &list,
+            &PcapngOptions {
+                user_appl: Some(format!(
+                    "Sidetone {} HEP collector",
+                    env!("CARGO_PKG_VERSION")
+                )),
+                ..Default::default()
+            },
+        ),
+    )?;
+    eprintln!(
+        "{} HEP packets saved to {}. Open it with: sidetone analyze {}",
+        pkts.len(),
+        out.display(),
+        out.display()
+    );
     Ok(())
 }

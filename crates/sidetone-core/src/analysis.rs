@@ -111,6 +111,8 @@ pub struct Summary {
     pub calls: usize,
     pub rtp_streams: usize,
     pub rtcp_packets: usize,
+    /// Packets unwrapped from HEP (Homer) encapsulation.
+    pub hep_packets: usize,
     pub tls_packets: usize,
     pub undecoded_packets: usize,
     pub start_ns: i64,
@@ -180,6 +182,9 @@ pub fn analyze_capture(cap: Capture) -> Report {
             summary.undecoded_packets += 1;
             continue;
         };
+        if d.hep && d.transport == Transport::Udp {
+            summary.hep_packets += 1;
+        }
         match d.transport {
             Transport::Udp => {
                 if sip::looks_like_sip(d.payload) {
@@ -229,6 +234,22 @@ pub fn analyze_capture(cap: Capture) -> Report {
                             level_db,
                             clipped,
                         });
+                }
+            }
+            Transport::Tcp if d.hep => {
+                // HEP carries whole SIP messages, one per packet.
+                summary.hep_packets += 1;
+                if let Some(m) = sip::parse_datagram(d.payload) {
+                    push_message(
+                        &mut messages,
+                        m,
+                        frame,
+                        p,
+                        d.src,
+                        d.dst,
+                        Transport::Tcp,
+                        start_ns,
+                    );
                 }
             }
             Transport::Tls => {
