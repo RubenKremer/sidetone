@@ -20,8 +20,9 @@ use std::time::Duration;
     about = "SIP softphone and call analyzer for troubleshooting"
 )]
 struct Cli {
+    /// Without a command (e.g. a double click), the app starts and opens in the browser.
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
@@ -213,6 +214,9 @@ enum Cmd {
         /// Disable the API access token (only on trusted networks).
         #[arg(long)]
         no_token: bool,
+        /// Open the interface in the default browser.
+        #[arg(long)]
+        open: bool,
     },
 }
 
@@ -391,7 +395,21 @@ fn audio_source(a: Audio, wav: &Option<PathBuf>) -> Result<AudioSource> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    match cli.cmd {
+    // No command: run as an app. Port 8640 when free, any free port otherwise.
+    let cmd = cli.cmd.unwrap_or_else(|| {
+        let listen = if std::net::TcpListener::bind("127.0.0.1:8640").is_ok() {
+            "127.0.0.1:8640"
+        } else {
+            "127.0.0.1:0"
+        };
+        Cmd::Serve {
+            listen: listen.into(),
+            web: None,
+            no_token: false,
+            open: true,
+        }
+    });
+    match cmd {
         Cmd::Analyze {
             file,
             call,
@@ -638,7 +656,8 @@ fn main() -> Result<()> {
             listen,
             web,
             no_token,
-        } => serve::run(&listen, web, !no_token)?,
+            open,
+        } => serve::run(&listen, web, !no_token, open)?,
     }
     Ok(())
 }

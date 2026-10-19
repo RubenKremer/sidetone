@@ -798,16 +798,35 @@ pub fn spawn(
     Ok((url, h))
 }
 
-pub fn run(listen: &str, web: Option<PathBuf>, use_token: bool) -> Result<()> {
+pub fn run(listen: &str, web: Option<PathBuf>, use_token: bool, open: bool) -> Result<()> {
     let (url, h) = spawn(listen, web, use_token, None)?;
+    if open {
+        open_browser(&url);
+    }
     // Ctrl+C or SIGTERM: hang up and unregister before leaving.
     let _ = ctrlc::set_handler(|| {
         phone::shutdown();
         std::process::exit(0);
     });
     eprintln!(
-        "Sidetone UI: {url}\n(the token protects the API from other local pages; Ctrl+C to stop)"
+        "Sidetone UI: {url}\n(the token protects the API from other local pages; Ctrl+C or closing this window stops Sidetone)"
     );
     let _ = h.join();
     Ok(())
+}
+
+/// Opens `url` in the default browser; failure only leaves the printed URL.
+fn open_browser(url: &str) {
+    let r = if cfg!(target_os = "windows") {
+        std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
+            .spawn()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(url).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(url).spawn()
+    };
+    if let Err(e) = r {
+        eprintln!("could not open a browser ({e}); open the address above by hand");
+    }
 }

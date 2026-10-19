@@ -45,12 +45,21 @@ pub struct Phone {
     dir: Option<PathBuf>,
 }
 
-/// Per-user configuration directory (SIDETONE_CONFIG_DIR overrides it).
+/// Per-user configuration directory. SIDETONE_CONFIG_DIR overrides it, and a
+/// `sidetone-data` folder next to the executable makes a portable copy keep
+/// everything there (on a USB stick, say).
 pub fn config_dir() -> Option<PathBuf> {
     if let Ok(d) = std::env::var("SIDETONE_CONFIG_DIR") {
         if !d.is_empty() {
             return Some(PathBuf::from(d));
         }
+    }
+    if let Some(d) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|p| p.join("sidetone-data")))
+        .filter(|d| d.is_dir())
+    {
+        return Some(d);
     }
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
     let home = PathBuf::from(home);
