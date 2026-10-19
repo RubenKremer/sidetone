@@ -278,6 +278,7 @@ the URL are not shown.
 Desktop download:
 
 - The URL must be `http` or `https`. Private and LAN addresses are allowed.
+  The request `User-Agent` is `Sidetone/` plus the app version.
 - The request times out after 15 seconds. The body must be at most 256 KiB
   and UTF-8.
 - Redirects stay on `http` or `https`. An `https` URL does not follow a

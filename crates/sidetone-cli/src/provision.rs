@@ -11,6 +11,7 @@ use std::time::Duration;
 use ureq::{AgentBuilder, RedirectAuthHeaders};
 
 const MAX_BODY: usize = 256 * 1024;
+const USER_AGENT: &str = concat!("Sidetone/", env!("CARGO_PKG_VERSION"));
 
 /// Downloads provisioning XML and returns native `parse` JSON (does not persist).
 pub fn fetch_provision(url: &str, tls_verify: bool) -> Result<Value> {
@@ -51,6 +52,7 @@ pub fn fetch_provision(url: &str, tls_verify: bool) -> Result<Value> {
 fn build_agent(tls_verify: bool, https: bool) -> ureq::Agent {
     let mut b = AgentBuilder::new()
         .timeout(Duration::from_secs(15))
+        .user_agent(USER_AGENT)
         .redirect_auth_headers(RedirectAuthHeaders::SameHost);
     if https {
         b = b.https_only(true);
@@ -217,6 +219,28 @@ mod tests {
     use tiny_http::{Header, Response, Server, StatusCode};
 
     const MIN_XML: &str = r#"<?xml version="1.0"?><sidetone-provision version="1"><account.1.user>2001</account.1.user><account.1.domain>pbx.example.com</account.1.domain><account.1.display_name>Lab</account.1.display_name></sidetone-provision>"#;
+
+    fn user_agent(req: &tiny_http::Request) -> Option<String> {
+        req.headers().iter().find_map(|h| {
+            h.field
+                .equiv("User-Agent")
+                .then(|| h.value.as_str().to_string())
+        })
+    }
+
+    #[test]
+    fn sends_sidetone_user_agent() {
+        let seen = Arc::new(Mutex::new(None));
+        let seen2 = seen.clone();
+        let base = run_server(move |req| {
+            *seen2.lock().unwrap() = user_agent(&req);
+            let _ = req.respond(Response::from_string(MIN_XML));
+        });
+        fetch_provision(&format!("{base}/cfg.xml"), true).expect("provision");
+        let ua = seen.lock().unwrap().clone().unwrap_or_default();
+        assert_eq!(ua, format!("Sidetone/{}", env!("CARGO_PKG_VERSION")));
+        assert!(!ua.to_ascii_lowercase().contains("ureq"));
+    }
 
     #[test]
     fn rejects_non_http_scheme_without_server() {
