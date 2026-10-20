@@ -12,6 +12,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23172033'/%3E%3Cpath d='M9 7v18M23 7v18M9 12h14M23 19H9' stroke='%23F5C400' stroke-width='2.4' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 </head>
 <body>
+<a class="skip" href="#ws">Skip to the workspace</a>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <defs>
     <symbol id="i-call" viewBox="0 0 24 24"><path d="M5 4h3l2 5-2.5 1.5a11 11 0 0 0 6 6L15 14l5 2v3a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z"/></symbol>
@@ -46,12 +47,12 @@
     <span>Sidetone</span>
   </div>
   <nav class="ws-tabs" role="tablist" aria-label="Workspace">
-    <button type="button" role="tab" data-ws="calls" aria-selected="true">Calls</button>
-    <button type="button" role="tab" data-ws="trace">SIP trace <b id="trace-count"></b></button>
-    <button type="button" role="tab" data-ws="analysis">Analysis</button>
-    <button type="button" role="tab" data-ws="diag">Diagnostics</button>
-    <button type="button" role="tab" data-ws="settings">Settings</button>
-    <button type="button" role="tab" data-ws="help">Help</button>
+    <button type="button" role="tab" id="wstab-calls" aria-controls="page-calls" data-ws="calls" aria-selected="true">Calls</button>
+    <button type="button" role="tab" id="wstab-trace" aria-controls="page-trace" data-ws="trace">SIP trace <b id="trace-count"></b></button>
+    <button type="button" role="tab" id="wstab-analysis" aria-controls="page-analysis" data-ws="analysis">Analysis</button>
+    <button type="button" role="tab" id="wstab-diag" aria-controls="page-diag" data-ws="diag">Diagnostics</button>
+    <button type="button" role="tab" id="wstab-settings" aria-controls="page-settings" data-ws="settings">Settings</button>
+    <button type="button" role="tab" id="wstab-help" aria-controls="help-page" data-ws="help">Help</button>
   </nav>
   <div class="bar-right">
     <button type="button" class="icon-btn compact-only" id="c-back" title="Back to the phone"><svg><use href="#i-back"/></svg></button>
@@ -59,10 +60,15 @@
     <button type="button" class="icon-btn compact-only" id="c-settings" title="Settings"><svg><use href="#i-gear"/></svg></button>
     <button type="button" class="icon-btn compact-only" id="c-full" title="Troubleshooting mode: trace, analysis and diagnostics"><svg><use href="#i-expand"/></svg></button>
     <button type="button" class="btn small ai-btn" id="ai-toggle" aria-expanded="false"><svg><use href="#i-ai"/></svg>Ask AI</button>
-    <label class="btn small" for="file">Open capture<input id="file" type="file" accept=".pcap,.pcapng,.cap" hidden></label>
-    <button class="btn small ghost" type="button" id="explain-toggle" aria-pressed="true" title="Show or hide the explanations (Explanation tab, SDP line by line, header help)">Explanations</button>
-    <button class="btn small ghost" type="button" id="mode" title="Troubleshooting shows the trace, analysis and diagnostics; Phone only keeps the calling features">Mode</button>
-    <button class="btn small ghost" type="button" id="theme" title="Switch light or dark">Theme</button>
+    <button type="button" class="btn small" id="file-btn">Open capture</button><input id="file" type="file" accept=".pcap,.pcapng,.cap" class="sr-only" tabindex="-1" aria-hidden="true">
+    <div class="menu" data-menu="view">
+      <button class="icon-btn" type="button" aria-haspopup="true" aria-expanded="false" id="view-btn" title="View: mode, explanations, theme"><svg><use href="#i-opts"/></svg></button>
+      <div class="menu-list right view-menu" role="menu">
+        <div class="view-row"><span>Mode</span><div class="seg" role="group" aria-label="Mode"><button type="button" id="mode-phone" data-mode="phone">Phone only</button><button type="button" id="mode-trouble" data-mode="troubleshoot">Troubleshooting</button></div></div>
+        <div class="view-row"><span>Theme</span><div class="seg" role="group" aria-label="Theme"><button type="button" data-theme="system">Auto</button><button type="button" data-theme="light">Light</button><button type="button" data-theme="dark">Dark</button></div></div>
+        <label class="check view-row"><input type="checkbox" id="explain-toggle" checked> <span>Explanations <small>Explanation tab, SDP line by line, header help</small></span></label>
+      </div>
+    </div>
   </div>
 </header>
 
@@ -96,6 +102,7 @@
       <datalist id="dial-history"></datalist>
       <button type="button" class="icon-btn" id="opts-toggle" title="Options for the next call" aria-expanded="false"><svg><use href="#i-opts"/></svg></button>
     </div>
+    <div class="err dial-err" id="dial-err" hidden role="alert"></div>
     <div class="opts" id="opts" hidden>
       <label>Extra headers for the next call <span class="hint">one per line, Name: value</span>
         <textarea id="opt-headers" rows="2" spellcheck="false" placeholder="X-Test-Case: 42"></textarea></label>
@@ -173,7 +180,7 @@
   <div class="ws-col">
   <main class="ws" id="ws">
     <!-- Calls -->
-    <section class="ws-page" data-page="calls">
+    <section role="tabpanel" aria-labelledby="wstab-calls" class="ws-page" data-page="calls" id="page-calls">
       <div class="page-head">
         <h1>Calls</h1>
         <div class="row">
@@ -192,10 +199,11 @@
         </section>
         <section class="card events-card">
           <div class="sect-head"><h2>Phone events</h2><button type="button" class="linklike" id="events-clear">Clear</button></div>
+          <p class="empty-note" id="events-empty">Registrations, calls, DTMF and transfers show here as they happen.</p>
           <ol class="events" id="events"></ol>
         </section>
       </div>
-      <section class="card">
+      <section class="card hist-wrap">
         <div class="sect-head"><h2>History <b id="hist-count"></b></h2></div>
         <div class="hist-tools">
           <input id="hist-filter" placeholder="Number, name, code or Call-ID" spellcheck="false" aria-label="Filter history">
@@ -217,18 +225,18 @@
           <button type="button" class="btn small" id="hist-del" disabled>Delete selected</button>
           <button type="button" class="btn small" id="hist-csv">Export CSV</button>
         </div>
-        <table class="hist">
+        <div class="table-wrap"><table class="hist">
           <thead><tr><th><input type="checkbox" id="hist-all" aria-label="Select all"></th><th></th><th>Remote</th><th>Started</th><th>Duration</th><th>Result</th><th>Codec</th><th title="Worst MOS estimate of the call's RTP">MOS</th><th>Account</th><th></th></tr></thead>
           <tbody id="hist"></tbody>
-        </table>
+        </table></div>
         <p class="empty-note" id="hist-empty">No calls yet.</p>
-        <p class="hint">Click a call to see its full SIP, ladder, findings and explanation; double-click opens it in Analysis.</p>
+        <p class="hint">Click a call to see its full SIP, ladder, findings and explanation here; Analyze opens it in Analysis.</p>
       </section>
       <section class="card hist-detail" id="hist-detail" hidden></section>
     </section>
 
     <!-- SIP trace -->
-    <section class="ws-page trace-page" data-page="trace" hidden>
+    <section role="tabpanel" aria-labelledby="wstab-trace" class="ws-page trace-page" data-page="trace" hidden id="page-trace">
       <div class="page-head">
         <h1>SIP trace</h1>
         <div class="row">
@@ -251,9 +259,10 @@
     </section>
 
     <!-- Analysis -->
-    <section class="ws-page analysis-page" data-page="analysis" hidden>
+    <section role="tabpanel" aria-labelledby="wstab-analysis" class="ws-page analysis-page" data-page="analysis" hidden id="page-analysis">
       <div class="an-empty" id="an-empty">
         <h1>Analyze a capture</h1>
+        <p class="err" id="an-load-err" hidden role="alert"></p>
         <p class="muted">Calls made with Sidetone are captured automatically: use <b>Analyze</b> on the phone or in the call history. You can also drop a pcap or pcapng from Wireshark, tcpdump, sngrep or an SBC anywhere on this page. Analysis runs <span id="where">in this browser</span>; nothing is uploaded. Or try an example with a known problem:</p>
         <div class="sample-grid" id="sample-grid"></div>
       </div>
@@ -293,19 +302,19 @@
           </section>
           <section class="detail" aria-label="Details">
             <div class="tabs" role="tablist">
-              <button role="tab" data-tab="explain" aria-selected="true">Explanation</button>
-              <button role="tab" data-tab="findings">Findings <b id="n-findings"></b></button>
-              <button role="tab" data-tab="message">Message</button>
-              <button role="tab" data-tab="media">Media <b id="n-media"></b></button>
-              <button role="tab" data-tab="log">Trace log</button>
-              <button role="tab" data-tab="ai">Ask AI</button>
+              <button type="button" role="tab" id="dtab-explain" aria-controls="tab-explain" data-tab="explain" aria-selected="true">Explanation</button>
+              <button type="button" role="tab" id="dtab-findings" aria-controls="tab-findings" data-tab="findings">Findings <b id="n-findings"></b></button>
+              <button type="button" role="tab" id="dtab-message" aria-controls="tab-message" data-tab="message">Message</button>
+              <button type="button" role="tab" id="dtab-media" aria-controls="tab-media" data-tab="media">Media <b id="n-media"></b></button>
+              <button type="button" role="tab" id="dtab-log" aria-controls="tab-log" data-tab="log">Trace log</button>
+              <button type="button" role="tab" id="dtab-ai" aria-controls="tab-ai" data-tab="ai">Ask AI</button>
             </div>
-            <div class="tab-body" id="tab-explain"></div>
-            <div class="tab-body" id="tab-findings" hidden></div>
-            <div class="tab-body" id="tab-message" hidden></div>
-            <div class="tab-body" id="tab-media" hidden></div>
-            <div class="tab-body" id="tab-log" hidden></div>
-            <div class="tab-body" id="tab-ai" hidden>
+            <div class="tab-body" id="tab-explain" role="tabpanel" aria-labelledby="dtab-explain"></div>
+            <div class="tab-body" id="tab-findings" role="tabpanel" aria-labelledby="dtab-findings" hidden></div>
+            <div class="tab-body" id="tab-message" role="tabpanel" aria-labelledby="dtab-message" hidden></div>
+            <div class="tab-body" id="tab-media" role="tabpanel" aria-labelledby="dtab-media" hidden></div>
+            <div class="tab-body" id="tab-log" role="tabpanel" aria-labelledby="dtab-log" hidden></div>
+            <div class="tab-body" id="tab-ai" role="tabpanel" aria-labelledby="dtab-ai" hidden>
               <form id="ai-form" class="ai-form">
                 <p class="ai-using"><span id="ai-using"></span> <button type="button" class="linklike" data-goto-ai>Change in Settings</button></p>
                 <label class="check"><input type="checkbox" id="ai-redact" checked> Mask numbers, names, credentials and public IPs before sending</label>
@@ -326,7 +335,7 @@
     </section>
 
     <!-- Diagnostics -->
-    <section class="ws-page" data-page="diag" hidden>
+    <section role="tabpanel" aria-labelledby="wstab-diag" class="ws-page" data-page="diag" hidden id="page-diag">
       <div class="page-head"><h1>Diagnostics</h1></div>
       <div class="diag-grid">
         <section class="card">
@@ -395,10 +404,10 @@
     </section>
 
     <!-- Help and About -->
-    <section class="ws-page" data-page="help" hidden id="help-page"></section>
+    <section role="tabpanel" aria-labelledby="wstab-help" class="ws-page" data-page="help" hidden id="help-page"></section>
 
     <!-- Settings -->
-    <section class="ws-page" data-page="settings" hidden>
+    <section role="tabpanel" aria-labelledby="wstab-settings" class="ws-page" data-page="settings" hidden id="page-settings">
       <div class="settings">
         <nav class="set-nav" aria-label="Settings sections">
           <div class="set-nav-head"><span>Accounts</span><button type="button" class="linklike" id="acc-add">Add</button></div>

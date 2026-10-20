@@ -67,6 +67,8 @@ export class NativeController extends Emitter {
       if (trace.length) this.trSeq = trace[trace.length - 1].seq;
       this.emit({ state: d.state, events, trace });
     } catch (e) {
+      // A render error is not a lost engine: say which it was.
+      console.error("state update failed", e);
       if (++this.failures === 3) this.emit({ error: `Lost contact with the Sidetone engine: ${e.message || e}` });
     } finally {
       this.polling = false;

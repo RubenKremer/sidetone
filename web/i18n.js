@@ -124,7 +124,7 @@ const T = {
   "Mode": ["Modo", "Modo", "Modus"],
   "Mode: phone only": ["Modo: só telefone", "Modo: solo teléfono", "Modus: nur Telefon"],
   "Mode: troubleshooting": ["Modo: troubleshooting", "Modo: diagnóstico", "Modus: Fehlersuche"],
-  "Phone only: the trace, analysis and diagnostics are hidden. Click Mode to bring them back.": ["Só telefone: trace, análise e diagnóstico ficam ocultos. Clique em Modo para voltar.", "Solo teléfono: la traza, el análisis y el diagnóstico quedan ocultos. Pulsa Modo para volver.", "Nur Telefon: Trace, Analyse und Diagnose sind ausgeblendet. Auf Modus klicken, um sie zurückzuholen."],
+  "Phone only: the trace, analysis and diagnostics are hidden.": ["Só telefone: trace, análise e diagnóstico ficam escondidos.", "Solo teléfono: la traza, el análisis y el diagnóstico quedan ocultos.", "Nur Telefon: Trace, Analyse und Diagnose sind ausgeblendet."],
   "Troubleshooting: trace, analysis and diagnostics are back.": ["Troubleshooting: trace, análise e diagnóstico voltaram.", "Diagnóstico: la traza, el análisis y el diagnóstico han vuelto.", "Fehlersuche: Trace, Analyse und Diagnose sind zurück."],
   "Troubleshooting shows the trace, analysis and diagnostics; Phone only keeps the calling features": ["Troubleshooting mostra trace, análise e diagnóstico; Só telefone deixa só as funções de chamada", "Diagnóstico muestra la traza, el análisis y el diagnóstico; Solo teléfono deja las funciones de llamada", "Fehlersuche zeigt Trace, Analyse und Diagnose; Nur Telefon behält die Anruffunktionen"],
   "SDP explained line by line": ["SDP explicado linha a linha", "SDP explicado línea a línea", "SDP Zeile für Zeile erklärt"],
@@ -172,7 +172,7 @@ const T = {
   "calls deleted from the history": ["chamadas excluídas do histórico", "llamadas borradas del historial", "Anrufe aus dem Verlauf gelöscht"],
   "From date": ["Data de", "Fecha desde", "Datum von"],
   "To date": ["Data até", "Fecha hasta", "Datum bis"],
-  "Click a call to see its full SIP, ladder, findings and explanation; double-click opens it in Analysis.": ["Clique numa chamada para ver o SIP completo, o ladder, os achados e a explicação; duplo clique abre na Análise.", "Haz clic en una llamada para ver el SIP completo, el ladder, los hallazgos y la explicación; doble clic la abre en Análisis.", "Einen Anruf anklicken, um SIP, Ladder, Befunde und Erklärung zu sehen; Doppelklick öffnet ihn in der Analyse."],
+  "Click a call to see its full SIP, ladder, findings and explanation here; Analyze opens it in Analysis.": ["Clique numa chamada para ver aqui o SIP completo, o ladder, os achados e a explicação; Analisar abre em Análise.", "Haz clic en una llamada para ver aquí el SIP completo, el ladder, los hallazgos y la explicación; Analizar la abre en Análisis.", "Einen Anruf anklicken, um hier das vollständige SIP, das Leiterdiagramm, die Befunde und die Erklärung zu sehen; Analysieren öffnet ihn in der Analyse."],
   "Click: details here. Double-click: open in Analysis.": ["Clique: detalhes aqui. Duplo clique: abrir na Análise.", "Clic: detalles aquí. Doble clic: abrir en Análisis.", "Klick: Details hier. Doppelklick: in der Analyse öffnen."],
   "offer": ["oferta", "oferta", "Angebot"],
   "answer": ["resposta", "respuesta", "Antwort"],
@@ -352,6 +352,32 @@ const T = {
   "French": ["Francês", "Francés", "Französisch"],
   "Chinese (Simplified)": ["Chinês (simplificado)", "Chino (simplificado)", "Chinesisch (vereinfacht)"],
   "Hindi": ["Hindi", "Hindi", "Hindi"],
+  "Delete this account?": ["Apagar esta conta?", "¿Eliminar esta cuenta?", "Dieses Konto löschen?"],
+  "Clear the whole call history? Saved captures of these calls are deleted too.": ["Limpar todo o histórico de chamadas? As capturas salvas dessas chamadas também são apagadas.", "¿Borrar todo el historial de llamadas? Las capturas guardadas de esas llamadas también se eliminan.", "Den ganzen Anrufverlauf löschen? Die gespeicherten Mitschnitte dieser Anrufe werden ebenfalls gelöscht."],
+  "Clear the trace and the packets captured so far? Calls in the history keep their own capture.": ["Limpar o trace e os pacotes capturados até agora? As chamadas do histórico mantêm a própria captura.", "¿Borrar la traza y los paquetes capturados hasta ahora? Las llamadas del historial conservan su propia captura.", "Trace und bisher mitgeschnittene Pakete löschen? Anrufe im Verlauf behalten ihren eigenen Mitschnitt."],
+  "Discard the unsaved changes?": ["Descartar as alterações não salvas?", "¿Descartar los cambios sin guardar?", "Ungespeicherte Änderungen verwerfen?"],
+  "You have unsaved changes.": ["Você tem alterações não salvas.", "Tienes cambios sin guardar.", "Es gibt ungespeicherte Änderungen."],
+  "Changing the language reloads the page: the open capture and unsaved settings are lost. Continue?": ["Trocar o idioma recarrega a página: a captura aberta e as configurações não salvas se perdem. Continuar?", "Cambiar el idioma recarga la página: la captura abierta y los ajustes sin guardar se pierden. ¿Continuar?", "Ein Sprachwechsel lädt die Seite neu: der offene Mitschnitt und ungespeicherte Einstellungen gehen verloren. Fortfahren?"],
+  "Switched to troubleshooting mode": ["Mudou para o modo troubleshooting", "Cambiado al modo troubleshooting", "In den Troubleshooting-Modus gewechselt"],
+  "Profile overrides are not valid JSON": ["As sobrescritas do perfil não são JSON válido", "Las sobrescrituras del perfil no son JSON válido", "Die Profil-Überschreibungen sind kein gültiges JSON"],
+  "Could not read": ["Não foi possível ler", "No se pudo leer", "Konnte nicht lesen"],
+  "Not saved": ["Não salvo", "No guardado", "Nicht gespeichert"],
+  "Open the account": ["Abrir a conta", "Abrir la cuenta", "Konto öffnen"],
+  "No account yet: add one in Settings and its REGISTER shows here.": ["Ainda sem conta: adicione uma em Configurações e o REGISTER dela aparece aqui.", "Sin cuenta todavía: añade una en Configuración y su REGISTER aparece aquí.", "Noch kein Konto: in den Einstellungen eines anlegen, dann erscheint sein REGISTER hier."],
+  "SIP messages sent and received by the phone appear here live. Make a call to see one.": ["As mensagens SIP enviadas e recebidas pelo telefone aparecem aqui ao vivo. Faça uma chamada para ver.", "Los mensajes SIP enviados y recibidos por el teléfono aparecen aquí en vivo. Haz una llamada para verlos.", "Vom Telefon gesendete und empfangene SIP-Nachrichten erscheinen hier live. Einen Anruf machen, um eine zu sehen."],
+  "View: mode, explanations, theme": ["Exibição: modo, explicações, tema", "Vista: modo, explicaciones, tema", "Ansicht: Modus, Erklärungen, Design"],
+  "Phone only": ["Só telefone", "Solo teléfono", "Nur Telefon"],
+  "Troubleshooting": ["Troubleshooting", "Diagnóstico", "Troubleshooting"],
+  "Auto": ["Auto", "Auto", "Auto"],
+  "Light": ["Claro", "Claro", "Hell"],
+  "Dark": ["Escuro", "Oscuro", "Dunkel"],
+  "Explanation tab, SDP line by line, header help": ["Aba Explicação, SDP linha a linha, ajuda dos cabeçalhos", "Pestaña Explicación, SDP línea a línea, ayuda de cabeceras", "Erklärungs-Tab, SDP Zeile für Zeile, Header-Hilfe"],
+  "Theme": ["Tema", "Tema", "Design"],
+  "No calls right now: dial a number or wait for one.": ["Nenhuma chamada agora: disque um número ou aguarde uma.", "Ninguna llamada ahora: marca un número o espera una.", "Gerade kein Anruf: eine Nummer wählen oder auf einen warten."],
+  "No calls yet: calls you make or receive are listed here with their capture.": ["Ainda sem chamadas: as chamadas feitas ou recebidas aparecem aqui com a captura.", "Sin llamadas todavía: las llamadas hechas o recibidas aparecen aquí con su captura.", "Noch keine Anrufe: geführte und empfangene Anrufe erscheinen hier mit ihrem Mitschnitt."],
+  "No calls yet: add an account in Settings first.": ["Ainda sem chamadas: primeiro adicione uma conta em Configurações.", "Sin llamadas todavía: primero añade una cuenta en Configuración.", "Noch keine Anrufe: zuerst in den Einstellungen ein Konto anlegen."],
+  "Registrations, calls, DTMF and transfers show here as they happen.": ["Registros, chamadas, DTMF e transferências aparecem aqui conforme acontecem.", "Registros, llamadas, DTMF y transferencias aparecen aquí según ocurren.", "Registrierungen, Anrufe, DTMF und Weiterleitungen erscheinen hier, sobald sie passieren."],
+  "Peer": ["Par", "Par", "Gegenstelle"],
   "Presence not published": ["Presença não publicada", "Presencia no publicada", "Presence nicht veröffentlicht"],
   "Available": ["Disponível", "Disponible", "Verfügbar"],
   "Away": ["Ausente", "Ausente", "Abwesend"],
@@ -950,7 +976,11 @@ export function initI18n() {
   }).observe(document.body, { childList: true, subtree: true });
 }
 
-export function setLang(code) {
+/// Switches the language. `guard` may veto the reload (unsaved work).
+export function setLang(code, guard) {
+  if (code === lang) return true;
+  if (guard && !guard()) return false;
   try { localStorage.setItem("sidetone.lang", code); } catch { /* storage unavailable */ }
   location.reload();
+  return true;
 }

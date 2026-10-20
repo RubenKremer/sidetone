@@ -130,6 +130,8 @@ async function pickBackend() {
 // ---------- state ----------
 
 const S = {
+  scroll: {}, // scrollTop per workspace
+  tab: "explain", // analysis detail tab
   hiddenEnded: new Set(),
   picked: new Set(), // dialogs ticked for a combined ladder
   be: null,
@@ -152,6 +154,8 @@ window.__sidetone = S;
 function toast(text, ms = 2800) {
   const t = $("#toast");
   t.textContent = text;
+  // A long timeout is how callers mark a problem: red edge instead of green.
+  t.classList.toggle("bad", ms >= 4000);
   t.classList.add("show");
   clearTimeout(toast.h);
   toast.h = setTimeout(() => t.classList.remove("show"), ms);
@@ -199,11 +203,102 @@ const levelPct = (v) => {
 
 // ---------- workspace ----------
 
-function showWs(name) {
+// Only touches the DOM when the HTML changed, so focus, selection and the
+// text the user is copying survive the state polling.
+function setHtml(el, html) {
+  if (!el) return;
+  if (el.dataset.sig === html) return;
+  el.dataset.sig = html;
+  el.innerHTML = html;
+}
+
+// Live durations are rendered as <span data-since="ms"> and ticked in place.
+const durSpan = (since, cls = "") => `<span class="${cls}" data-since="${since}">${dur(Date.now() - since)}</span>`;
+function tickDurations() {
+  const now = Date.now();
+  $$("[data-since]").forEach((el) => {
+    const v = dur(now - +el.dataset.since);
+    if (el.textContent !== v) el.textContent = v;
+  });
+}
+
+// Work that a page reload would lose.
+const unsavedWork = () => Boolean((S.bytes && !LIVE.on) || SET.dirty || DOCK.turns.length);
+const langGuard = () => !unsavedWork() || confirm(t("Changing the language reloads the page: the open capture and unsaved settings are lost. Continue?"));
+
+const PAGES = ["calls", "trace", "analysis", "diag", "settings", "help"];
+
+// The URL mirrors where the user is (?page=, &set= for a settings section or
+// account, &tab= in Analysis), so reload, Back and links land on the same view.
+function syncUrl(push = false) {
+  const q = new URLSearchParams();
+  q.set("page", S.page);
+  if (S.page === "settings") {
+    if (SET.section) q.set("set", SET.section);
+    else if (SET.accId) q.set("set", `acc:${SET.accId}`);
+  }
+  if (S.page === "analysis" && S.tab && S.tab !== "explain") q.set("tab", S.tab);
+  const url = `?${q}`;
+  if (url === location.search) return;
+  try {
+    if (push) history.pushState({ page: S.page }, "", url);
+    else history.replaceState({ page: S.page }, "", url);
+  } catch {
+    /* file:// or sandboxed */
+  }
+}
+
+// Arrow keys, Home and End move between the tabs of a tablist.
+function tablistKeys(list) {
+  list.addEventListener("keydown", (e) => {
+    const tabs = $$('[role="tab"]:not([hidden])', list);
+    const i = tabs.indexOf(document.activeElement);
+    if (i < 0) return;
+    const j = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+    if (j == null) return;
+    e.preventDefault();
+    const tgt = tabs[(j + tabs.length) % tabs.length];
+    tgt.focus();
+    tgt.click();
+  });
+}
+
+// A wide ladder (many columns) scrolls sideways; the edge fade says so.
+function ladderScrollHint() {
+  const el = $("#ladder");
+  if (!el) return;
+  const wrap = el.closest(".ladder-wrap");
+  const check = () => wrap && wrap.classList.toggle("scroll-x", el.scrollWidth > el.clientWidth + 2 && el.scrollLeft + el.clientWidth < el.scrollWidth - 2);
+  check();
+  if (!el.dataset.scrollHint) {
+    el.dataset.scrollHint = "1";
+    el.addEventListener("scroll", check, { passive: true });
+    window.addEventListener("resize", check);
+  }
+}
+
+function showWs(name, push = true) {
+  if (!PAGES.includes(name)) name = "calls";
+  // Phone-only mode has no trace, analysis or diagnostics: leaving it is explicit.
+  if (document.body.classList.contains("phone-mode") && ["trace", "analysis", "diag"].includes(name)) {
+    if (!document.body.classList.contains("compact")) {
+      store.set("sidetone.mode", "troubleshoot");
+      S.applyMode && S.applyMode("troubleshoot");
+      toast(t("Switched to troubleshooting mode"));
+    } else {
+      name = "calls";
+    }
+  }
+  // Scroll position is kept per page.
+  if (S.page && S.page !== name) S.scroll[S.page] = $("#ws") ? $("#ws").scrollTop : 0;
   $$(".ws-tabs [data-ws]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.ws === name)));
   $$(".ws-page").forEach((p) => (p.hidden = p.dataset.page !== name));
+  const changed = S.page !== name;
   S.page = name;
   store.set("sidetone.page", name);
+  if (changed && push) syncUrl(true);
+  else syncUrl(false);
+  if ($("#ws")) $("#ws").scrollTop = S.scroll[name] || 0;
   if (name === "trace") renderTrace(true);
   if (name === "diag") diagOpen();
   if (name === "settings") settingsOpen();
@@ -217,7 +312,7 @@ function showWs(name) {
       version: S.version,
       mode: t(engineModeLabel()),
       langs: LANGS,
-      onLang: setLang,
+      onLang: (c) => setLang(c, langGuard),
     });
   }
 }
@@ -306,10 +401,10 @@ function renderAccounts() {
   }
   const a = currentAccount();
   $("#acct-dot").className = `dot ${regClass(a)}`;
-  $("#acct-state").textContent = t(accountStateText(a));
-  $("#acct-state").classList.toggle("bad", regClass(a) === "bad");
-  // A problem with the account: one click opens it in Settings.
-  $("#acct-state").classList.toggle("link", !!a && regClass(a) === "bad");
+  const bad = !!a && regClass(a) === "bad";
+  // A problem with the account: a real button opens it in Settings.
+  setHtml($("#acct-state"), `${esc(t(accountStateText(a)))}${bad ? ` <button type="button" class="linklike" data-open-acc="${esc(a.id)}">${esc(t("Open the account"))}</button>` : ""}`);
+  $("#acct-state").classList.toggle("bad", bad);
 }
 
 const BLF_TEXT = { idle: "Free", ringing: "Ringing", busy: "Busy", error: "Error", unknown: "Unknown" };
@@ -319,7 +414,7 @@ function renderBlf() {
   const a = currentAccount();
   const items = a && a.blf ? a.blf : [];
   $("#blf-box").hidden = !items.length;
-  $("#blf").innerHTML = items
+  setHtml($("#blf"), items
     .map((b) => {
       // A watched phone that is not registered reads as Offline, not Free.
       const lamp = b.presence === "offline" && b.state === "idle" ? "" : t(BLF_TEXT[b.state] || b.state);
@@ -330,7 +425,7 @@ function renderBlf() {
       const title = [b.detail, b.presence ? `${t("Presence")}: ${t(PRES_TEXT[b.presence] || b.presence)}${b.note ? ` (${b.note})` : ""}` : ""].filter(Boolean).join("\n");
       return `<button type="button" class="blf-item blf-${esc(b.state)}${b.presence ? ` pres-${esc(b.presence)}` : ""}" data-dial="${esc(b.target)}" title="${esc(title)}"><span class="dot"></span><span class="blf-t">${esc(b.target)}</span><span class="blf-s">${esc(sub)}</span></button>`;
     })
-    .join("");
+    .join(""));
   // Call forwarding in force.
   const fs = S.st ? S.st.settings : {};
   const fwd = [
@@ -376,9 +471,9 @@ function renderLines() {
   const max = S.st ? S.st.settings.max_lines : 1;
   $("#lines-count").textContent = ls.length ? `${live} of ${S.ctl.features.multiLine ? max : 1}` : "";
   const now = Date.now();
-  $("#lines").innerHTML = ls
+  setHtml($("#lines"), ls
     .map((l) => {
-      const tm = l.state === "connected" && l.answered_ms ? dur(now - l.answered_ms) : l.state === "ended" ? (l.answered_ms ? dur((l.ended_ms || now) - l.answered_ms) : "") : dur(now - l.started_ms);
+      const tm = l.state === "connected" && l.answered_ms ? durSpan(l.answered_ms) : l.state === "ended" ? (l.answered_ms ? dur((l.ended_ms || now) - l.answered_ms) : "") : durSpan(l.started_ms);
       const stTxt = l.state === "connected" && l.held ? "On hold" : l.state === "connected" && l.remote_held ? "Held by remote" : STATE_TEXT[l.state] || l.state;
       const multi = S.st && S.st.accounts.length > 1;
       const meta = [
@@ -405,7 +500,7 @@ function renderLines() {
         ${meta ? `<div class="ln-meta">${meta}</div>` : ""}${actions}
       </li>`;
     })
-    .join("");
+    .join(""));
 }
 
 function renderControls() {
@@ -583,7 +678,7 @@ async function dial(target) {
     try {
       req.overrides = JSON.parse(ov);
     } catch (e) {
-      toast(`Profile overrides are not valid JSON: ${e.message}`, 5000);
+      dialError(`${t("Profile overrides are not valid JSON")}: ${e.message}`);
       return;
     }
   }
@@ -591,9 +686,24 @@ async function dial(target) {
   const cc = S.ctl.features.overrides ? readCodecPicker($("#opt-codecs"), null) : null;
   if (cc && cc.length) req.overrides = { ...(req.overrides || {}), codecs: cc };
   rememberDialed(target);
-  const r = await cmd(req);
+  dialError("");
+  let r;
+  try {
+    r = await S.ctl.cmd(req);
+  } catch (e) {
+    // The reason stays under the dial field until the next attempt.
+    dialError(e.message || String(e));
+    return null;
+  }
   if (r && r.line) S.sel = r.line;
   return r;
+}
+
+function dialError(text) {
+  const el = $("#dial-err");
+  if (!el) return;
+  el.hidden = !text;
+  el.textContent = text;
 }
 
 async function callOrAnswer() {
@@ -663,6 +773,8 @@ const LIVE = { on: false, line: null, busy: false, last: 0, size: -1, endedAt: 0
 /// the Calls page in phone-only mode.
 function followCall(lineId) {
   if (!store.get("sidetone.follow_calls", true)) return;
+  // Never pull the user away from a form they are editing or from Help.
+  if ((S.page === "settings" && SET.dirty) || S.page === "help") return;
   if (document.body.classList.contains("phone-mode")) {
     if (!document.body.classList.contains("compact")) showWs("calls");
     return;
@@ -700,7 +812,9 @@ async function liveTick(force = false) {
       return;
     }
   }
-  if (!force && (S.page !== "analysis" || now - LIVE.last < 1500)) return;
+  // Signaling settles once the call is up: refresh every 4 s then, 1.5 s otherwise.
+  const settled = l && l.state === "connected" && LIVE.sipCount === (S.report ? S.report.summary.sip_messages : -1);
+  if (!force && (S.page !== "analysis" || now - LIVE.last < (settled ? 4000 : 1500))) return;
   if (PL.src) return; // do not cut the RTP player
   LIVE.busy = true;
   LIVE.last = now;
@@ -709,6 +823,7 @@ async function liveTick(force = false) {
     if (!force && bytes.length === LIVE.size) return;
     LIVE.size = bytes.length;
     await liveLoad(bytes, l ? l.call_id : "");
+    LIVE.sipCount = S.report ? S.report.summary.sip_messages : -1;
   } catch {
     /* nothing captured yet */
   } finally {
@@ -791,10 +906,10 @@ function bindPhone() {
     renderAccounts();
     renderStatus();
   });
-  $("#acct-state").addEventListener("click", () => {
-    const a = currentAccount();
-    if (!a || !$("#acct-state").classList.contains("link")) return;
-    SET.accId = a.id;
+  $("#acct-state").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-open-acc]");
+    if (!b) return;
+    SET.accId = b.dataset.openAcc;
     SET.section = null;
     showWs("settings");
   });
@@ -928,6 +1043,16 @@ function bindPhone() {
       dial(b.dataset.dial);
     }
   });
+  $("#lines").addEventListener("keydown", (e) => {
+    const li = e.target.closest && e.target.closest("li[data-line]");
+    if (!li || e.target !== li) return;
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      const l = line(+li.dataset.line);
+      if (l && l.state === "incoming") cmd({ cmd: "answer", line: l.line });
+      else li.click();
+    }
+  });
   $("#lines").addEventListener("click", (e) => {
     const li = e.target.closest("li[data-line]");
     if (!li) return;
@@ -995,6 +1120,10 @@ function bindPhone() {
     if (e.key === "Escape") {
       if ($$(".menu.open").length) return;
       if (!$("#xfer").hidden) return closeXfer();
+      // Esc ends a call only from the phone panel or with nothing focused;
+      // anywhere else it is for closing menus, dialogs and suggestion boxes.
+      const inPhone = e.target === document.body || (e.target.closest && e.target.closest(".phone"));
+      if ($("#prov-dialog").open || !inPhone) return;
       if (l && l.state !== "ended") {
         e.preventDefault();
         hangupSel();
@@ -1025,10 +1154,7 @@ function bindPhone() {
   }
   renderDialHistory();
   setInterval(() => {
-    if (liveLines().length) {
-      renderLines();
-      if (S.page === "calls") renderActive();
-    }
+    if (liveLines().length) tickDurations();
   }, 1000);
   $("#active-body").addEventListener("click", (e) => {
     const tr = e.target.closest("tr[data-line]");
@@ -1086,17 +1212,18 @@ function renderActive() {
     const where = a.server || a.domain || "";
     return `<div class="reg-row"><span class="dot ${cls}"></span><b>${esc(accLabel(a))}</b> <span class="mono">sip:${esc(a.user)}@${esc(a.domain || "")}${tp !== "UDP" && tp !== "WSS" ? `;transport=${tp.toLowerCase()}` : ""}</span> <span class="${cls === "bad" ? "bad" : "muted"}">${esc(t(accountStateText(a)))}</span> <span class="tag">${esc(tp)}</span>${where ? ` <span class="muted mono">${esc(where)}</span>` : ""}</div>`;
   }).join("");
-  $("#active-regs").innerHTML = accRows;
+  setHtml($("#active-regs"), accRows);
+  $(".active-card").classList.toggle("quiet", !ls.length);
   if (!ls.length) {
-    box.innerHTML = `<p class="empty-note">${esc(t("No calls right now."))}</p>`;
+    setHtml(box, `<p class="empty-note">${esc(t(S.st && S.st.accounts.length ? "No calls right now: dial a number or wait for one." : "No calls right now."))}</p>`);
     return;
   }
   const now = Date.now();
   const accs = S.st ? S.st.accounts : [];
   const tr = (acc) => (S.ctl.kind === "web" ? "WSS" : acc ? acc.transport || "UDP" : "");
-  box.innerHTML = `<table class="hist active"><thead><tr><th>${esc(t("Line"))}</th><th></th><th>${esc(t("Number"))}</th><th>${esc(t("State"))}</th><th>${esc(t("Duration"))}</th><th>${esc(t("Codec"))}</th><th>${esc(t("Transport"))}</th><th>${esc(t("Media"))}</th><th>RTP ↑ / ↓</th><th title="${esc(t("Received: our loss and jitter. Far end: what it reports in RTCP about what we send. RTT from RTCP."))}">${esc(t("Quality"))}</th><th>${esc(t("Account"))}</th><th>${esc(t("Last action"))}</th></tr></thead><tbody>${ls
+  setHtml(box, `<div class="table-wrap"><table class="hist active"><thead><tr><th>${esc(t("Line"))}</th><th></th><th>${esc(t("Number"))}</th><th>${esc(t("State"))}</th><th>${esc(t("Duration"))}</th><th>${esc(t("Codec"))}</th><th>${esc(t("Transport"))}</th><th>${esc(t("Media"))}</th><th>RTP ↑ / ↓</th><th title="${esc(t("Received: our loss and jitter. Far end: what it reports in RTCP about what we send. RTT from RTCP."))}">${esc(t("Quality"))}</th><th>${esc(t("Account"))}</th><th>${esc(t("Last action"))}</th></tr></thead><tbody>${ls
     .map((l) => {
-      const d = l.answered_ms ? (l.ended_ms || now) - l.answered_ms : null;
+      const d = l.answered_ms ? (l.ended_ms ? dur(l.ended_ms - l.answered_ms) : durSpan(l.answered_ms)) : "";
       const acc = accs.find((a) => a.id === l.account);
       const media = l.srtp ? (l.security || "SRTP").replace(/, fingerprint verified$/, " ✓") : l.state === "connected" ? "RTP" : "";
       const flags = [l.held ? t("on hold") : "", l.remote_held ? t("held by far end") : "", l.muted ? t("muted") : "", l.conference ? `${t("Conference")} L${l.conference}` : ""].filter(Boolean).join(", ");
@@ -1105,7 +1232,7 @@ function renderActive() {
         <td><svg class="hi"><use href="#i-${l.direction === "in" ? "in" : "out"}"/></svg></td>
         <td><b>${esc(l.remote_name || "")}</b> <span class="mono">${esc(l.remote)}</span></td>
         <td><span class="badge st-${l.state}">${esc(t(STATE_TEXT[l.state] || l.state))}</span>${flags ? ` <span class="muted">${esc(flags)}</span>` : ""}</td>
-        <td class="num">${d == null ? "" : dur(d)}</td>
+        <td class="num">${d}</td>
         <td class="num">${esc(l.codec || "")}</td>
         <td class="num">${esc(tr(acc))}</td>
         <td>${esc(media)}</td>
@@ -1114,7 +1241,7 @@ function renderActive() {
         <td>${esc(acc ? accLabel(acc) : l.account || "")}</td>
         <td class="${l.action_ok === false ? "bad" : l.action_ok ? "ok" : ""}">${esc(l.action ? t(l.action) : "")}</td></tr>`;
     })
-    .join("")}</tbody></table>`;
+    .join("")}</tbody></table></div>`);
 }
 
 function renderCallDetail() {
@@ -1123,19 +1250,18 @@ function renderCallDetail() {
   if (!l) {
     // No call: the same fields, empty, so the card keeps its shape.
     const keys = ["Direction", "Account", "Call-ID", "Talk time", "Codec", "Media encryption", "Local media", "Remote media", "RTP sent / received", "Result"];
-    body.innerHTML = `<div class="cd-head"><span class="badge">${esc(t("No call"))}</span></div><dl class="kv empty">${keys.map((k) => `<dt>${esc(t(k))}</dt><dd>-</dd>`).join("")}</dl>`;
+    setHtml(body, `<div class="cd-head"><span class="badge">${esc(t("No call"))}</span></div><dl class="kv empty">${keys.map((k) => `<dt>${esc(t(k))}</dt><dd>-</dd>`).join("")}</dl>`);
     renderRecordings();
     return;
   }
-  const now = Date.now();
   const m = (s) => `<span class="mono">${esc(s)}</span>`;
-  body.innerHTML = `
+  const html = `
     <div class="cd-head"><span class="badge st-${l.state}">${esc(STATE_TEXT[l.state] || l.state)}</span><b>${esc(l.remote_name || "")}</b> ${m(l.remote)}</div>
     ${kv([
       ["Direction", l.direction === "in" ? "Incoming" : "Outgoing"],
       ["Account", esc(accName(l.account))],
       ["Call-ID", m(l.call_id)],
-      ["Talk time", l.answered_ms ? dur((l.ended_ms || now) - l.answered_ms) : ""],
+      ["Talk time", l.answered_ms ? (l.ended_ms ? dur(l.ended_ms - l.answered_ms) : durSpan(l.answered_ms)) : ""],
       ["Codec", esc(l.codec || "")],
       ["Media encryption", S.ctl.kind !== "native" && l.state === "connected" ? "DTLS-SRTP (WebRTC)" : l.srtp ? `${esc(l.security || "SRTP")}${l.srtp_failed ? ` <span class="bad">${l.srtp_failed} packets failed authentication</span>` : ""}` : l.state === "connected" ? "none (RTP)" : ""],
       ["Local media", l.local_media ? m(l.local_media) : ""],
@@ -1148,16 +1274,17 @@ function renderCallDetail() {
       ["Ended by", esc(l.ended_by || "")],
     ])}
     <div class="row">
-      <button type="button" class="btn small primary" id="cd-explain">${esc(t("Explain this call"))}</button>
-      <button type="button" class="btn small" id="cd-analyze">Analyze this call</button>
+      <button type="button" class="btn small primary" id="cd-analyze">${esc(t("Analyze"))}</button>
       <button type="button" class="btn small" id="cd-trace">${esc(t("Show in SIP trace"))}</button>
       ${l.recording && S.ctl.features.record ? `<button type="button" class="btn small" id="cd-rec">Download recording</button>` : ""}
     </div>`;
+  if (body.dataset.sig === html) {
+    renderRecordings();
+    return;
+  }
+  body.dataset.sig = html;
+  body.innerHTML = html;
   $("#cd-analyze").addEventListener("click", () => analyzeLine(l.call_id));
-  $("#cd-explain").addEventListener("click", async () => {
-    await analyzeLine(l.call_id);
-    showTab("explain");
-  });
   $("#cd-trace").addEventListener("click", () => {
     showWs("trace");
     const sel = $("#tr-call");
@@ -1220,8 +1347,10 @@ function renderEvents(newOnes) {
   const fmt = (e) => `<li class="ev-${esc(e.kind)}"><span class="ev-t">${clock(e.ts_ms)}</span><span class="ev-k">${esc(EV_KIND[e.kind] || e.kind)}${e.line ? ` L${e.line}` : ""}</span><span class="ev-x">${esc(e.text)}</span></li>`;
   if (!newOnes) {
     ol.innerHTML = S.events.slice(-300).reverse().map(fmt).join("");
+    $("#events-empty").hidden = S.events.length > 0;
     return;
   }
+  $("#events-empty").hidden = true;
   ol.insertAdjacentHTML("afterbegin", newOnes.slice().reverse().map(fmt).join(""));
   while (ol.children.length > 300) ol.lastElementChild.remove();
 }
@@ -1258,24 +1387,32 @@ function historyRows() {
   });
 }
 
+/// Fetches the history, then draws it. Filters only redraw (renderHistoryRows).
 async function renderHistory() {
   try {
     S.history = await S.ctl.history();
   } catch {
     S.history = [];
   }
+  renderHistoryRows();
+}
+
+function renderHistoryRows() {
   const rows = historyRows();
+  const byId = (id) => rows.find((h) => h.call_id === id);
   for (const id of [...HSEL]) if (!S.history.some((h) => h.call_id === id)) HSEL.delete(id);
   $("#hist-count").textContent = S.history.length ? (rows.length === S.history.length ? `${rows.length}` : `${rows.length} / ${S.history.length}`) : "";
   $("#hist-empty").hidden = rows.length > 0;
-  $("#hist-empty").textContent = t(S.history.length ? "No call matches the filters." : "No calls yet.");
+  $("#hist-empty").textContent = t(S.history.length ? "No call matches the filters." : S.st && S.st.accounts.length ? "No calls yet: calls you make or receive are listed here with their capture." : "No calls yet: add an account in Settings first.");
+  $(".hist-tools").hidden = !S.history.length;
+  $(".hist-wrap").classList.toggle("quiet", !S.history.length);
   $("#hist").innerHTML = rows
     .slice(0, 500)
-    .map((h, i) => {
+    .map((h) => {
       const missed = h.direction === "in" && !h.answered;
       const icon = missed ? "missed" : h.direction === "in" ? "in" : "out";
       const result = h.answered ? "Answered" : resultText(h.final_code, h.reason) || "Not answered";
-      return `<tr class="${missed ? "missed" : ""}${S.histSel === h.call_id ? " sel" : ""}" data-hrow="${i}" title="${esc(t("Click: details here. Double-click: open in Analysis."))}">
+      return `<tr class="${missed ? "missed" : ""}${S.histSel === h.call_id ? " sel" : ""}" data-hrow="${esc(h.call_id)}" tabindex="0">
         <td><input type="checkbox" data-hsel="${esc(h.call_id)}" ${HSEL.has(h.call_id) ? "checked" : ""} aria-label="${esc(t("Select"))}"></td>
         <td><svg class="hi" aria-label="${icon}"><use href="#i-${icon}"/></svg></td>
         <td>${h.remote_name ? `<b>${esc(h.remote_name)}</b> ` : ""}<span class="mono">${esc(h.remote)}</span></td>
@@ -1285,7 +1422,7 @@ async function renderHistory() {
         <td>${codecCell(h)}</td>
         <td class="num ${h.mos == null ? "" : h.mos < 3.1 ? "bad" : h.mos < 3.6 ? "warn" : ""}" title="${h.loss_pct != null ? esc(`${t("loss")} ${h.loss_pct.toFixed(1)}%`) : ""}">${h.mos == null ? "" : h.mos.toFixed(1)}</td>
         <td class="muted">${esc(accName(h.account))}</td>
-        <td class="acts"><button type="button" class="linklike" data-redial="${i}">Call</button> <button type="button" class="linklike" data-han="${i}">Analyze</button> <button type="button" class="linklike del" data-hdel="${i}" title="${esc(t("Delete from history"))}">✕</button></td>
+        <td class="acts"><button type="button" class="linklike" data-redial="${esc(h.call_id)}">Call</button> <button type="button" class="linklike" data-han="${esc(h.call_id)}">Analyze</button> <button type="button" class="linklike del" data-hdel="${esc(h.call_id)}" title="${esc(t("Delete from history"))}">✕</button></td>
       </tr>`;
     })
     .join("");
@@ -1295,31 +1432,37 @@ async function renderHistory() {
   $("#hist").onclick = async (e) => {
     const r = e.target.closest("[data-redial]");
     if (r) {
-      const h = rows[+r.dataset.redial];
+      const h = byId(r.dataset.redial);
+      if (!h) return;
       $("#dial").value = h.remote;
       dial(h.remote);
+      return;
     }
     const a = e.target.closest("[data-han]");
-    if (a) openHistoryCall(rows[+a.dataset.han], true);
-    const row = e.target.closest("[data-hrow]");
-    if (row && !e.target.closest("button, input, a")) {
-      clearTimeout(S.histClick);
-      // Wait a moment so a double click does not load twice.
-      S.histClick = setTimeout(() => openHistoryCall(rows[+row.dataset.hrow], false), 220);
-    }
+    if (a) return openHistoryCall(byId(a.dataset.han), true);
     const d = e.target.closest("[data-hdel]");
     if (d) {
-      const id = rows[+d.dataset.hdel].call_id;
-      HSEL.delete(id);
-      await S.ctl.deleteHistory([id]);
+      const h = byId(d.dataset.hdel);
+      if (!h || !confirm(`${t("Delete from history")}: ${h.remote}?`)) return;
+      HSEL.delete(h.call_id);
+      await S.ctl.deleteHistory([h.call_id]);
       renderHistory();
+      return;
     }
-  };
-  $("#hist").ondblclick = (e) => {
     const row = e.target.closest("[data-hrow]");
-    if (!row || e.target.closest("button, input, a")) return;
-    clearTimeout(S.histClick);
-    openHistoryCall(rows[+row.dataset.hrow], true);
+    if (row && !e.target.closest("button, input, a")) openHistoryCall(byId(row.dataset.hrow), false);
+  };
+  $("#hist").onkeydown = (e) => {
+    const row = e.target.closest && e.target.closest("tr[data-hrow]");
+    if (!row || e.target !== row) return;
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      openHistoryCall(byId(row.dataset.hrow), e.key === "Enter" && e.shiftKey);
+    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const n = e.key === "ArrowDown" ? row.nextElementSibling : row.previousElementSibling;
+      if (n) n.focus();
+    }
   };
   $("#hist").onchange = (e) => {
     const c = e.target.closest("[data-hsel]");
@@ -1341,7 +1484,7 @@ function codecCell(h) {
   const parts = [];
   if (h.offer_codecs && h.offer_codecs.length) parts.push(`${t("offer")} ${h.offer_codecs.join(", ")}`);
   if (h.answer_codecs && h.answer_codecs.length) parts.push(`${t("answer")} ${h.answer_codecs.join(", ")}`);
-  return `${used ? `<b class="mono">${esc(used)}</b>` : ""}${dtmf ? ` <span class="tag">DTMF 4733</span>` : ""}${parts.length ? `<div class="muted small mono">${esc(parts.join(" · "))}</div>` : ""}`;
+  return `<div class="codec-cell">${used ? `<b class="mono">${esc(used)}</b>` : ""}${dtmf ? ` <span class="tag">DTMF 4733</span>` : ""}${parts.length ? `<div class="muted small mono" title="${esc(parts.join(" · "))}">${esc(parts.join(" · "))}</div>` : ""}</div>`;
 }
 
 /// Loads one call from the history into Analysis (its saved capture, or the
@@ -1349,7 +1492,7 @@ function codecCell(h) {
 async function openHistoryCall(h, go) {
   if (!h) return;
   S.histSel = h.call_id;
-  $$("#hist tr").forEach((r) => r.classList.toggle("sel", r.dataset.hrow != null && historyRows()[+r.dataset.hrow]?.call_id === h.call_id));
+  $$("#hist tr").forEach((r) => r.classList.toggle("sel", r.dataset.hrow === h.call_id));
   const box = $("#hist-detail");
   box.hidden = false;
   box.innerHTML = `<p class="muted">${esc(t("Loading the call"))}…</p>`;
@@ -1464,6 +1607,8 @@ function traceCallOptions() {
   const calls = traceCalls();
   const sig = [...calls.values()].map((c) => `${c.id}:${c.status}`).join("|");
   if (sel.dataset.sig === sig) return;
+  // Rebuilding the options closes an open dropdown: wait until it is not in use.
+  if (document.activeElement === sel) return;
   sel.dataset.sig = sig;
   const keep = sel.value;
   const res = (c) => (c.status == null ? t("in progress") : c.status < 300 ? t("answered") : String(c.status));
@@ -1514,7 +1659,7 @@ function traceRow(t) {
     <span class="tr-d">${t.dir === "out" ? "→" : "←"}</span>
     <span class="tr-a">${esc(t.dir === "out" ? t.dst : t.src)}</span>
     <span class="tr-f">${esc(t.first_line)}</span>
-    <span class="tr-c">${esc(t.call_id.slice(0, 14))}</span>
+    <span class="tr-c" title="${esc(t.call_id)}">${esc(t.call_id.length > 14 ? `${t.call_id.slice(0, 12)}…` : t.call_id)}</span>
   </div>`;
 }
 
@@ -1540,7 +1685,9 @@ function renderTrace(scroll) {
   S.trCalls = traceCallSet();
   const list = $("#tr-list");
   const rows = S.trace.filter(traceVisible).slice(-3000);
-  list.innerHTML = rows.length ? rows.map(traceRow).join("") : `<p class="empty-note pad">${S.trace.length ? "No messages match the filter." : "SIP messages sent and received by the phone appear here live."}</p>`;
+  const emptyText = S.trace.length ? t("No messages match the filter.") : !currentAccount() ? t("No account yet: add one in Settings and its REGISTER shows here.") : t("SIP messages sent and received by the phone appear here live. Make a call to see one.");
+  const head = `<div class="tr-row tr-head" aria-hidden="true"><span class="tr-t">${esc(t("Time"))}</span><span class="tr-d"></span><span class="tr-a">${esc(t("Peer"))}</span><span class="tr-f">${esc(t("Message"))}</span><span class="tr-c">Call-ID</span></div>`;
+  list.innerHTML = rows.length ? head + rows.map(traceRow).join("") : `<p class="empty-note pad">${esc(emptyText)}</p>`;
   if (scroll) list.scrollTop = list.scrollHeight;
 }
 
@@ -1573,6 +1720,7 @@ function bindTrace() {
     if (!S.trPaused) renderTrace(true);
   });
   $("#tr-clear").addEventListener("click", async () => {
+    if (S.trace.length && !confirm(t("Clear the trace and the packets captured so far? Calls in the history keep their own capture."))) return;
     S.trace = [];
     S.trSel = null;
     $("#tr-view").innerHTML = "";
@@ -1611,9 +1759,14 @@ async function load(bytes, name, webrtc = null) {
     const report = await S.be.analyze(bytes);
     Object.assign(S, { bytes, name, report, call: null, msg: null, webrtc, picked: new Set() });
   } catch (e) {
-    toast(`Could not read ${name}: ${e.message || e}`, 5000);
+    // The reason stays on the empty page, where the file was dropped.
+    const err = $("#an-load-err");
+    err.hidden = false;
+    err.textContent = `${t("Could not read")} ${name}: ${e.message || e}`;
+    if (S.page !== "analysis") showWs("analysis");
     return;
   }
+  $("#an-load-err").hidden = true;
   $("#an-empty").hidden = true;
   $("#an").hidden = false;
   const s = S.report.summary;
@@ -1692,12 +1845,13 @@ async function selectCall(i, user = false) {
         ${c.pdd_ms != null ? `<div><dt>Post-dial delay</dt><dd>${(c.pdd_ms / 1000).toFixed(2)} s</dd></div>` : ""}
         ${c.talk_s != null ? `<div><dt>Talk</dt><dd>${c.talk_s.toFixed(1)} s</dd></div>` : ""}
         ${c.ended_by ? `<div><dt>Ended by</dt><dd>${esc(c.ended_by)}</dd></div>` : ""}
-        ${c.offer_codecs.length ? `<div><dt>Offer</dt><dd>${esc(c.offer_codecs.join(", "))}</dd></div>` : ""}
-        ${c.answer_codecs.length ? `<div><dt>Answer</dt><dd>${esc(c.answer_codecs.join(", "))}</dd></div>` : ""}
+        ${c.offer_codecs.length ? `<div><dt>Offer</dt><dd>${esc([...new Set(c.offer_codecs)].join(", "))}</dd></div>` : ""}
+        ${c.answer_codecs.length ? `<div><dt>Answer</dt><dd>${esc([...new Set(c.answer_codecs)].join(", "))}</dd></div>` : ""}
         ${c.user_agents.length ? `<div><dt>Agents</dt><dd>${esc(c.user_agents.join(" / "))}</dd></div>` : ""}
       </dl>`
     : `<h2>All messages</h2>`;
   $("#ladder").innerHTML = multi && S.be.ladderCalls ? await S.be.ladderCalls(S.bytes, picked) : await S.be.ladder(S.bytes, i);
+  ladderScrollHint();
   markLadderMatches();
   renderFindings();
   renderMedia();
@@ -1884,7 +2038,7 @@ function renderMedia() {
     return;
   }
   const cls = (v, w, b) => (v >= b ? "bad" : v >= w ? "warn" : "");
-  $("#tab-media").innerHTML = `<table class="media"><thead><tr>
+  $("#tab-media").innerHTML = `<div class="table-wrap"><table class="media"><thead><tr>
       <th></th><th>Stream</th><th>Codec</th><th>Packets</th><th>Lost</th><th>Loss</th><th>Jitter</th><th>Max jitter</th><th>Max gap</th><th>ptime</th><th>MOS est.</th><th title="${esc(t("What the receiver reports in RTCP: loss, jitter, round trip; MOS from RTCP XR"))}">RTCP</th><th title="${esc(t("Share of the decoded audio that is silent (G.711)"))}">${esc(t("Silent"))}</th><th>DTMF</th></tr></thead><tbody>
     ${streams
       .map(
@@ -1900,7 +2054,7 @@ function renderMedia() {
         <td class="${s.silence_pct >= 95 ? "bad" : ""}">${s.silence_pct == null ? "" : `${s.silence_pct.toFixed(0)}%`}${s.clipping_pct >= 1 ? `<br><span class="warn">${esc(t("clipped"))} ${s.clipping_pct.toFixed(1)}%</span>` : ""}</td>
         <td>${esc(s.dtmf_events.join(""))}</td></tr>`
       )
-      .join("")}</tbody></table>
+      .join("")}</tbody></table></div>
     <div class="rtp-player" id="rtp-player" hidden></div>
     ${streams.filter((s) => s.series && s.series.length > 1).map(qualityChart).join("")}
     ${jitterBufferTable(streams)}
@@ -2246,6 +2400,8 @@ function renderLog() {
 function showTab(name) {
   $$(".tabs [role=tab]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.tab === name)));
   $$(".tab-body").forEach((p) => (p.hidden = p.id !== `tab-${name}`));
+  S.tab = name;
+  if (S.page === "analysis") syncUrl(false);
 }
 
 // ---------- AI ----------
@@ -2476,7 +2632,7 @@ function bindDock() {
   $("#dock-ctx").addEventListener("change", (e) => {
     DOCK.ctx = e.target.value;
   });
-  $("#dock-ctx").addEventListener("focus", () => {
+  $("#dock-ctx").addEventListener("mousedown", () => {
     const keep = DOCK.ctx;
     renderDockContexts();
     if (keep) $("#dock-ctx").value = keep;
@@ -2609,8 +2765,15 @@ function bindSplitters() {
 }
 
 function bindAnalysis() {
-  $("#file").addEventListener("change", (e) => e.target.files[0] && loadFile(e.target.files[0]));
+  $("#file-btn").addEventListener("click", () => $("#file").click());
+  $("#file").addEventListener("change", (e) => {
+    if (e.target.files[0]) loadFile(e.target.files[0]);
+    e.target.value = ""; // the same file can be opened again
+  });
+  // Drops of files anywhere open a capture; text dropped into a field is left alone.
+  const fileDrop = (e) => e.dataTransfer && [...e.dataTransfer.types].includes("Files") && !e.target.closest("input, textarea");
   document.addEventListener("dragover", (e) => {
+    if (!fileDrop(e)) return;
     e.preventDefault();
     document.body.classList.add("dragging");
   });
@@ -2618,21 +2781,35 @@ function bindAnalysis() {
     if (e.target === document.documentElement || !e.relatedTarget) document.body.classList.remove("dragging");
   });
   document.addEventListener("drop", (e) => {
-    e.preventDefault();
     document.body.classList.remove("dragging");
+    if (!fileDrop(e)) return;
+    e.preventDefault();
     const f = e.dataTransfer.files[0];
     if (f) loadFile(f);
   });
-  $$(".menu > .btn").forEach((b) =>
+  const closeMenus = () => $$(".menu").forEach((x) => {
+    x.classList.remove("open");
+    const b = x.querySelector(":scope > button");
+    if (b) b.setAttribute("aria-expanded", "false");
+  });
+  $$(".menu > button").forEach((b) =>
     b.addEventListener("click", (e) => {
       e.stopPropagation();
       const m = b.parentElement;
       const open = !m.classList.contains("open");
-      $$(".menu").forEach((x) => x.classList.remove("open"));
+      closeMenus();
       m.classList.toggle("open", open);
+      b.setAttribute("aria-expanded", String(open));
+      // Focus moves into the menu so the keyboard can use it.
+      if (open) {
+        const first = m.querySelector(".menu-list button, .menu-list input");
+        if (first) first.focus();
+      }
     })
   );
-  document.addEventListener("click", () => $$(".menu").forEach((x) => x.classList.remove("open")));
+  // The view menu holds controls, not one-shot items: clicks inside keep it open.
+  $$(".view-menu").forEach((m) => m.addEventListener("click", (e) => e.stopPropagation()));
+  document.addEventListener("click", closeMenus);
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") $$(".menu").forEach((x) => x.classList.remove("open"));
   });
@@ -2687,13 +2864,15 @@ function bindAnalysis() {
       if (!S.report) return;
       renderCalls();
       markLadderMatches();
-      // Keep a dialog on screen that matches.
-      const hits = anMatches();
-      if (hits && S.call != null && !S.report.calls[S.call].messages.some((i) => hits.has(i))) {
-        const first = S.report.calls.find((c) => c.messages.some((i) => hits.has(i)));
-        if (first) selectCall(first.index);
-      }
     }, 200);
+  });
+  // Enter jumps to the first dialog that matches; typing alone never moves the ladder.
+  $("#an-filter").addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || !S.report) return;
+    const hits = anMatches();
+    if (!hits) return;
+    const first = S.report.calls.find((c) => c.messages.some((i) => hits.has(i)));
+    if (first) selectCall(first.index, true);
   });
   $("#an-live-stop").addEventListener("click", stopLive);
   $("#calls-clear").addEventListener("click", () => {
@@ -2733,6 +2912,7 @@ function bindAnalysis() {
     }
   });
   $$(".tabs [role=tab]").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
+  tablistKeys($(".tabs"));
   $$("[data-export]").forEach((b) =>
     b.addEventListener("click", async () => {
       const kind = b.dataset.export;
@@ -3448,6 +3628,13 @@ async function runProvisionFetch() {
 }
 
 async function settingsOpen() {
+  // Unsaved edits survive leaving and coming back; a fresh copy is only
+  // fetched when there is nothing pending.
+  if (SET.dirty && SET.cfg) {
+    renderSetNav();
+    renderSetBody();
+    return;
+  }
   SET.dirty = false;
   try {
     SET.cfg = await S.ctl.getConfig();
@@ -3514,7 +3701,7 @@ async function renderSetBody() {
       <div class="row"><button type="button" class="btn small" id="acc-prov">${esc(t("Provision"))}</button><button type="button" class="btn small" id="acc-dup">${esc(t("Duplicate"))}</button><button type="button" class="btn small danger" id="acc-del">${esc(t("Delete"))}</button></div>
     </div>
     ${native ? "" : `<div class="notice">${esc(t("The browser can only talk SIP over WebSocket (wss://, or ws:// on a local network): your PBX or SBC needs a WebSocket listener, such as Asterisk's transport-wss, FreeSWITCH's wss-binding or an SBC with WebRTC. For plain SIP over UDP, TCP or TLS, use the desktop app."))} <a href="https://github.com/igtoth/sidetone#downloads" target="_blank" rel="noopener">${esc(t("Download the desktop app"))}</a></div>`}
-    <div class="seg" role="tablist">${tabs.map(([n], i) => `<button type="button" role="tab" data-acctab="${i}" aria-selected="${i === tabIdx}">${esc(n)}</button>`).join("")}</div>
+    <div class="seg nav" role="tablist" id="acc-tabs">${tabs.map(([n], i) => `<button type="button" role="tab" data-acctab="${i}" aria-selected="${i === tabIdx}">${esc(n)}</button>`).join("")}</div>
     <form class="set-form" id="acc-form" autocomplete="off">
       <div class="fields">${tabIdx === 0 ? `<div class="fld"><span>${esc(t("Provisioning URL"))}</span><input readonly class="readonly" value="${esc(provisionUrlDisplay(native ? acc.provision_url : acc.provisionUrl))}"></div>` : ""}${fields.map((f, i) => fieldHtml(f, get(acc, f[0]), `af-${i}`)).join("")}</div>
       ${native && tabs[tabIdx][0] === "Advanced SIP" ? `<h3>What an INVITE from this account looks like</h3><pre class="sipmsg preview" id="inv-preview"></pre>` : ""}
@@ -3556,11 +3743,14 @@ async function renderSetBody() {
       markSetDirty();
     }
   });
+  if ($("#acc-tabs")) tablistKeys($("#acc-tabs"));
   $$("[data-acctab]").forEach((b) =>
-    b.addEventListener("click", () => {
+    b.addEventListener("click", async () => {
       collect();
       SET.accTab = +b.dataset.acctab;
-      renderSetBody();
+      await renderSetBody();
+      const again = $(`[data-acctab="${SET.accTab}"]`);
+      if (again) again.focus();
     })
   );
   form.addEventListener("submit", async (e) => {
@@ -3586,6 +3776,7 @@ async function renderSetBody() {
     await saveAccounts();
   });
   $("#acc-del").addEventListener("click", async () => {
+    if (!confirm(`${t("Delete this account?")} ${accLabel(acc) || acc.id}`)) return;
     SET.cfg.accounts = SET.cfg.accounts.filter((a) => a.id !== acc.id);
     SET.accId = SET.cfg.accounts.length ? SET.cfg.accounts[0].id : null;
     await saveAccounts();
@@ -3700,7 +3891,11 @@ async function saveAccounts() {
     renderSetBody();
     return true;
   } catch (e) {
-    toast(`Not saved: ${e.message || e}`, 5000);
+    const d = $("#acc-dirty");
+    if (d) {
+      d.textContent = `${t("Not saved")}: ${e.message || e}`;
+      d.classList.add("err");
+    } else toast(`Not saved: ${e.message || e}`, 5000);
     return false;
   }
 }
@@ -3919,7 +4114,9 @@ async function renderGlobal(section) {
         <label class="fld">Language<select id="lang-sel">${LANGS.map(([c, n]) => `<option value="${c}" ${c === currentLang() ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></label>
       </div>
       <p class="hint">SIP messages, traces and analyzer findings stay in English, as they appear on the wire and in RFCs.</p></div>`;
-    $("#lang-sel").addEventListener("change", (e) => setLang(e.target.value));
+    $("#lang-sel").addEventListener("change", (e) => {
+      if (!setLang(e.target.value, langGuard)) e.target.value = currentLang();
+    });
   } else if (section === "keys") {
     const rows = [
       ["Enter", "Call the number in the dial field, or answer the selected incoming call"],
@@ -3998,7 +4195,7 @@ function renderBackup(body) {
       </section>
       <section class="card" style="margin-top:14px"><h2>${esc(t("Import"))}</h2>
         <p class="muted">${esc(t("Opens a file exported by Sidetone. Accounts from the desktop app and from the browser are converted to this version."))}</p>
-        <label class="btn small">${esc(t("Choose file"))}<input type="file" id="bk-file" accept=".json,application/json" hidden></label>
+        <button type="button" class="btn small" id="bk-file-btn">${esc(t("Choose file"))}</button><input type="file" id="bk-file" accept=".json,application/json" class="sr-only" tabindex="-1" aria-hidden="true">
         <div class="row bk-url"><input id="bk-url" placeholder="https://provisioning.example.com/sidetone/2001.json" spellcheck="false" aria-label="${esc(t("Provisioning URL"))}"><button type="button" class="btn small" id="bk-fetch">${esc(t("Load from URL"))}</button></div>
         <p class="hint">${esc(t("Provisioning: a sidetone-config file served over HTTP(S), e.g. one per user from your provisioning server. The command line takes the same URL: sidetone config import https://..."))}</p>
         <div id="bk-preview"></div>
@@ -4024,6 +4221,7 @@ function renderBackup(body) {
       $("#bk-preview").innerHTML = `<p class="bad">${esc(err.message || String(err))}</p>`;
     }
   });
+  $("#bk-file-btn").addEventListener("click", () => $("#bk-file").click());
   $("#bk-file").addEventListener("change", async (e) => {
     const f = e.target.files[0];
     if (!f) return;
@@ -4088,21 +4286,27 @@ function renderBackup(body) {
 }
 
 function bindSettings() {
+  const leaveEdits = () => !SET.dirty || confirm(t("Discard the unsaved changes?"));
   $("#acc-list").addEventListener("click", (e) => {
     const b = e.target.closest("[data-acc]");
-    if (!b) return;
+    if (!b || b.dataset.acc === SET.accId) return;
+    if (!leaveEdits()) return;
     SET.accId = b.dataset.acc;
     SET.section = null;
     SET.dirty = false;
     renderSetNav();
     renderSetBody();
+    syncUrl(true);
   });
   $$(".set-nav [data-set]").forEach((b) =>
     b.addEventListener("click", () => {
+      if (b.dataset.set === SET.section) return;
+      if (!leaveEdits()) return;
       SET.section = b.dataset.set;
       SET.dirty = false;
       renderSetNav();
       renderSetBody();
+      syncUrl(true);
     })
   );
   $("#acc-add").addEventListener("click", addAccount);
@@ -4123,29 +4327,28 @@ function bindSettings() {
 
 function bindChrome() {
   $$(".ws-tabs [data-ws]").forEach((b) => b.addEventListener("click", () => showWs(b.dataset.ws)));
-  const modes = ["system", "light", "dark"];
+  tablistKeys($(".ws-tabs"));
   const applyTheme = (m) => {
     if (m === "system") document.documentElement.removeAttribute("data-theme");
     else document.documentElement.dataset.theme = m;
-    $("#theme").textContent = { system: "Theme: auto", light: "Theme: light", dark: "Theme: dark" }[m];
+    $$("[data-theme]", $(".view-menu")).forEach((b) => b.setAttribute("aria-selected", String(b.dataset.theme === m)));
   };
-  let mode = store.get("sidetone.theme", "system");
-  applyTheme(mode);
-  $("#theme").addEventListener("click", () => {
-    mode = modes[(modes.indexOf(mode) + 1) % modes.length];
-    store.set("sidetone.theme", mode);
-    applyTheme(mode);
-  });
+  applyTheme(store.get("sidetone.theme", "system"));
+  $$("[data-theme]", $(".view-menu")).forEach((b) =>
+    b.addEventListener("click", () => {
+      store.set("sidetone.theme", b.dataset.theme);
+      applyTheme(b.dataset.theme);
+    })
+  );
   // Explanations everywhere, or just the evidence for people who know it by heart.
   const applyExplain = (on) => {
     document.body.classList.toggle("no-explain", !on);
-    $("#explain-toggle").setAttribute("aria-pressed", String(on));
-    $("#explain-toggle").textContent = t(on ? "Explanations: on" : "Explanations: off");
+    $("#explain-toggle").checked = on;
     if (!on && $('.tabs [data-tab="explain"]').getAttribute("aria-selected") === "true") showTab("findings");
   };
   applyExplain(explainOn());
-  $("#explain-toggle").addEventListener("click", () => {
-    const on = !explainOn();
+  $("#explain-toggle").addEventListener("change", (e) => {
+    const on = e.target.checked;
     store.set("sidetone.explain", on);
     applyExplain(on);
     if (S.report && S.msg != null) selectMessage(S.msg, false);
@@ -4154,11 +4357,12 @@ function bindChrome() {
   // In the desktop app, phone only also shrinks the window to the phone panel.
   const winCtl = S.be.kind === "http" && (S.be.features || []).includes("window");
   const applyMode = (m) => {
+    S.applyMode = applyMode;
     document.body.classList.toggle("phone-mode", m === "phone");
     document.body.classList.toggle("compact", winCtl && m === "phone");
     document.body.classList.remove("compact-open");
     if (winCtl) S.be.setWindow(m === "phone" ? "phone" : "full").catch(() => {});
-    $("#mode").textContent = t(m === "phone" ? "Mode: phone only" : "Mode: troubleshooting");
+    $$("[data-mode]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.mode === m)));
     if (m === "phone" && ["trace", "analysis", "diag"].includes(S.page)) showWs("calls");
   };
   applyMode(store.get("sidetone.mode", "troubleshoot"));
@@ -4173,12 +4377,15 @@ function bindChrome() {
     store.set("sidetone.mode", "troubleshoot");
     applyMode("troubleshoot");
   });
-  $("#mode").addEventListener("click", () => {
-    const m = store.get("sidetone.mode", "troubleshoot") === "phone" ? "troubleshoot" : "phone";
-    store.set("sidetone.mode", m);
-    applyMode(m);
-    toast(t(m === "phone" ? "Phone only: the trace, analysis and diagnostics are hidden. Click Mode to bring them back." : "Troubleshooting: trace, analysis and diagnostics are back."), 4000);
-  });
+  $$("[data-mode]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const m = b.dataset.mode;
+      if (m === store.get("sidetone.mode", "troubleshoot")) return;
+      store.set("sidetone.mode", m);
+      applyMode(m);
+      toast(t(m === "phone" ? "Phone only: the trace, analysis and diagnostics are hidden." : "Troubleshooting: trace, analysis and diagnostics are back."), 4000);
+    })
+  );
   $("#st-err").addEventListener("click", () => {
     S.errors = 0;
     renderStatus();
@@ -4188,19 +4395,24 @@ function bindChrome() {
     S.events = [];
     renderEvents();
   });
-  $("#hist-filter").addEventListener("input", renderHistory);
-  for (const id of ["#hist-from", "#hist-to", "#hist-dir", "#hist-res"]) $(id).addEventListener("change", renderHistory);
+  let histT = 0;
+  $("#hist-filter").addEventListener("input", () => {
+    clearTimeout(histT);
+    histT = setTimeout(renderHistoryRows, 150);
+  });
+  for (const id of ["#hist-from", "#hist-to", "#hist-dir", "#hist-res"]) $(id).addEventListener("change", renderHistoryRows);
   $("#hist-reset").addEventListener("click", () => {
     for (const id of ["#hist-filter", "#hist-from", "#hist-to", "#hist-dir", "#hist-res"]) $(id).value = "";
-    renderHistory();
+    renderHistoryRows();
   });
   $("#hist-all").addEventListener("change", (e) => {
     for (const h of historyRows()) e.target.checked ? HSEL.add(h.call_id) : HSEL.delete(h.call_id);
-    renderHistory();
+    renderHistoryRows();
   });
   $("#hist-del").addEventListener("click", async () => {
     if (!HSEL.size) return;
     const n = HSEL.size;
+    if (!confirm(`${t("Delete selected")} (${n})?`)) return;
     await S.ctl.deleteHistory([...HSEL]);
     HSEL.clear();
     toast(`${n} ${t("calls deleted from the history")}`);
@@ -4212,6 +4424,7 @@ function bindChrome() {
     renderActive();
   });
   $("#hist-clear").addEventListener("click", async () => {
+    if (!confirm(t("Clear the whole call history? Saved captures of these calls are deleted too."))) return;
     await S.ctl.clearHistory();
     renderHistory();
   });
@@ -4262,8 +4475,37 @@ async function main() {
   const params = new URLSearchParams(location.search);
   const want = params.get("sample");
   const noAccounts = S.st && !S.st.accounts.length;
-  if (want) await open(want);
-  else showWs(params.get("page") || (noAccounts ? "settings" : store.get("sidetone.page", "calls")));
+  const set = params.get("set");
+  if (set) {
+    if (set.startsWith("acc:")) SET.accId = set.slice(4);
+    else SET.section = set;
+  }
+  if (params.get("tab")) S.tab = params.get("tab");
+  if (want) {
+    // A sample link opens once; the URL then describes the page, not the sample.
+    await open(want);
+    if (S.tab) showTab(S.tab);
+  } else showWs(params.get("page") || (noAccounts ? "settings" : store.get("sidetone.page", "calls")), false);
+  window.addEventListener("popstate", () => {
+    const q = new URLSearchParams(location.search);
+    const set = q.get("set");
+    if (set && set.startsWith("acc:")) {
+      SET.accId = set.slice(4);
+      SET.section = null;
+    } else if (set) SET.section = set;
+    else if (q.get("page") === "settings") {
+      SET.section = null;
+      SET.accId = null;
+    }
+    if (q.get("tab") && S.report) showTab(q.get("tab"));
+    showWs(q.get("page") || "calls", false);
+  });
+  window.addEventListener("beforeunload", (e) => {
+    if (SET.dirty) {
+      e.preventDefault();
+      e.returnValue = "";
+    }
+  });
 }
 
 main().catch((e) => {
